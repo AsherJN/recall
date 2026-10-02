@@ -1,0 +1,8 @@
+* text=auto
+*.py text eol=lf
+*.command text eol=lf
+*.sh text eol=lf
+# Preserve patch bytes so the recorded build hashes remain meaningful.
+*.patch -text -whitespace
+# Keep third-party license text byte-for-byte, including upstream whitespace.
+licenses/** -text -whitespace

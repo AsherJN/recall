@@ -1,0 +1,28 @@
+Fix DXMT shader lifetime and variant lookup overhead
+
+Free reflection metadata after early shader IR release, reject missing shader
+handles before conversion, and release compiled bitcode on Metal library errors.
+Join compilation workers before destroying their cached shader dependencies.
+Add opt-in compiler thread and priority settings while preserving defaults.
+
+Hash all shader variant equality fields instead of only their variant type,
+eliminating a degenerate lookup bucket without hashing structure padding.
+Use scoped ownership for converter error objects and transfer ownership only
+on error, preserving the exported API and eliminating success-path leaks.
+
+Validate actual destructor and compile-work method bodies in a standalone native
+regression harness: 13 cases pass; original source fails five regression cases.
+Validate every variant type and equality field, synthetic lookup comparisons,
+and complete compile API ownership paths with deterministic LLVM stubs.
+No installed runtime binaries changed; gameplay benefit remains unverified.
+
+Release each task's parsed shader IR immediately after AIR conversion, before
+Metal library construction and cache I/O. Persist only successfully resolved
+Metal functions. Add opt-in bounded digest-keyed compile/cache/timing telemetry
+and regression checks for early release, all trace exits, and disabled logging.
+
+Measure downstream Metal pipeline creation and existing first-use waits with
+per-pipeline identities, suppress short-wait rows, and report bounded stream
+counts/drops. Guard trace shutdown so late worker calls cannot access destroyed
+synchronization objects or closed files. Validate actual pipeline method scopes,
+ready/error paths, event caps, aggregate accounting, and concurrent shutdown.

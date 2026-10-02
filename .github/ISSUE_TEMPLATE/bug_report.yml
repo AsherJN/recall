@@ -1,0 +1,65 @@
+name: Report a bug
+description: Something in Recall, Battle.net or the game doesn't work the way it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Many problems have a quick fix in [If something goes wrong](https://github.com/AsherJN/recall/blob/main/docs/SUPPORT.md#if-something-goes-wrong).
+
+        Please take account names and personal file paths out of anything you paste. [What not to share](https://github.com/AsherJN/recall/blob/main/docs/SUPPORT.md#what-not-to-share) lists the rest.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+      placeholder: I pressed Play, Overwatch opened to a black screen, and then...
+    validations:
+      required: true
+  - type: dropdown
+    id: when
+    attributes:
+      label: When did it happen?
+      options:
+        - During setup
+        - Opening Battle.net
+        - Starting Overwatch
+        - During a match
+        - After Cmd-Tab or a display change
+        - Updating or uninstalling Recall
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Recall version
+      description: Recall › About Recall, or the line above the buttons at the bottom of the app window.
+      placeholder: 1.0.0 (build 25)
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac, chip and memory
+      placeholder: MacBook Pro 14-inch, M1 Pro, 16 GB
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: macOS Tahoe 26.6.2
+    validations:
+      required: true
+  - type: input
+    id: display
+    attributes:
+      label: Display and game resolution
+      placeholder: Built-in display, 1920 × 1200
+  - type: textarea
+    id: report
+    attributes:
+      label: Support report
+      description: Optional. In Recall, open Help & FAQ, save a support report and paste it here. Review it and remove any personal details before posting.
+      render: json

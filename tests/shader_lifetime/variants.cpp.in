@@ -1,0 +1,123 @@
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <iostream>
+#include <new>
+#include <stdexcept>
+#include <type_traits>
+#include <unordered_map>
+#include <variant>
+#include <vector>
+
+struct InputLayout {};
+struct Shader {};
+using ManagedInputLayout = InputLayout *;
+using ManagedShader = Shader *;
+enum SM50_INDEX_BUFFER_FORMAT { SM50_INDEX_BUFFER_FORMAT_NONE, SM50_INDEX_BUFFER_FORMAT_UINT16, SM50_INDEX_BUFFER_FORMAT_UINT32 };
+namespace dxmt {
+@VARIANT_DECLARATIONS@
+}
+@VARIANT_HASH@
+
+static void check(bool condition, const char *message) {
+  if (!condition) throw std::runtime_error(message);
+}
+using namespace dxmt;
+static InputLayout layouts[2];
+static Shader shaders[2];
+static std::hash<ShaderVariant> variant_hash;
+
+template<class T, class Initialize>
+static T check_padding(Initialize initialize) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  alignas(T) unsigned char first[sizeof(T)], second[sizeof(T)];
+  std::memset(first, 0x55, sizeof(first));
+  std::memset(second, 0xaa, sizeof(second));
+  T *a = new(first) T;
+  T *b = new(second) T;
+  initialize(*a);
+  initialize(*b);
+  check(*a == *b, "fixture fields differ");
+  check(variant_hash(ShaderVariant{*a}) == variant_hash(ShaderVariant{*b}), "equal fields with different padding hash differently");
+  return *a;
+}
+template<class T, class Change>
+static void check_field(T original, Change change) {
+  T modified = original;
+  change(modified);
+  check(!(original == modified), "mutation did not change an equality field");
+  check(variant_hash(ShaderVariant{original}) != variant_hash(ShaderVariant{modified}), "fixture equality field does not affect hash");
+}
+
+static void test_fields() {
+  auto vs = check_padding<ShaderVariantVertex>([](auto &v) { v.input_layout_handle = &layouts[0]; v.gs_passthrough = 3; v.rasterization_disabled = false; });
+  check_field(vs, [](auto &v) { v.input_layout_handle = &layouts[1]; });
+  check_field(vs, [](auto &v) { v.gs_passthrough = 17; });
+  check_field(vs, [](auto &v) { v.rasterization_disabled = true; });
+  auto ps = check_padding<ShaderVariantPixel>([](auto &v) { v.sample_mask = 7; v.dual_source_blending = false; v.disable_depth_output = false; v.unorm_output_reg_mask = 9; });
+  check_field(ps, [](auto &v) { v.sample_mask = 17; });
+  check_field(ps, [](auto &v) { v.dual_source_blending = true; });
+  check_field(ps, [](auto &v) { v.disable_depth_output = true; });
+  check_field(ps, [](auto &v) { v.unorm_output_reg_mask = 17; });
+  auto hs = check_padding<ShaderVariantTessellationVertexHull>([](auto &v) { v.input_layout_handle = &layouts[0]; v.vertex_shader_handle = &shaders[0]; v.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_UINT16; v.max_potential_tess_factor = 4; });
+  check_field(hs, [](auto &v) { v.input_layout_handle = &layouts[1]; });
+  check_field(hs, [](auto &v) { v.vertex_shader_handle = &shaders[1]; });
+  check_field(hs, [](auto &v) { v.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_UINT32; });
+  check_field(hs, [](auto &v) { v.max_potential_tess_factor = 17; });
+  auto ds = check_padding<ShaderVariantTessellationDomain>([](auto &v) { v.hull_shader_handle = &shaders[0]; v.gs_passthrough = 3; v.max_potential_tess_factor = 4; v.rasterization_disabled = false; });
+  check_field(ds, [](auto &v) { v.hull_shader_handle = &shaders[1]; });
+  check_field(ds, [](auto &v) { v.gs_passthrough = 17; });
+  check_field(ds, [](auto &v) { v.max_potential_tess_factor = 17; });
+  check_field(ds, [](auto &v) { v.rasterization_disabled = true; });
+  auto so = check_padding<ShaderVariantVertexStreamOutput>([](auto &v) { v.input_layout_handle = &layouts[0]; v.stream_output_layout_handle = 8; });
+  check_field(so, [](auto &v) { v.input_layout_handle = &layouts[1]; });
+  check_field(so, [](auto &v) { v.stream_output_layout_handle = 17; });
+  auto gv = check_padding<ShaderVariantGeometryVertex>([](auto &v) { v.input_layout_handle = &layouts[0]; v.geometry_shader_handle = &shaders[0]; v.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_UINT16; v.strip_topology = false; });
+  check_field(gv, [](auto &v) { v.input_layout_handle = &layouts[1]; });
+  check_field(gv, [](auto &v) { v.geometry_shader_handle = &shaders[1]; });
+  check_field(gv, [](auto &v) { v.index_buffer_format = SM50_INDEX_BUFFER_FORMAT_UINT32; });
+  check_field(gv, [](auto &v) { v.strip_topology = true; });
+  auto gs = check_padding<ShaderVariantGeometry>([](auto &v) { v.vertex_shader_handle = &shaders[0]; v.strip_topology = false; });
+  check_field(gs, [](auto &v) { v.vertex_shader_handle = &shaders[1]; });
+  check_field(gs, [](auto &v) { v.strip_topology = true; });
+  check_padding<ShaderVariantDefault>([](auto &) {});
+  std::cout << "PASS eight variant types: equal fields ignore padding; all 23 equality fields affect fixture hashes\n";
+}
+
+struct OldHash { size_t operator()(const ShaderVariant &v) const { return v.index(); } };
+struct CountingEqual {
+  uint64_t *comparisons;
+  bool operator()(const ShaderVariant &a, const ShaderVariant &b) const { ++*comparisons; return a == b; }
+};
+struct Result { uint64_t comparisons; size_t maximum_bucket; };
+template<class Hasher>
+static Result measure(const char *label, const std::vector<ShaderVariant> &keys) {
+  uint64_t comparisons = 0;
+  std::unordered_map<ShaderVariant, size_t, Hasher, CountingEqual> entries(0, Hasher{}, CountingEqual{&comparisons});
+  entries.reserve(keys.size());
+  for (size_t i = 0; i < keys.size(); ++i) entries.emplace(keys[i], i);
+  size_t maximum_bucket = 0;
+  for (size_t i = 0; i < entries.bucket_count(); ++i)
+    maximum_bucket = std::max(maximum_bucket, entries.bucket_size(i));
+  comparisons = 0;
+  const auto begin = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < keys.size(); ++i) check(entries.at(keys[i]) == i, "lookup returned incorrect value");
+  const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count();
+  std::cout << label << ": " << keys.size() << " lookups, " << comparisons << " equality comparisons, max bucket " << maximum_bucket << ", " << elapsed << " us\n";
+  return {comparisons, maximum_bucket};
+}
+
+int main() {
+  try {
+    test_fields();
+    std::vector<ShaderVariant> keys;
+    for (uint32_t i = 0; i < 8192; ++i) keys.emplace_back(ShaderVariantPixel{i, false, false, 0});
+    const auto before = measure<OldHash>("Original type-only hash", keys);
+    const auto after = measure<std::hash<ShaderVariant>>("Patched field hash", keys);
+    check(after.comparisons * 100 < before.comparisons, "degenerate lookup chain was not eliminated");
+    check(after.maximum_bucket < 32, "field hash still has excessive collisions for fixture");
+    std::cout << "PASS synthetic lookup improvement; this does not measure game frame time\n";
+    return 0;
+  } catch (const std::exception &error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
+}

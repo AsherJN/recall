@@ -1,0 +1,16 @@
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -2081,7 +2081,11 @@
+                                         ULONG *context, ULONG *ret_size )
+ {
+     unsigned int status, i, count, total_len, pos, used_size, used_count, strpool_head;
+-    ULONG index = restart ? 0 : *context;
++    /* The Windows syscall ABI leaves the upper bytes of BOOLEAN argument
++     * slots unspecified. Darwin's C ABI may assume they are zero-extended.
++     * Force a byte store/load before testing this flag across that boundary. */
++    volatile BOOLEAN restart_byte = restart;
++    ULONG index = restart_byte ? 0 : *context;
+     struct directory_entry *entries;
+ 
+     if (!(entries = malloc( size ))) return STATUS_NO_MEMORY;

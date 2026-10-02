@@ -1,0 +1,72 @@
+name: Share how it runs on your Mac
+description: Tell other players how Overwatch plays with Recall on your Mac.
+title: "How it runs: "
+labels: ["performance report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing. Reports from different Macs help the next player know what to expect before they download.
+  - type: input
+    id: mac
+    attributes:
+      label: Mac, chip and memory
+      placeholder: MacBook Air 13-inch, M2, 16 GB
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: macOS Tahoe 26.6.2
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Recall version
+      placeholder: 1.0.0 (build 25)
+    validations:
+      required: true
+  - type: input
+    id: display
+    attributes:
+      label: Display and game resolution
+      placeholder: Built-in display, 1920 × 1200
+    validations:
+      required: true
+  - type: dropdown
+    id: preset
+    attributes:
+      label: Graphics quality preset
+      options:
+        - Low
+        - Medium
+        - High
+        - Ultra
+        - Epic
+        - Custom
+    validations:
+      required: true
+  - type: input
+    id: fps
+    attributes:
+      label: Typical FPS in matches
+      description: Overwatch's performance stats can show it, if you have them turned on.
+      placeholder: 90–105
+  - type: dropdown
+    id: feel
+    attributes:
+      label: How does it play?
+      options:
+        - Smooth, as good as I hoped
+        - Good, with the occasional stutter
+        - Playable, but rough
+        - Not playable
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Stutters, crashes, which modes you played, how long you played.

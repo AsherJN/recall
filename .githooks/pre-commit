@@ -1,0 +1,2 @@
+#!/bin/sh
+exec python3 scripts/audit_public_source.py --staged

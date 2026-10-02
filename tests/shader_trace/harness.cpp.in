@@ -1,0 +1,77 @@
+#include <cassert>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <iostream>
+#include <string>
+#include <thread>
+#include <vector>
+static unsigned GetCurrentProcessId() { return 42; }
+namespace dxmt { struct Sha1Digest { std::string string() const { return std::string(40, '0'); } }; }
+@SHADER_TRACE@
+using namespace dxmt;
+using namespace std::chrono_literals;
+static void require(bool value, const char *message) {
+  if (!value) { std::cerr << "FAIL " << message << '\n'; std::abort(); }
+}
+static void sample(unsigned id) {
+  ShaderTraceSink::instance().write("0,sha,var,missing,ready,0,0,0,0,0,0,0,0\n");
+  ShaderTraceSink::instance().pipeline(1, id, "graphics", "createMetal", 1, false);
+}
+int main(int argc, char **argv) {
+  require(argc == 2, "mode required");
+  std::string mode = argv[1];
+  auto &sink = ShaderTraceSink::instance();
+  if (mode == "disabled") {
+    require(!sink.enabled(), "quiet tracing enabled");
+    for (unsigned i = 0; i < 100; ++i) sample(i);
+    sink.shutdown();
+    return 0;
+  }
+  require(sink.enabled(), "trace did not start");
+  if (mode == "abrupt") {
+    sample(1);
+    std::this_thread::sleep_for(700ms);
+    sample(2); // Sparse activity must be flushed again without a full stdio buffer.
+    {
+      PipelineOperationTrace trace(3, "graphics", true);
+      auto ready = ShaderCompileTrace::monotonic_now();
+      std::this_thread::sleep_for(2ms);
+      trace.finish(ready);
+    }
+    std::this_thread::sleep_for(700ms);
+    std::_Exit(0); // Reproduce Wine/process termination bypassing C++ atexit.
+  }
+  if (mode == "blocked") {
+    auto start = std::chrono::steady_clock::now();
+    for (unsigned i = 0; i < 100005; ++i) sample(i + 1);
+    auto enqueue_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    require(enqueue_ms < 3000, "producers blocked behind filesystem I/O");
+    start = std::chrono::steady_clock::now();
+    sink.shutdown();
+    auto shutdown_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    require(shutdown_ms >= 400 && shutdown_ms < 2000, "blocked shutdown was not bounded");
+    std::cout << "UNBLOCK " << enqueue_ms << ' ' << shutdown_ms << std::endl;
+    std::string released;
+    std::getline(std::cin, released); // Parent now drains the previously blocked FIFO.
+    std::this_thread::sleep_for(300ms);
+    sink.shutdown();
+  } else if (mode == "concurrent") {
+    std::vector<std::thread> producers;
+    for (unsigned i = 0; i < 8; ++i) producers.emplace_back([i] {
+      for (unsigned j = 0; j < 2000; ++j) sample(i * 2000 + j + 1);
+    });
+    for (auto &producer : producers) producer.join();
+    sink.shutdown();
+  } else if (mode == "atexit") {
+    sample(1);
+    return 0; // Normal process teardown should drain queued rows.
+  } else {
+    require(false, "unknown mode");
+  }
+  require(!sink.enabled(), "shutdown did not stop admission");
+  sample(999999); // Late device/worker destruction must be harmless and ignored.
+  sink.shutdown();
+  std::cout << "PASS " << mode << '\n';
+}

@@ -1,0 +1,13 @@
+Move optional DXMT shader cache persistence off compilation workers
+
+Queue cache writes on a bounded serial utility queue with copied keys and
+retained shader data. Batch up to 32 inserts with an idle commit, drop optional
+writes rather than blocking when full or SQLite is busy, and clear static
+bindings before releasing backing data. Preserve the existing cache schema.
+
+Validate the actual cache.c implementation in isolated native ASan/UBSan and
+x86_64 Rosetta harnesses covering concurrency, bounded memory, caller-buffer
+lifetimes, SQLite contention, deallocation on its own queue, abrupt-exit
+recovery, and pending work after dlclose of the Objective-C MH_DYLIB.
+
+No deployed runtime changed; gameplay improvement remains unverified.

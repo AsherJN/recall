@@ -1,0 +1,17 @@
+Keep measured Overwatch sessions observable across game restarts
+
+Follow the exact Wine bottle for up to six hours with per-prefix collector
+leases, confirmed startup, process start identities, UTC/monotonic timestamps,
+bounded rotating resources, and periodic session status. Preserve legacy
+first-game capture modes and avoid recording process arguments or environment.
+
+Add explicit phase markers and rotated-artifact discovery. Integrate offline
+pipeline preparation before Battle.net launch with safe failure handling and
+expensive-recipe priority, while preserving preparation-disable controls.
+
+Validate lifecycle, attribution, rotation, leases, launch ordering, and marker
+behavior with 40 focused tests and a bounded read-only macOS resource sample.
+Retry transient startup admission queries while rejecting changed process
+identities immediately, and disclose exact safe admission failure checks.
+Verify native pipeline diagnostic rotation using the final sanitized recorder
+probe, preserving recipe persistence and disclosing deliberate detail drops.

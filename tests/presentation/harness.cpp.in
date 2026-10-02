@@ -1,0 +1,112 @@
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <unistd.h>
+#include <vector>
+#include <sys/stat.h>
+#include "dxmt_frame_log.hpp"
+
+#define TRACE(...) ((void)0)
+inline std::atomic_uint64_t g_compiled_shader_variants{0};
+constexpr unsigned kCommandChunkCount = 32;
+void SharedEventListener_destroy(int) {}
+struct ThreadStub { void join() {} };
+struct ChunkStub { void reset() {} };
+using dxmt::FrameTelemetry;
+struct QueueHarness {
+  std::shared_ptr<FrameTelemetry> frame_trace_ = FrameTelemetry::acquire();
+  uint64_t frame_trace_owner_ = frame_trace_ ? frame_trace_->newOwner() : 0;
+  FrameTelemetry::Stamp frame_log_last_{};
+  uint64_t frame_log_compiles_ = 0, frame_count = 0;
+  std::atomic_bool stopped{false};
+  std::atomic_uint64_t ready_for_encode{1}, ready_for_commit{1};
+  int shared_event_listener = 0;
+  ThreadStub encodeThread, finishThread, event_listener_thread;
+  std::array<ChunkStub, kCommandChunkCount> chunks;
+  void FrameLogTick(int64_t latency_wait_us = 0, int64_t pacing_us = 0) @FRAME_LOG_TICK@
+  ~QueueHarness() @QUEUE_DESTRUCTOR@
+};
+void require(bool condition, const char *message) { if (!condition) throw std::runtime_error(message); }
+std::vector<std::string> fields(std::string line) {
+  std::stringstream stream(line); std::vector<std::string> result; std::string value;
+  while (std::getline(stream, value, ',')) result.push_back(value);
+  return result;
+}
+int main(int argc, char **argv) {
+  require(argc == 3, "expected output prefix/mode");
+  std::string prefix = argv[1], mode = argv[2];
+  std::string file = prefix + "-" + std::to_string(getpid()) + ".csv";
+  if (mode == "disabled") {
+    unsetenv("DXMT_FRAME_LOG"); QueueHarness q; q.FrameLogTick();
+    require(!q.frame_trace_, "disabled logger should allocate no worker"); return 0;
+  }
+  setenv("DXMT_FRAME_LOG", prefix.c_str(), 1);
+  if (mode == "blocked") {
+    require(mkfifo(file.c_str(), 0600) == 0, "create stalled-writer FIFO");
+    auto before = std::chrono::steady_clock::now();
+    {
+      QueueHarness q; q.frame_count = 1; q.FrameLogTick();
+      q.frame_count = 2; q.FrameLogTick();
+      auto producer_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - before).count();
+      require(producer_ms < 200, "producer must not wait for FIFO open");
+    }
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - before).count();
+    require(elapsed >= 450 && elapsed < 1500, "shutdown wait stays bounded");
+    // Release the stalled detached writer; its shared state survives the queue.
+    std::thread reader([&] { std::ifstream in(file); std::string line; while (std::getline(in, line)) {} });
+    reader.join();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  } else if (mode == "normal") {
+    g_compiled_shader_variants.store(1200);
+    {
+      QueueHarness q; q.frame_count = 1; q.FrameLogTick();
+      std::thread worker([] { g_compiled_shader_variants.fetch_add(3); }); worker.join();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      q.frame_count = 2; q.FrameLogTick(1234);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      q.frame_count = 3; q.FrameLogTick();
+      g_compiled_shader_variants.fetch_add(1); q.frame_count = 4; q.FrameLogTick();
+    }
+    std::ifstream in(file); require(in.good(), "normal file after shutdown");
+    std::string line; std::getline(in, line);
+    require(fields(line).size() == 11, "explicit schema 4 timestamps/counters/pacing");
+    std::array<uint64_t, 3> counts{3,0,1}; unsigned rows = 0;
+    while (std::getline(in, line)) {
+      auto v = fields(line); require(v.size() == 11 && v[0] == "4", "valid schema row");
+      require(rows < 3 && std::stoull(v[1]) == rows + 2, "current boundary");
+      require(std::stoull(v[3]) == counts[rows], "compile delta");
+      require(std::stoll(v[4]) > 0 && std::stoll(v[5]) > 0, "UTC and monotonic stamps");
+      require(std::stoll(v[7]) == (rows == 0 ? 1234 : 0), "local latency duration"); ++rows;
+    }
+    require(rows == 3, "drain short tail at shutdown");
+  } else if (mode == "rotation") {
+    auto trace = FrameTelemetry::acquire(); auto owner = trace->newOwner();
+    for (unsigned block = 0; block < 10; ++block) {
+      for (unsigned i = 0; i < 300; ++i) {
+        auto now = FrameTelemetry::stamp();
+        trace->push({now,0,owner,block*300+i,0,16667,0,0,FrameTelemetry::Boundary});
+        trace->push({now,0,owner,0,i,2300,0,0,FrameTelemetry::Encode});
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(125));
+    }
+    trace.reset();
+  } else if (mode == "overflow") {
+    auto trace = FrameTelemetry::acquire(); auto owner = trace->newOwner();
+    std::vector<std::thread> producers;
+    for (unsigned t = 0; t < 4; ++t) producers.emplace_back([&,t] {
+      for (unsigned i = 0; i < 10000; ++i) trace->push({FrameTelemetry::stamp(),0,owner,t*10000+i,0,55000,0,0,FrameTelemetry::Boundary});
+    });
+    for (auto &p : producers) p.join(); trace.reset();
+  } else if (mode == "missing") {
+    QueueHarness q; q.FrameLogTick(); q.frame_count = 2; q.FrameLogTick();
+  } else require(false, "unknown mode");
+  std::cout << getpid() << '\n';
+}

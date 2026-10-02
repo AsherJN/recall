@@ -1,0 +1,655 @@
+diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
+index ce6a702..e9357e1 100644
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -69,9 +69,20 @@
+     unsigned long long mac_moves, mac_move_ns, posted_absolute, posted_relative, dropped_after_warp;
+     unsigned long long warps, warp_ns, mouselook_moves, mouselook_posted, mouselook_enters, mouselook_exits;
+     unsigned long long clicks, switches, pointer_ignored, pointer_fallback;
++    unsigned long long activations, resigns, resyncs_skipped;
+     double mac_dx, mac_dy;
+ } cocoa_stats;
+ 
++/* Whether the next applicationDidBecomeActive: must re-synchronise Wine's
++ * display list (sendDisplaysChanged:TRUE).  macOS re-announces an application
++ * that is already active on every left click on its window (WindowManager's
++ * "activation ordering click"; in a 2026-09-30 match all 83 left clicks and no
++ * right or side-button clicks, with no resign in between), and each re-sync
++ * cost the game ~16 ms on the thread that owns its window.  The re-sync exists
++ * to catch display changes made while another application was active, so it
++ * is needed only after the application has actually resigned.  Main thread. */
++static BOOL activation_resync_needed = TRUE;
++
+ 
+ /* Follows Wine's cursor, as Wine clips it, for placing the pointer when
+  * mouselook ends.  Called with mouselook_lock held. */
+@@ -2016,6 +2027,7 @@ - (void) reportInputStats:(NSTimer*)timer
+ #define TAKE(field) wine.field = __atomic_exchange_n(&macdrv_input_stats.field, 0, __ATOMIC_RELAXED)
+         TAKE(moves_delivered); TAKE(deliver_ns); TAKE(setpos_calls); TAKE(setpos_fast); TAKE(setpos_ns);
+         TAKE(setpos_max_ns); TAKE(getpos_calls); TAKE(getpos_ns); TAKE(clip_calls);
++        TAKE(canvas_restores); TAKE(canvas_restores_suppressed); TAKE(canvas_restores_held); TAKE(canvas_fullscreen_held);
+ #undef TAKE
+         wine.consumer_tid = macdrv_input_stats.consumer_tid;
+         wine.setpos_tid = macdrv_input_stats.setpos_tid;
+@@ -2030,7 +2042,10 @@ - (void) reportInputStats:(NSTimer*)timer
+         if (!inputStatsFile ||
+             !([NSApp isActive] || cocoa_stats.mac_moves || cocoa_stats.clicks || cocoa_stats.warps ||
+               cocoa_stats.mouselook_enters || cocoa_stats.mouselook_exits || cocoa_stats.switches ||
+-              raw.moves || wine.moves_delivered || wine.setpos_calls || wine.getpos_calls || wine.clip_calls))
++              cocoa_stats.activations || cocoa_stats.resigns ||
++              raw.moves || wine.moves_delivered || wine.setpos_calls || wine.getpos_calls || wine.clip_calls ||
++              wine.canvas_restores || wine.canvas_restores_suppressed || wine.canvas_restores_held ||
++              wine.canvas_fullscreen_held))
+             return;
+ 
+         fprintf(inputStatsFile,
+@@ -2041,12 +2056,15 @@ - (void) reportInputStats:(NSTimer*)timer
+                 "\"posted_absolute\":%llu,\"posted_relative\":%llu,\"dropped_after_warp\":%llu,"
+                 "\"warps\":%llu,\"warp_us\":%.1f,\"mouselook_moves\":%llu,\"mouselook_posted\":%llu,"
+                 "\"mouselook_enters\":%llu,\"mouselook_exits\":%llu,\"clicks\":%llu,\"switches\":%llu,"
++                "\"activations\":%llu,\"resigns\":%llu,\"resyncs_skipped\":%llu,"
+                 "\"raw_started\":%s,\"raw_switched_off\":%s,\"raw_interval_us\":%.0f,\"raw_mice\":%lu,"
+                 "\"raw_moves\":%llu,\"raw_posted\":%llu,\"raw_dx\":%.1f,\"raw_dy\":%.1f,\"raw_sources\":%d,"
+                 "\"pointer_ignored\":%llu,\"pointer_fallback\":%llu,"
+                 "\"moves_delivered\":%llu,\"deliver_us\":%.1f,\"setpos_calls\":%llu,\"setpos_fast\":%llu,"
+                 "\"setpos_us\":%.1f,\"setpos_max_us\":%.1f,\"getpos_calls\":%llu,\"getpos_us\":%.1f,"
+-                "\"clip_calls\":%llu,\"consumer_tid\":%u,\"setpos_tid\":%u}\n",
++                "\"clip_calls\":%llu,\"canvas_restores\":%llu,\"canvas_restores_suppressed\":%llu,"
++                "\"canvas_restores_held\":%llu,\"canvas_fullscreen_held\":%llu,"
++                "\"consumer_tid\":%u,\"setpos_tid\":%u}\n",
+                 [[NSDate date] timeIntervalSince1970] * 1000, getpid(), mouselook_process,
+                 mouselook_allowed ? "true" : "false",
+                 __atomic_load_n(&raw_on, __ATOMIC_ACQUIRE) ? "raw" : mouselookWindow ? "mouselook" : "legacy",
+@@ -2058,12 +2076,15 @@ - (void) reportInputStats:(NSTimer*)timer
+                 cocoa_stats.posted_absolute, cocoa_stats.posted_relative, cocoa_stats.dropped_after_warp,
+                 cocoa_stats.warps, cocoa_stats.warp_ns / 1e3, cocoa_stats.mouselook_moves, cocoa_stats.mouselook_posted,
+                 cocoa_stats.mouselook_enters, cocoa_stats.mouselook_exits, cocoa_stats.clicks, cocoa_stats.switches,
++                cocoa_stats.activations, cocoa_stats.resigns, cocoa_stats.resyncs_skipped,
+                 raw_queue ? "true" : "false", rawSwitchedOff ? "true" : "false", raw_interval / 1e3,
+                 (unsigned long)[rawMice count], raw.moves, raw.posted, raw.dx, raw.dy, __builtin_popcount(raw.sources),
+                 cocoa_stats.pointer_ignored, cocoa_stats.pointer_fallback,
+                 wine.moves_delivered, wine.deliver_ns / 1e3, wine.setpos_calls, wine.setpos_fast,
+                 wine.setpos_ns / 1e3, wine.setpos_max_ns / 1e3, wine.getpos_calls, wine.getpos_ns / 1e3,
+-                wine.clip_calls, wine.consumer_tid, wine.setpos_tid);
++                wine.clip_calls, wine.canvas_restores, wine.canvas_restores_suppressed,
++                wine.canvas_restores_held, wine.canvas_fullscreen_held,
++                wine.consumer_tid, wine.setpos_tid);
+         fflush(inputStatsFile);
+         memset(&cocoa_stats, 0, sizeof(cocoa_stats));
+     }
+@@ -2895,6 +2916,7 @@ - (void) setupObservations
+                     usingBlock:^(NSNotification *note){
+             if (displaysTemporarilyUncapturedForDialog)
+             {
++                activation_resync_needed = TRUE;
+                 [self applicationDidBecomeActive:nil];
+ 
+                 displaysTemporarilyUncapturedForDialog = FALSE;
+@@ -3238,6 +3260,7 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+         if (beenActive)
+             [self unminimizeWindowIfNoneVisible];
+         beenActive = TRUE;
++        cocoa_stats.activations++;
+ 
+         // If a Wine process terminates abruptly while it has the display captured
+         // and switched to a different resolution, Mac OS X will uncapture the
+@@ -3248,8 +3271,15 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+         //
+         // To solve this, we synthesize a displays-changed event whenever we're
+         // activated.  This will provoke a re-synchronization of Wine's notion of
+-        // the desktop rect with the actual state.
+-        [self sendDisplaysChanged:TRUE];
++        // the desktop rect with the actual state.  Only after a real resign: see
++        // activation_resync_needed.
++        if (activation_resync_needed)
++        {
++            activation_resync_needed = FALSE;
++            [self sendDisplaysChanged:TRUE];
++        }
++        else
++            cocoa_stats.resyncs_skipped++;
+ 
+         // The cursor probably moved while we were inactive.  Accumulated mouse
+         // movement deltas are invalidated.  Make sure the next mouse move event
+@@ -3257,11 +3287,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+         forceNextMouseMoveAbsolute = TRUE;
+ 
+         [self updateMouselook];
++        macdrv_v1_canvas_app_activated();
+     }
+ 
+     - (void)applicationDidChangeScreenParameters:(NSNotification *)notification
+     {
+         primaryScreenHeightValid = FALSE;
++        activation_resync_needed = TRUE;
+         [self sendDisplaysChanged:FALSE];
+         [self adjustWindowLevels];
+ 
+@@ -3276,6 +3308,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
+         macdrv_event* event;
+         WineEventQueue* queue;
+ 
++        activation_resync_needed = TRUE;
++        cocoa_stats.resigns++;
++        macdrv_v1_canvas_app_resigned();
+         [self updateMouselook];
+         [self invalidateGotFocusEvents];
+         [self releasePressedKeys];
+diff --git a/dlls/winemac.drv/cocoa_v1.h b/dlls/winemac.drv/cocoa_v1.h
+index a58f2f9..bc67bcf 100644
+--- a/dlls/winemac.drv/cocoa_v1.h
++++ b/dlls/winemac.drv/cocoa_v1.h
+@@ -4,6 +4,8 @@
+ @class WineWindow;
+ BOOL macdrv_v1_canvas_active(WineWindow *window);
+ BOOL macdrv_v1_canvas_requested(WineWindow *window);
++/* Settled in fullscreen at the game's request: Wine's rectangle must be the canvas frame. */
++BOOL macdrv_v1_canvas_owns_frame(WineWindow *window);
+ void macdrv_v1_canvas_settled(WineWindow *window);
+ void macdrv_v1_canvas_failed(WineWindow *window);
+ void macdrv_v1_canvas_transition(WineWindow *window, BOOL entering);
+@@ -18,3 +20,10 @@
+ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused);
+ /* Maps the canvas overlay presentation window to the Wine window that owns it. */
+ NSWindow *macdrv_v1_canvas_owner(NSWindow *window);
++/* The player switched to another app while the game was fullscreen: until they come
++   back, the canvas window is neither restored nor put back into fullscreen. */
++BOOL macdrv_v1_canvas_held(WineWindow *window);
++void macdrv_v1_canvas_hold_restore(WineWindow *window);
++void macdrv_v1_canvas_app_resigned(void);
++void macdrv_v1_canvas_app_activated(void);
++void macdrv_v1_canvas_deminiaturized(WineWindow *window);
+diff --git a/dlls/winemac.drv/cocoa_v1.m b/dlls/winemac.drv/cocoa_v1.m
+index 6e1afe0..9b0d507 100644
+--- a/dlls/winemac.drv/cocoa_v1.m
++++ b/dlls/winemac.drv/cocoa_v1.m
+@@ -29,6 +29,8 @@ @interface OWCanvas : NSObject {
+     NSRect savedMetalFrame;
+     NSUInteger savedMetalAutoresizing;
+     BOOL overlayActive;
++    /* Wine restored the window while the player was away (see requestTransition). */
++    BOOL restoreHeld;
+ }
+ @end
+ @implementation OWCanvas
+@@ -128,6 +130,11 @@ BOOL macdrv_v1_canvas_requested(WineWindow *window) {
+     return state && state->requested;
+ }
+ 
++BOOL macdrv_v1_canvas_owns_frame(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    return state && state->active && state->requested && !state->transitioning;
++}
++
+ /* Drawable pool depth for the registered canvas layer. Two drawables force the
+  * translator's encoding thread to wait for the on-screen drawable to be released
+  * at every refresh; measured 2026-09-12 gameplay spent about 7% of wall time in
+@@ -278,13 +285,23 @@ static void updateLayers(WineWindow *window, OWCanvas *state) {
+     double scale = state->active ? fmin(state->physical.size.width/state->pixels.width,
+                                       state->physical.size.height/state->pixels.height) : 1.0;
+     if (!isfinite(scale) || scale <= 0) return;
++    // Wine's Retina mode is global: while the main display is in its default mode every
++    // Wine coordinate is doubled, on every screen. On a 1x screen (most external monitors)
++    // pixels*scale would be twice the screen's pixels in each direction, and the enlargement
++    // would be drawn at four times its size only for Core Animation to shrink it again.
++    // Size the fullscreen drawable by the window's own backing scale there, as the overlay
++    // does; never larger than before.
++    double retina = retina_on ? 2.0 : 1.0, backing = window.backingScaleFactor;
++    double pixelScale = scale;
++    if (state->active && isfinite(backing) && backing > 0 && backing < retina)
++        pixelScale = scale*backing/retina;
+     for (NSView *view in state->client.subviews) {
+         if (![view.layer isKindOfClass:CAMetalLayer.class]) continue;
+         CAMetalLayer *layer = (CAMetalLayer *)view.layer;
+         // Render the final enlargement at display pixels, rather than leaving
+         // Core Animation to magnify a low-resolution finished drawable.
+-        layer.drawableSize = CGSizeMake(llround(state->pixels.width*scale), llround(state->pixels.height*scale));
+-        layer.contentsScale = (retina_on ? 2.0 : 1.0)*scale;
++        layer.drawableSize = CGSizeMake(llround(state->pixels.width*pixelScale), llround(state->pixels.height*pixelScale));
++        layer.contentsScale = retina*pixelScale;
+         layer.maximumDrawableCount = canvasDrawableCount();
+     }
+     if (state->active) overlayAttach(window, state);
+@@ -321,6 +338,7 @@ void macdrv_v1_canvas_layout(WineWindow *window) {
+     [state->client setAutoresizingMask:NSViewNotSizable];
+     [state->client setFrame:NSMakeRect(0, 0, logical.width, logical.height)];
+     [window setBackgroundColor:NSColor.blackColor];
++    [root setNeedsDisplay:YES]; // its Win32 surface stays out of the bars (updateLayer)
+     updateLayers(window, state);
+     state->layingOut = NO;
+ }
+@@ -342,6 +360,7 @@ void macdrv_v1_canvas_restore(WineWindow *window) {
+     [window.contentView setBounds:state->savedBounds];
+     [state->client setFrame:state->savedClientFrame];
+     [state->client setAutoresizingMask:state->savedAutoresizing];
++    [window.contentView setNeedsDisplay:YES]; // draw the Win32 surface again
+     updateLayers(window, state);
+ }
+ 
+@@ -365,6 +384,7 @@ void macdrv_v1_canvas_transition(WineWindow *window, BOOL entering) {
+         [state->client setFrame:state->savedClientFrame];
+         [state->client setAutoresizingMask:state->savedAutoresizing];
+         [window setBackgroundColor:state->savedBackground];
++        [window.contentView setNeedsDisplay:YES];
+     }
+     record(window, entering ? "enter_fullscreen" : "exit_fullscreen");
+ }
+@@ -425,6 +445,13 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+     record(window, focused ? "focus_gained" : "focus_lost");
+ }
+ 
++/* Game resolutions the canvas shows, up to 3840x2400 (4K at 16:10). Each display's
++ * mode list offers those that fit inside it (display.c), so the game can choose them
++ * even where the monitor itself lacks the mode; the canvas never changes modes. */
++static BOOL canvasSizeSupported(unsigned width, unsigned height) {
++    return width >= 640 && width <= 3840 && height >= 480 && height <= 2400;
++}
++
+ /* Explicit bridge registration is per-window and preserves the existing
+  * macdrv_functions ABI. Older drivers report unavailable through dlsym. */
+ __attribute__((visibility("default"))) unsigned
+@@ -433,8 +460,7 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+     dispatch_block_t configure = ^{
+         NSView *view = (NSView *)client_view;
+         WineWindow *window = (WineWindow *)macdrv_v1_canvas_owner(view.window);
+-        if (!view || ![window isKindOfClass:WineWindow.class] ||
+-            width != 1920 || (height != 1080 && height != 1200)) return;
++        if (!view || ![window isKindOfClass:WineWindow.class] || !canvasSizeSupported(width, height)) return;
+         OWCanvas *state = canvas(window);
+         if (!state) {
+             state = [[[OWCanvas alloc] init] autorelease];
+@@ -445,10 +471,15 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+             [state->client release];
+             state->client = [view retain];
+         }
++        NSSize previous = state->pixels;
+         state->pixels = NSMakeSize(width,height);
+         state->windowsPid = windows_pid;
+         if (!state->active) state->savedBounds = window.contentView.bounds;
+         updateLayers(window, state);
++        if (!NSEqualSizes(previous, state->pixels) && macdrv_v1_canvas_owns_frame(window)) {
++            macdrv_v1_canvas_layout(window);
++            [window postCanvasFrame];
++        }
+         record(window, "registered");
+         result = 1;
+     };
+@@ -457,6 +488,36 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+     return result;
+ }
+ 
++/* Cmd-Tab away from the fullscreen game. In fullscreen mode the game minimizes
++ * its window when it loses focus, as on Windows, and then may still ask for its
++ * fullscreen window again (SetFullscreenState, ResizeTarget) or restore it. On
++ * macOS either one brings the game back while the player is in another app:
++ * entering fullscreen gives the window a new Space, a display that switches to
++ * a fullscreen Space makes its owner frontmost, and a restore through the Dock
++ * can activate the application. On 2026-10-01, with an external monitor as the
++ * main display, the game took the front back 0.4-2.7 s after each of 13
++ * switches to Finder, VS Code and Mail (system log: the Dock's minimize, then
++ * RestoreWindowWithOrder, then SetManagedDisplayCurrentSpace for the game).
++ * Windows never gives exclusive fullscreen to a background window either. So
++ * once the player has left the game in fullscreen, its canvas window keeps the
++ * state they left it in until they come back (Cmd-Tab, the Dock, a click);
++ * what the game asked for meanwhile is applied then. Leaving fullscreen stays
++ * allowed. The game's first fullscreen at launch is unaffected: it still comes
++ * to the front when it is ready. */
++static BOOL playerAway;
++
++BOOL macdrv_v1_canvas_held(WineWindow *window) {
++    return playerAway && !NSApp.isActive && canvas(window) != nil;
++}
++
++void macdrv_v1_canvas_hold_restore(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    if (!state) return;
++    state->restoreHeld = YES;
++    MACDRV_STAT_ADD(canvas_restores_held, 1);
++    record(window, "restore_held");
++}
++
+ /* Called only through the explicit DXMT bridge. Never changes display modes.
+  * Cocoa transitions are asynchronous; requests received during an animation
+  * are reconciled by the did-enter/did-exit callbacks, without blocking Wine. */
+@@ -464,11 +525,58 @@ static void requestTransition(WineWindow *window, OWCanvas *state) {
+     if (state->transitioning) return;
+     BOOL actual = (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+     if (actual == state->requested) return;
++    if (state->requested && macdrv_v1_canvas_held(window)) {
++        MACDRV_STAT_ADD(canvas_fullscreen_held, 1);
++        record(window, "fullscreen_held");
++        return;
++    }
+     [window setCollectionBehavior:(window.collectionBehavior | NSWindowCollectionBehaviorFullScreenPrimary)
+                                    & ~NSWindowCollectionBehaviorFullScreenAuxiliary];
+     [window toggleFullScreen:nil];
+ }
+ 
++/* Applies what the game asked for while the player was away. A minimized window
++ * finishes deminiaturizing first (Wine's activation restores it; so does a click on
++ * it in the Dock), then enters fullscreen. */
++static void reconcile(WineWindow *window, OWCanvas *state) {
++    if (!NSApp.isActive) return;
++    if (state->restoreHeld) {
++        state->restoreHeld = NO;
++        if (window.isMiniaturized) [window deminiaturize:nil];
++    }
++    if (window.isMiniaturized) return;
++    requestTransition(window, state);
++}
++
++void macdrv_v1_canvas_app_resigned(void) {
++    for (NSWindow *candidate in NSApp.windows) {
++        OWCanvas *state = [candidate isKindOfClass:WineWindow.class] ? canvas((WineWindow *)candidate) : nil;
++        if (!state || !(state->requested || state->active)) continue;
++        playerAway = YES;
++        record((WineWindow *)candidate, "player_away");
++    }
++}
++
++void macdrv_v1_canvas_app_activated(void) {
++    if (!playerAway) return;
++    playerAway = NO;
++    // After this activation's own work: Wine deminiaturizes a minimized window
++    // when it is activated with none visible.
++    dispatch_async(dispatch_get_main_queue(), ^{
++        for (NSWindow *candidate in NSApp.windows) {
++            OWCanvas *state = [candidate isKindOfClass:WineWindow.class] ? canvas((WineWindow *)candidate) : nil;
++            if (!state) continue;
++            record((WineWindow *)candidate, "player_back");
++            reconcile((WineWindow *)candidate, state);
++        }
++    });
++}
++
++void macdrv_v1_canvas_deminiaturized(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    if (state && !playerAway) reconcile(window, state);
++}
++
+ void macdrv_v1_canvas_settled(WineWindow *window) {
+     OWCanvas *state = canvas(window);
+     if (!state) return;
+@@ -496,11 +604,15 @@ void macdrv_v1_canvas_failed(WineWindow *window) {
+         NSView *view = (NSView *)client_view;
+         WineWindow *window = (WineWindow *)macdrv_v1_canvas_owner(view.window);
+         OWCanvas *state = [window isKindOfClass:WineWindow.class] ? canvas(window) : nil;
+-        if (!state || enable > 2 || width < 640 || width > 3840 || height < 480 || height > 2160) return;
++        if (!state || enable > 2 || !canvasSizeSupported(width, height)) return;
+         if (enable == 2) { result = state->requested || state->active; return; }
++        NSSize previous = state->pixels;
+         state->pixels = NSMakeSize(width, height);
+         state->requested = enable != 0;
+         if (state->active) macdrv_v1_canvas_layout(window);
++        // A new resolution in fullscreen: Wine's rectangle follows the canvas.
++        if (!NSEqualSizes(previous, state->pixels) && macdrv_v1_canvas_owns_frame(window))
++            [window postCanvasFrame];
+         requestTransition(window, state);
+         record(window, enable ? "game_fullscreen_requested" : "game_windowed_requested");
+         result = 1;
+diff --git a/dlls/winemac.drv/cocoa_window.h b/dlls/winemac.drv/cocoa_window.h
+index 23ecd6d..b4520d0 100644
+--- a/dlls/winemac.drv/cocoa_window.h
++++ b/dlls/winemac.drv/cocoa_window.h
+@@ -71,6 +71,9 @@ @interface WineWindow : NSPanel <NSWindowDelegate>
+     NSRect nonFullscreenFrame;
+     NSTimeInterval enteredFullScreenTime;
+ 
++    NSTimeInterval canvasRestoreStart;
++    NSUInteger canvasRestores;
++
+     int draggingPhase;
+     NSPoint dragStartPosition;
+     NSPoint dragWindowStartPosition;
+@@ -110,6 +113,9 @@ - (WineWindow*) ancestorWineWindow;
+ 
+     - (void) updateForCursorClipping;
+ 
++    /* Tells Wine the fullscreen canvas frame (see restoreCanvasFrame:). */
++    - (void) postCanvasFrame;
++
+     - (void) setRetinaMode:(BOOL)mode;
+ 
+ @end
+diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
+index 94fe12a..96c91df 100644
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -528,6 +528,16 @@ - (void) updateLayer
+         if (window.closing)
+             return;
+ 
++        /* The fullscreen canvas letterboxes the game image inside this view, and the
++           Win32 surface would show, stretched, only in those bars (5 pixels along the
++           top and bottom of a 14-inch MacBook Pro's 1512x950 fullscreen area). Keep
++           them black; the surface returns when the canvas leaves fullscreen. */
++        if (macdrv_v1_canvas_active(window))
++        {
++            layer.contents = nil;
++            return;
++        }
++
+         imageRect = layer.bounds;
+         imageRect.origin.x *= layer.contentsScale;
+         imageRect.origin.y *= layer.contentsScale;
+@@ -1372,9 +1382,16 @@ - (void) setMacDrvState:(const struct macdrv_window_state*)state
+             }
+             else if (!state->minimized && [self isMiniaturized])
+             {
+-                ignore_windowDeminiaturize = TRUE;
+-                [self deminiaturize:nil];
+-                discard |= event_mask_for_type(WINDOW_LOST_FOCUS);
++                /* The player left the game in fullscreen: it stays in the Dock
++                   until they come back to it (see cocoa_v1.m). */
++                if (macdrv_v1_canvas_held(self))
++                    macdrv_v1_canvas_hold_restore(self);
++                else
++                {
++                    ignore_windowDeminiaturize = TRUE;
++                    [self deminiaturize:nil];
++                    discard |= event_mask_for_type(WINDOW_LOST_FOCUS);
++                }
+             }
+ 
+             if (discard)
+@@ -2073,7 +2090,8 @@ - (void) checkTransparency
+         {
+             self.shapeChangedSinceLastDraw = TRUE;
+             [[self contentView] setNeedsDisplay:YES];
+-            [self setBackgroundColor:[NSColor windowBackgroundColor]];
++            // The fullscreen canvas letterboxes on black (macdrv_v1_canvas_layout).
++            [self setBackgroundColor:macdrv_v1_canvas_active(self) ? [NSColor blackColor] : [NSColor windowBackgroundColor]];
+             [self setOpaque:YES];
+         }
+         else if ([self isOpaque] && self.needsTransparency)
+@@ -2216,6 +2234,53 @@ - (void) postWindowFrameChanged:(NSRect)frame fullscreen:(BOOL)isFullscreen resi
+         macdrv_release_event(event);
+     }
+ 
++    /* While the fullscreen canvas is up, native fullscreen owns this window's
++       frame, and Wine's rectangle for it must stay the canvas frame (the
++       canvas origin, at the game's resolution) that the fullscreen transition
++       gave it: pointer positions, cursor clipping and the client's own
++       centring all assume it.  A client can still move or resize its window
++       (in a 2026-09-30 match Overwatch re-applied its fullscreen window at a
++       map change, sized to the whole native desktop; from then on its cursor
++       was unclipped, its clicks landed ~52 points below the pointer and its
++       re-centred pointer showed lower right).  Give Wine the canvas frame
++       back, as a window manager would; a client that keeps insisting is left
++       alone after a few attempts in two seconds. */
++    - (void) postCanvasFrame
++    {
++        [self postWindowFrameChanged:self.wine_fractionalFrame
++                          fullscreen:([self styleMask] & NSWindowStyleMaskFullScreen) != 0
++                            resizing:NO
++                        skipSizeMove:YES];
++    }
++
++    - (void) restoreCanvasFrame:(CGRect)requested
++    {
++        NSRect content = [self contentRectForFrameRect:self.wine_fractionalFrame];
++        NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
++        CGRect canvasFrame;
++
++        [[WineApplicationController sharedController] flipRect:&content];
++        canvasFrame = macdrv_v1_canvas_frame(self, cgrect_win_from_mac(NSRectToCGRect(content)));
++        if (fabs(CGRectGetMinX(requested) - CGRectGetMinX(canvasFrame)) < 1 &&
++            fabs(CGRectGetMinY(requested) - CGRectGetMinY(canvasFrame)) < 1 &&
++            fabs(CGRectGetWidth(requested) - CGRectGetWidth(canvasFrame)) < 1 &&
++            fabs(CGRectGetHeight(requested) - CGRectGetHeight(canvasFrame)) < 1)
++            return;
++
++        if (now - canvasRestoreStart > 2)
++        {
++            canvasRestoreStart = now;
++            canvasRestores = 0;
++        }
++        if (++canvasRestores > 8)
++        {
++            MACDRV_STAT_ADD(canvas_restores_suppressed, 1);
++            return;
++        }
++        MACDRV_STAT_ADD(canvas_restores, 1);
++        [self postCanvasFrame];
++    }
++
+     - (void) updateForCursorClipping
+     {
+         [self adjustFeaturesForState];
+@@ -3078,6 +3143,7 @@ - (void)windowDidDeminiaturize:(NSNotification *)notification
+ 
+         [self windowDidResize:notification];
+         [self checkWineDisplayLink];
++        macdrv_v1_canvas_deminiaturized(self);
+     }
+ 
+     - (void) windowDidEndLiveResize:(NSNotification *)notification
+@@ -3096,6 +3162,8 @@ - (void) windowDidEnterFullScreen:(NSNotification*)notification
+         enteredFullScreenTime = [[NSProcessInfo processInfo] systemUptime];
+         macdrv_v1_canvas_layout(self);
+         macdrv_v1_canvas_settled(self);
++        // The client may have moved its window during the animation.
++        if (macdrv_v1_canvas_owns_frame(self)) [self postCanvasFrame];
+         if (pendingOrderOut)
+             [self doOrderOut];
+     }
+@@ -3631,7 +3699,11 @@ void macdrv_set_cocoa_window_frame(macdrv_window w, const CGRect* new_frame)
+     WineWindow* window = (WineWindow*)w;
+ 
+     OnMainThread(^{
+-        if (macdrv_v1_canvas_active(window)) macdrv_v1_canvas_layout(window);
++        if (macdrv_v1_canvas_active(window))
++        {
++            macdrv_v1_canvas_layout(window);
++            if (macdrv_v1_canvas_owns_frame(window)) [window restoreCanvasFrame:*new_frame];
++        }
+         else [window setFrameFromWine:NSRectFromCGRect(cgrect_mac_from_win(*new_frame))];
+     });
+ }
+diff --git a/dlls/winemac.drv/display.c b/dlls/winemac.drv/display.c
+index 2663eb8..0be985b 100644
+--- a/dlls/winemac.drv/display.c
++++ b/dlls/winemac.drv/display.c
+@@ -847,6 +847,71 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
+ }
+ 
+ 
++/* Game resolutions that the fullscreen canvas (cocoa_v1.m) shows on any display
++ * without changing its mode. Each display also lists those that fit inside its Wine
++ * rectangle, at each refresh rate it has, so a game can choose them where the monitor
++ * itself lacks the mode (a 16:10 size on a 16:9 monitor, 1440p on a MacBook). Changing
++ * the display to one of them still fails, as for any size the display lacks
++ * (find_best_display_mode). Larger sizes are left out: Wine keeps the pointer inside
++ * the display's rectangle, so part of the game's window would be out of reach. */
++static const struct { DWORD width, height; } canvas_sizes[] =
++{
++    {1920, 1080}, {1920, 1200}, {2560, 1440}, {2560, 1600}, {3840, 2160}, {3840, 2400},
++};
++
++static int add_canvas_modes(CGDirectDisplayID display_id, DEVMODEW *devmodes, int count, int default_bpp,
++                            const struct display_mode_descriptor *desc)
++{
++    CGDisplayModeRef current = CGDisplayCopyDisplayMode(display_id);
++    DWORD width = 0, height = 0;
++    int added = 0, i, j, k;
++
++    if (current)
++    {
++        width = CGDisplayModeGetWidth(current);
++        height = CGDisplayModeGetHeight(current);
++        if (retina_enabled && display_mode_matches_descriptor(current, desc))
++        {
++            width *= 2;
++            height *= 2;
++        }
++        CGDisplayModeRelease(current);
++    }
++    if (width < height)
++        return 0;
++
++    for (i = 0; i < ARRAY_SIZE(canvas_sizes); i++)
++    {
++        if (canvas_sizes[i].width > width || canvas_sizes[i].height > height)
++            continue;
++        /* At each refresh rate of the display's own modes at the default depth. */
++        for (j = 0; j < count; j++)
++        {
++            BOOL present = FALSE;
++
++            if (devmodes[j].dmBitsPerPel != default_bpp ||
++                (devmodes[j].dmDisplayFlags & (DM_INTERLACED | WINE_DM_UNSUPPORTED)))
++                continue;
++            for (k = 0; k < count + added && !present; k++)
++                present = devmodes[k].dmPelsWidth == canvas_sizes[i].width &&
++                          devmodes[k].dmPelsHeight == canvas_sizes[i].height &&
++                          devmodes[k].dmBitsPerPel == default_bpp &&
++                          devmodes[k].dmDisplayFrequency == devmodes[j].dmDisplayFrequency &&
++                          !(devmodes[k].dmDisplayFlags & WINE_DM_UNSUPPORTED);
++            if (present)
++                continue;
++            devmodes[count + added] = devmodes[j];
++            devmodes[count + added].dmPelsWidth = canvas_sizes[i].width;
++            devmodes[count + added].dmPelsHeight = canvas_sizes[i].height;
++            devmodes[count + added].dmDisplayFixedOutput = DMDFO_CENTER;
++            TRACE("canvas mode %ux%u @%u Hz\n", (unsigned)canvas_sizes[i].width,
++                  (unsigned)canvas_sizes[i].height, (unsigned)devmodes[j].dmDisplayFrequency);
++            added++;
++        }
++    }
++    return added;
++}
++
+ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_count)
+ {
+     int default_bpp = get_default_bpp(), synth_count = 0, count, i;
+@@ -870,7 +935,8 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
+             modes_has_16bpp = TRUE;
+     }
+ 
+-    if (!(devmodes = calloc(count * 3, sizeof(DEVMODEW))))
++    /* Room for each canvas size at each of the display's modes' rates, then 16 and 8 bpp copies. */
++    if (!(devmodes = calloc((count + count * ARRAY_SIZE(canvas_sizes)) * 3, sizeof(DEVMODEW))))
+     {
+         CFRelease(modes);
+         return NULL;
+@@ -892,6 +958,7 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
+             devmodes[i].dmPelsHeight *= 2;
+         }
+     }
++    count += add_canvas_modes(display_id, devmodes, count, default_bpp, desc);
+     free_display_mode_descriptor(desc);
+ 
+     for (i = 0; !modes_has_16bpp && i < count; i++)
+diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
+index 4d4efaa..5845bef 100644
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -249,6 +249,8 @@ static inline CGPoint cgpoint_win_from_mac(CGPoint point)
+     unsigned long long setpos_calls, setpos_fast, setpos_ns, setpos_max_ns;
+     unsigned long long getpos_calls, getpos_ns;
+     unsigned long long clip_calls;
++    unsigned long long canvas_restores, canvas_restores_suppressed;
++    unsigned long long canvas_restores_held, canvas_fullscreen_held;
+     unsigned int consumer_tid, setpos_tid;
+ };
+ extern struct macdrv_input_stats macdrv_input_stats;

@@ -1,0 +1,1223 @@
+--- a/dlls/winemac.drv/cocoa_app.h
++++ b/dlls/winemac.drv/cocoa_app.h
+@@ -88,6 +88,25 @@
+ 
+     id<WineClipCursorHandler> clipCursorHandler;
+ 
++    /* Mouselook: while a client hides its cursor and confines or re-centres
++       it, the Mac pointer is frozen and motion reaches Wine only as relative
++       movement, from raw input when available.  See -updateMouselook. */
++    WineWindow* mouselookWindow;
++    BOOL mouselookHotkeyDown;
++    BOOL mouselookHiddenWarp;       /* client warped the cursor while hidden */
++    BOOL cursorTransparent;         /* client cursor has no visible pixels */
++    BOOL rawStarted;
++    BOOL rawSwitchedOff;            /* test hotkey (WINEMAC_MOUSELOOK_SWITCH) */
++    NSMutableArray* rawMice;        /* GCMouse objects delivering raw input */
++    unsigned int rawMiceAttached;
++    double mouselookRemainderX, mouselookRemainderY;
++    CGPoint mouselookWarpDelta;
++    NSTimeInterval mouselookInterval, mouselookLastPost, mouselookPendingTime;
++    BOOL mouselookFlushScheduled, mouselookPendingDrag, mouselookUpdateScheduled;
++
++    NSTimer* inputStatsTimer;
++    FILE* inputStatsFile;
++
+     NSImage* applicationIcon;
+ 
+     /* CW Hack 22310, 24199 */
+@@ -126,6 +145,8 @@
+ 
+     - (void) windowGotFocus:(WineWindow*)window;
+ 
++    - (void) updateMouselook;
++
+     - (BOOL) waitUntilQueryDone:(bool*)done timeout:(NSDate*)timeout processEvents:(BOOL)processEvents;
+ 
+     - (void) noteKey:(uint16_t)keyCode pressed:(BOOL)pressed;
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -24,8 +24,162 @@
+ #import "cocoa_window.h"
+ #import "cocoa_v1.h"
+ #import "cocoa_icon_utils.h"
++#import <GameController/GameController.h>
++#include <dlfcn.h>
++#include <os/lock.h>
+ 
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
++
++
++/* Mouselook state shared with Wine threads and the raw input queue.  The
++ * Cocoa thread enters and leaves the mode; while it is on, Wine threads
++ * record client cursor positions here instead of warping the Mac pointer. */
++static os_unfair_lock mouselook_lock = OS_UNFAIR_LOCK_INIT;
++static int mouselook_on;            /* written under mouselook_lock */
++static CGPoint mouselook_position;  /* Wine coordinates, under mouselook_lock */
++static CGRect mouselook_clip;       /* client clip rectangle, Wine coordinates, under mouselook_lock */
++
++/* Raw input.  While mouselook is on, motion comes from the Game Controller
++ * framework's GCMouse: whole mouse counts at the mouse's full report rate,
++ * as Windows gives games.  Pointer events have the tracking speed applied
++ * and reach the app only once per display refresh.  GCMouse handlers run on
++ * raw_queue, which delivers to raw_window without the Cocoa thread. */
++static dispatch_queue_t raw_queue;
++static dispatch_source_t raw_timer;
++static WineWindow* raw_window;          /* delivery target, under mouselook_lock */
++static int raw_on;                      /* raw_window is set; written under mouselook_lock */
++static unsigned long long raw_interval; /* minimum ns between deliveries, 0 for every report */
++static unsigned long long raw_last_motion;  /* uptime ns of the latest GCMouse motion */
++static const unsigned long long raw_silence = 250000000; /* then pointer events stand in */
++
++/* raw_queue only */
++static double raw_pending_x, raw_pending_y;
++static unsigned long long raw_last_post;
++static BOOL raw_flush_armed;
++static struct
++{
++    unsigned long long moves, posted;
++    double dx, dy;
++    unsigned int sources;
++} raw_stats;
++
++/* Cocoa-thread input statistics, reported with macdrv_input_stats. */
++static struct
++{
++    unsigned long long mac_moves, mac_move_ns, posted_absolute, posted_relative, dropped_after_warp;
++    unsigned long long warps, warp_ns, mouselook_moves, mouselook_posted, mouselook_enters, mouselook_exits;
++    unsigned long long clicks, switches, pointer_ignored, pointer_fallback;
++    double mac_dx, mac_dy;
++} cocoa_stats;
++
++
++/* Follows Wine's cursor, as Wine clips it, for placing the pointer when
++ * mouselook ends.  Called with mouselook_lock held. */
++static void mouselook_move_position(int x, int y)
++{
++    mouselook_position.x += x;
++    mouselook_position.y += y;
++    if (!CGRectIsInfinite(mouselook_clip))
++    {
++        mouselook_position.x = MAX(CGRectGetMinX(mouselook_clip),
++                                   MIN(mouselook_position.x, CGRectGetMaxX(mouselook_clip) - 1));
++        mouselook_position.y = MAX(CGRectGetMinY(mouselook_clip),
++                                   MIN(mouselook_position.y, CGRectGetMaxY(mouselook_clip) - 1));
++    }
++}
++
++/* Delivers the whole counts received so far; the remainder stays pending. */
++static void raw_flush(void)
++{
++    int x = raw_pending_x, y = raw_pending_y;  /* truncation keeps the remainder */
++    unsigned long long now = macdrv_stat_clock();
++
++    raw_flush_armed = FALSE;
++    if (!x && !y) return;
++
++    os_unfair_lock_lock(&mouselook_lock);
++    if (raw_window)
++    {
++        macdrv_event* event = macdrv_create_event(MOUSE_MOVED_RELATIVE, raw_window);
++        event->mouse_moved.x = x;
++        event->mouse_moved.y = y;
++        event->mouse_moved.time_ms = [[WineApplicationController sharedController] ticksForEventTime:now / 1e9];
++        [raw_window.queue postEvent:event];
++        macdrv_release_event(event);
++        mouselook_move_position(x, y);
++        raw_pending_x -= x;
++        raw_pending_y -= y;
++        raw_last_post = now;
++        raw_stats.posted++;
++    }
++    else
++        raw_pending_x = raw_pending_y = 0;
++    os_unfair_lock_unlock(&mouselook_lock);
++}
++
++/* A GCMouse report.  Delivers at most once per raw_interval; motion in
++ * between accumulates and is never dropped. */
++static void raw_motion(float dx, float dy, unsigned int source)
++{
++    unsigned long long now = macdrv_stat_clock();
++
++    __atomic_store_n(&raw_last_motion, now, __ATOMIC_RELAXED);
++    raw_stats.moves++;
++    raw_stats.dx += fabs(dx);
++    raw_stats.dy += fabs(dy);
++    raw_stats.sources |= 1u << (source % 32);
++    if (!__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE))
++    {
++        raw_pending_x = raw_pending_y = 0;
++        return;
++    }
++
++    raw_pending_x += dx;
++    raw_pending_y -= dy;  /* GCMouse's Y axis points up, Windows' down */
++    if (!raw_interval || now - raw_last_post >= raw_interval)
++        raw_flush();
++    else if (!raw_flush_armed)
++    {
++        raw_flush_armed = TRUE;
++        dispatch_source_set_timer(raw_timer, dispatch_time(DISPATCH_TIME_NOW, raw_last_post + raw_interval - now),
++                                  DISPATCH_TIME_FOREVER, 0);
++    }
++}
++
++
++/* Whether every frame of a cursor is fully transparent.  Some clients hide
++ * the cursor by setting an empty image rather than no cursor. */
++static BOOL cursor_frames_transparent(NSArray* frames)
++{
++    if (![frames count]) return NO;
++    for (NSDictionary* frame in frames)
++    {
++        CGImageRef image = (CGImageRef)frame[@"image"];
++        size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image), i;
++        unsigned char* pixels;
++        CGColorSpaceRef space;
++        CGContextRef context;
++        BOOL clear = NO;
++
++        if (!width || !height || width > 512 || height > 512) return NO;
++        if (!(pixels = calloc(width * height, 4))) return NO;
++        space = CGColorSpaceCreateDeviceRGB();
++        context = CGBitmapContextCreate(pixels, width, height, 8, width * 4, space,
++                                        (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
++        if (context)
++        {
++            CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
++            clear = YES;
++            for (i = 0; i < width * height; i++)
++                if (pixels[i * 4 + 3]) { clear = NO; break; }
++            CGContextRelease(context);
++        }
++        CGColorSpaceRelease(space);
++        free(pixels);
++        if (!clear) return NO;
++    }
++    return YES;
++}
+ 
+ 
+ static NSString* const WineAppWaitQueryResponseMode = @"WineAppWaitQueryResponseMode";
+@@ -224,6 +378,14 @@
+             latentDisplayModes = [[NSMutableDictionary alloc] init];
+ 
+             windowsBeingDragged = [[NSMutableSet alloc] init];
++
++            mouselook_clip = CGRectInfinite;
++            {
++                const char* interval = getenv("WINEMAC_MOUSELOOK_INTERVAL_US");
++                if (interval && atoi(interval) > 0)
++                    mouselookInterval = atoi(interval) / 1e6;
++            }
++            [self startInputStats];
+ 
+             if (!requests || !requestsManipQueue || !eventQueues || !eventQueuesLock ||
+                 !keyWindows || !originalDisplayModes || !latentDisplayModes)
+@@ -1140,6 +1302,7 @@
+         {
+             clientWantsCursorHidden = TRUE;
+             [self updateCursor:TRUE];
++            [self updateMouselook];
+         }
+     }
+ 
+@@ -1148,7 +1311,10 @@
+         if (clientWantsCursorHidden)
+         {
+             clientWantsCursorHidden = FALSE;
++            if (!cursorTransparent)
++                mouselookHiddenWarp = FALSE;
+             [self updateCursor:FALSE];
++            [self updateMouselook];
+         }
+     }
+ 
+@@ -1206,6 +1372,14 @@
+         cursorFrame = 0;
+         [cursorTimer invalidate];
+         self.cursorTimer = nil;
++
++        if (cursorTransparent != cursor_frames_transparent(frames))
++        {
++            cursorTransparent = !cursorTransparent;
++            if (!cursorTransparent && !clientWantsCursorHidden)
++                mouselookHiddenWarp = FALSE;
++            [self updateMouselook];
++        }
+ 
+         if ([frames count])
+         {
+@@ -1344,6 +1518,8 @@
+             // the local events suppression interval to 0 for the warp.  That's
+             // deprecated, but I'm not aware of any other way.  For good
+             // measure, we do both.
++            unsigned long long start = macdrv_stat_clock();
++
+             CGSetLocalEventsSuppressionInterval(0);
+             ret = (CGWarpMouseCursorPosition(pos) == kCGErrorSuccess);
+             CGSetLocalEventsSuppressionInterval(0.25);
+@@ -1352,6 +1528,11 @@
+                 lastSetCursorPositionTime = [[NSProcessInfo processInfo] systemUptime];
+ 
+                 CGAssociateMouseAndMouseCursorPosition(true);
++            }
++            if (macdrv_input_stats_on)
++            {
++                cocoa_stats.warps++;
++                cocoa_stats.warp_ns += macdrv_stat_clock() - start;
+             }
+         }
+ 
+@@ -1399,9 +1580,12 @@
+         if (![clipCursorHandler startClippingCursor:rect])
+             return FALSE;
+ 
+-        [self setCursorPosition:NSPointToCGPoint([self flippedMouseLocation:[NSEvent mouseLocation]])];
++        // A frozen mouselook pointer stays put; Wine's position is clipped by Wine.
++        if (!mouselookWindow)
++            [self setCursorPosition:NSPointToCGPoint([self flippedMouseLocation:[NSEvent mouseLocation]])];
+ 
+         [self updateWindowsForCursorClipping];
++        [self updateMouselook];
+ 
+         return TRUE;
+     }
+@@ -1417,6 +1601,7 @@
+         lastSetCursorPositionTime = [[NSProcessInfo processInfo] systemUptime];
+ 
+         [self updateWindowsForCursorClipping];
++        [self updateMouselook];
+ 
+         return TRUE;
+     }
+@@ -1424,6 +1609,463 @@
+     - (BOOL) clippingCursor
+     {
+         return clipCursorHandler.clippingCursor;
++    }
++
++    /*
++     * Mouselook
++     *
++     * A Windows game aims by hiding the cursor, confining it (ClipCursor) or
++     * moving it back to the centre every frame (SetCursorPos), and reading
++     * motion.  Done literally on macOS, every re-centre is a synchronous
++     * CGWarpMouseCursorPosition on this thread while the game thread waits,
++     * and each warp discards the mouse motion queued behind it.
++     *
++     * Instead, while the client hides the cursor and confines or re-centres
++     * it, freeze the Mac pointer (CGAssociateMouseAndMouseCursorPosition) and
++     * deliver motion to Wine purely as relative movement.  Wine's own cursor
++     * position is then authoritative: re-centring and position queries are
++     * handled by Wine threads without this thread, clicks and scrolls happen
++     * at Wine's position, and the pointer reappears there when the mode ends.
++     *
++     * The motion is raw input from GCMouse (see raw_motion): mouse counts,
++     * as on Windows.  Without it (WINEMAC_MOUSELOOK_RAW=0, the test hotkey,
++     * a trackpad, or a mouse GCMouse does not report), pointer events stand in, scaled
++     * like absolute movement over the window, including the fullscreen
++     * canvas scale.
++     */
++    - (WineWindow*) mouselookTarget
++    {
++        WineWindow* window;
++
++        if (!mouselook_allowed || ![NSApp isActive])
++            return nil;
++        if (!clientWantsCursorHidden && !cursorTransparent)
++            return nil;
++        if (!self.clippingCursor && !mouselookHiddenWarp)
++            return nil;
++        // The event tap clipping handler moves the pointer itself.
++        if (clipCursorHandler && ![clipCursorHandler isKindOfClass:[WineConfinementClipCursorHandler class]])
++            return nil;
++        if ([windowsBeingDragged count])
++            return nil;
++
++        window = (WineWindow*)[NSApp keyWindow];
++        if (![window isKindOfClass:[WineWindow class]] || ![window isVisible] || [window isMiniaturized])
++            return nil;
++        return window;
++    }
++
++    /* Cursor, clipping and focus changes often come in bursts (a client
++       hides the cursor, then clips it); settle once they are all applied. */
++    - (void) updateMouselook
++    {
++        if (mouselookUpdateScheduled)
++            return;
++        mouselookUpdateScheduled = TRUE;
++        dispatch_async(dispatch_get_main_queue(), ^{
++            WineWindow* target;
++
++            mouselookUpdateScheduled = FALSE;
++            [self startRawInput];
++            target = [self mouselookTarget];
++            if (mouselookWindow && target != mouselookWindow)
++                [self leaveMouselook];
++            if (target && !mouselookWindow)
++                [self enterMouselook:target];
++        });
++    }
++
++    - (void) enterMouselook:(WineWindow*)window
++    {
++        NSRect content = [window contentRectForFrameRect:[window frame]];
++        NSPoint location = [NSEvent mouseLocation];
++        CGPoint position;
++
++        mouselookWarpDelta = CGPointZero;
++        if (!NSMouseInRect(location, NSInsetRect(content, 1, 1), NO))
++        {
++            // Freeze the pointer over the window, so clicks go to it.  The
++            // warp shows up in the next event's delta; subtract it there.
++            NSPoint center = NSMakePoint(NSMidX(content), NSMidY(content));
++            CGPoint from = NSPointToCGPoint([self flippedMouseLocation:location]);
++            CGPoint to = NSPointToCGPoint([self flippedMouseLocation:center]);
++
++            CGSetLocalEventsSuppressionInterval(0);
++            if (CGWarpMouseCursorPosition(to) == kCGErrorSuccess)
++            {
++                mouselookWarpDelta = CGPointMake(to.x - from.x, to.y - from.y);
++                location = center;
++            }
++            CGSetLocalEventsSuppressionInterval(0.25);
++        }
++
++        if (CGAssociateMouseAndMouseCursorPosition(false) != kCGErrorSuccess)
++        {
++            mouselookWarpDelta = CGPointZero;
++            return;
++        }
++
++        position = cgpoint_win_from_mac(NSPointToCGPoint([self flippedMouseLocation:location]));
++        position = macdrv_v1_canvas_point(window, position, FALSE);
++
++        mouselookWindow = [window retain];
++        mouselookRemainderX = mouselookRemainderY = 0;
++        os_unfair_lock_lock(&mouselook_lock);
++        mouselook_position = CGPointMake(floor(position.x), floor(position.y));
++        __atomic_store_n(&mouselook_on, 1, __ATOMIC_RELEASE);
++        os_unfair_lock_unlock(&mouselook_lock);
++        [self updateRawInput];
++        cocoa_stats.mouselook_enters++;
++    }
++
++    - (void) leaveMouselook
++    {
++        WineWindow* window = mouselookWindow;
++        CGPoint position;
++
++        if (!window) return;
++
++        // Stop raw input first, so the position read below is final.
++        mouselookWindow = nil;
++        [self updateRawInput];
++        os_unfair_lock_lock(&mouselook_lock);
++        __atomic_store_n(&mouselook_on, 0, __ATOMIC_RELEASE);
++        position = mouselook_position;
++        os_unfair_lock_unlock(&mouselook_lock);
++
++        CGAssociateMouseAndMouseCursorPosition(true);
++
++        // Show the pointer where the client left its cursor.  Not when we
++        // lost activation: the user is going somewhere else.
++        if ([NSApp isActive] && [window isVisible])
++        {
++            CGPoint physical = macdrv_v1_canvas_point(window, position, TRUE);
++            [self setCursorPosition:cgpoint_mac_from_win(physical)];
++        }
++
++        [window release];
++        mouselookRemainderX = mouselookRemainderY = 0;
++        mouselookWarpDelta = CGPointZero;
++        forceNextMouseMoveAbsolute = TRUE;
++        cocoa_stats.mouselook_exits++;
++    }
++
++    - (BOOL) recordMouselookPosition:(CGPoint)pos
++    {
++        if (!mouselookWindow) return NO;
++        os_unfair_lock_lock(&mouselook_lock);
++        mouselook_position = pos;
++        os_unfair_lock_unlock(&mouselook_lock);
++        return YES;
++    }
++
++    - (void) noteClientWarp
++    {
++        if (!mouselookHiddenWarp && (clientWantsCursorHidden || cursorTransparent))
++        {
++            mouselookHiddenWarp = TRUE;
++            [self updateMouselook];
++        }
++    }
++
++    - (void) setMouselookClipRect:(CGRect)rect
++    {
++        os_unfair_lock_lock(&mouselook_lock);
++        mouselook_clip = rect;
++        os_unfair_lock_unlock(&mouselook_lock);
++    }
++
++    - (void) postMouselookMotion
++    {
++        WineWindow* window = mouseCaptureWindow ? mouseCaptureWindow : mouselookWindow;
++        int x = mouselookRemainderX, y = mouselookRemainderY;  // truncation keeps the remainder
++        macdrv_event* event;
++
++        if (!mouselookWindow || (!x && !y)) return;
++        mouselookRemainderX -= x;
++        mouselookRemainderY -= y;
++
++        event = macdrv_create_event(MOUSE_MOVED_RELATIVE, window);
++        event->mouse_moved.x = x;
++        event->mouse_moved.y = y;
++        event->mouse_moved.time_ms = [self ticksForEventTime:mouselookPendingTime];
++        event->mouse_moved.drag = mouselookPendingDrag;
++        [window.queue postEvent:event];
++        macdrv_release_event(event);
++
++        mouselookLastPost = [[NSProcessInfo processInfo] systemUptime];
++        cocoa_stats.mouselook_posted++;
++
++        os_unfair_lock_lock(&mouselook_lock);
++        mouselook_move_position(x, y);
++        os_unfair_lock_unlock(&mouselook_lock);
++    }
++
++    - (void) handleMouselookMove:(NSEvent*)anEvent
++    {
++        static int unscaled = -1;
++        double scale = retina_on ? 2.0 : 1.0;
++        NSTimeInterval now;
++
++        // Raw input carries this motion.  Pointer events stand in only while
++        // GCMouse is silent, for example for a mouse it does not report.
++        if (__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE))
++        {
++            if (macdrv_stat_clock() - __atomic_load_n(&raw_last_motion, __ATOMIC_RELAXED) < raw_silence)
++            {
++                mouselookWarpDelta = CGPointZero;
++                cocoa_stats.pointer_ignored++;
++                return;
++            }
++            cocoa_stats.pointer_fallback++;
++        }
++
++        // By default, keep the fullscreen canvas scale that absolute motion
++        // over the window has.  WINEMAC_MOUSELOOK_UNSCALED=1 uses the scale of
++        // edge-pinned relative motion instead, for comparison.
++        if (unscaled < 0)
++        {
++            const char* value = getenv("WINEMAC_MOUSELOOK_UNSCALED");
++            unscaled = value && *value == '1';
++        }
++        if (!unscaled)
++            scale /= macdrv_v1_canvas_scale(mouselookWindow);
++
++        // deltaY is already top-down, like Windows.
++        mouselookRemainderX += ([anEvent deltaX] - mouselookWarpDelta.x) * scale;
++        mouselookRemainderY += ([anEvent deltaY] - mouselookWarpDelta.y) * scale;
++        mouselookWarpDelta = CGPointZero;
++        mouselookPendingTime = [anEvent timestamp];
++        mouselookPendingDrag = [anEvent type] != NSEventTypeMouseMoved;
++        cocoa_stats.mouselook_moves++;
++
++        if (mouselookInterval <= 0)
++        {
++            [self postMouselookMotion];
++            return;
++        }
++
++        // Optional cap on the delivery rate (WINEMAC_MOUSELOOK_INTERVAL_US);
++        // motion in between accumulates and is never dropped.
++        now = [[NSProcessInfo processInfo] systemUptime];
++        if (now - mouselookLastPost >= mouselookInterval)
++            [self postMouselookMotion];
++        else if (!mouselookFlushScheduled)
++        {
++            mouselookFlushScheduled = TRUE;
++            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((mouselookLastPost + mouselookInterval - now) * NSEC_PER_SEC)),
++                           dispatch_get_main_queue(), ^{
++                mouselookFlushScheduled = FALSE;
++                [self postMouselookMotion];
++            });
++        }
++    }
++
++    /* Loads the Game Controller framework and starts raw input, once, for a
++       process allowed mouselook unless WINEMAC_MOUSELOOK_RAW=0.  The
++       framework is loaded at run time, so the driver links as before and
++       falls back to pointer events without it. */
++    - (void) startRawInput
++    {
++        const char* setting = getenv("WINEMAC_MOUSELOOK_RAW");
++        const char* interval = getenv("WINEMAC_MOUSELOOK_RAW_INTERVAL_US");
++        NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
++        NSString* const* connected;
++        NSString* const* disconnected;
++        dispatch_queue_attr_t attributes;
++        Class mouseClass;
++        void* framework;
++
++        if (rawStarted || !mouselook_allowed || (setting && *setting == '0'))
++            return;
++        rawStarted = TRUE;
++
++        framework = dlopen("/System/Library/Frameworks/GameController.framework/GameController", RTLD_LAZY | RTLD_LOCAL);
++        mouseClass = NSClassFromString(@"GCMouse");
++        connected = framework ? dlsym(framework, "GCMouseDidConnectNotification") : NULL;
++        disconnected = framework ? dlsym(framework, "GCMouseDidDisconnectNotification") : NULL;
++        if (!mouseClass || !connected || !disconnected)
++            return;
++
++        // At most 1,000 deliveries a second by default: each one costs the
++        // client thread a Wine server call, and gaming mice report up to
++        // 8,000 times a second.
++        raw_interval = interval && *interval ? strtoull(interval, NULL, 10) * 1000 : 1000000;
++
++        attributes = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
++        attributes = dispatch_queue_attr_make_with_autorelease_frequency(attributes, DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM);
++        raw_queue = dispatch_queue_create("org.winehq.wine.winemac.raw-input", attributes);
++        raw_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, DISPATCH_TIMER_STRICT, raw_queue);
++        dispatch_source_set_event_handler(raw_timer, ^{ raw_flush(); });
++        dispatch_source_set_timer(raw_timer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
++        dispatch_resume(raw_timer);
++
++        rawMice = [[NSMutableArray alloc] init];
++        [center addObserverForName:*connected object:nil queue:[NSOperationQueue mainQueue]
++                        usingBlock:^(NSNotification* note){ [self attachRawMouse:note.object]; }];
++        [center addObserverForName:*disconnected object:nil queue:[NSOperationQueue mainQueue]
++                        usingBlock:^(NSNotification* note){ [self detachRawMouse:note.object]; }];
++        for (GCMouse* mouse in [mouseClass mice])
++            [self attachRawMouse:mouse];
++        [self updateRawInput];
++    }
++
++    - (void) attachRawMouse:(GCMouse*)mouse
++    {
++        unsigned int source;
++
++        // Trackpads keep pointer events: aiming with one relies on macOS's
++        // pointer acceleration, and GCMouse gives no public way to tell them
++        // apart except the name ("Apple Internal Keyboard / Trackpad",
++        // "Magic Trackpad").
++        if ([mouse.vendorName rangeOfString:@"Trackpad" options:NSCaseInsensitiveSearch].location != NSNotFound)
++            return;
++        if ([rawMice containsObject:mouse]) return;
++        source = rawMiceAttached++;
++        [rawMice addObject:mouse];
++        mouse.handlerQueue = raw_queue;
++        mouse.mouseInput.mouseMovedHandler = ^(GCMouseInput* input, float deltaX, float deltaY){
++            raw_motion(deltaX, deltaY, source);
++        };
++    }
++
++    - (void) detachRawMouse:(GCMouse*)mouse
++    {
++        if (![rawMice containsObject:mouse]) return;
++        mouse.mouseInput.mouseMovedHandler = nil;
++        [rawMice removeObject:mouse];
++    }
++
++    /* Raw input delivers to the mouselook window unless it is unavailable or
++       switched off. */
++    - (void) updateRawInput
++    {
++        WineWindow* window = raw_queue && !rawSwitchedOff ? mouselookWindow : nil;
++        WineWindow* previous;
++
++        os_unfair_lock_lock(&mouselook_lock);
++        previous = raw_window;
++        raw_window = [window retain];
++        __atomic_store_n(&raw_on, window != nil, __ATOMIC_RELEASE);
++        os_unfair_lock_unlock(&mouselook_lock);
++        [previous release];
++    }
++
++    /* Test-only (WINEMAC_MOUSELOOK_SWITCH=1): Control-Option-Command-M
++       switches raw input off and on, so raw motion and pointer events can be
++       compared in the same match.  A sound marks the new mode: Glass for raw
++       input, Basso for pointer events. */
++    - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
++    {
++        static int enabled = -1;
++        NSEventModifierFlags required = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
++
++        if (enabled < 0)
++        {
++            const char* value = getenv("WINEMAC_MOUSELOOK_SWITCH");
++            enabled = value && *value == '1';
++        }
++        if (!enabled || !mouselook_allowed || [anEvent keyCode] != kVK_ANSI_M)
++            return NO;
++
++        if ([anEvent type] == NSEventTypeKeyUp)
++        {
++            if (!mouselookHotkeyDown) return NO;
++            mouselookHotkeyDown = FALSE;
++            return YES;
++        }
++        if (([anEvent modifierFlags] & required) != required)
++            return NO;
++
++        mouselookHotkeyDown = TRUE;
++        if (![anEvent isARepeat])
++        {
++            rawSwitchedOff = !rawSwitchedOff;
++            [self updateRawInput];
++            [[NSSound soundNamed:rawSwitchedOff ? @"Basso" : @"Glass"] play];
++            cocoa_stats.switches++;
++        }
++        return YES;
++    }
++
++    /* WINEMAC_INPUT_STATS=<prefix>: one JSON line per second to
++       <prefix>-<pid>.jsonl while this process is frontmost or has input
++       activity. */
++    - (void) startInputStats
++    {
++        const char* prefix = getenv("WINEMAC_INPUT_STATS");
++        char path[PATH_MAX];
++
++        if (!prefix || !*prefix) return;
++        if (snprintf(path, sizeof(path), "%s-%d.jsonl", prefix, getpid()) >= sizeof(path)) return;
++        if (!(inputStatsFile = fopen(path, "a"))) return;
++        inputStatsTimer = [[NSTimer timerWithTimeInterval:1.0 target:self selector:@selector(reportInputStats:)
++                                                 userInfo:nil repeats:YES] retain];
++        [[NSRunLoop mainRunLoop] addTimer:inputStatsTimer forMode:NSRunLoopCommonModes];
++    }
++
++    - (void) reportInputStats:(NSTimer*)timer
++    {
++        struct macdrv_input_stats wine;
++        __block __typeof__(raw_stats) raw = {0};
++        const char* handler = !clipCursorHandler ? "none" :
++            [clipCursorHandler isKindOfClass:[WineConfinementClipCursorHandler class]] ? "confinement" : "eventtap";
++        WineWindow* key = (WineWindow*)[NSApp keyWindow];
++        double canvasScale = [key isKindOfClass:[WineWindow class]] ? macdrv_v1_canvas_scale(key) : 1.0;
++
++#define TAKE(field) wine.field = __atomic_exchange_n(&macdrv_input_stats.field, 0, __ATOMIC_RELAXED)
++        TAKE(moves_delivered); TAKE(deliver_ns); TAKE(setpos_calls); TAKE(setpos_fast); TAKE(setpos_ns);
++        TAKE(setpos_max_ns); TAKE(getpos_calls); TAKE(getpos_ns); TAKE(clip_calls);
++#undef TAKE
++        wine.consumer_tid = macdrv_input_stats.consumer_tid;
++        wine.setpos_tid = macdrv_input_stats.setpos_tid;
++        if (raw_queue)
++            dispatch_sync(raw_queue, ^{
++                raw = raw_stats;
++                memset(&raw_stats, 0, sizeof(raw_stats));
++            });
++
++        // The frontmost process reports every second, so seconds with a still
++        // mouse are measured too; background processes only when active.
++        if (!inputStatsFile ||
++            !([NSApp isActive] || cocoa_stats.mac_moves || cocoa_stats.clicks || cocoa_stats.warps ||
++              cocoa_stats.mouselook_enters || cocoa_stats.mouselook_exits || cocoa_stats.switches ||
++              raw.moves || wine.moves_delivered || wine.setpos_calls || wine.getpos_calls || wine.clip_calls))
++            return;
++
++        fprintf(inputStatsFile,
++                "{\"schema\":1,\"unix_ms\":%.0f,\"pid\":%d,\"exe\":\"%s\",\"allowed\":%s,\"mode\":\"%s\","
++                "\"app_active\":%s,\"hidden\":%s,\"transparent\":%s,\"clipping\":%s,\"hidden_warp\":%s,\"clip_handler\":\"%s\","
++                "\"retina\":%s,\"canvas_scale\":%.4f,\"interval_us\":%.0f,"
++                "\"mac_moves\":%llu,\"mac_move_us\":%.1f,\"mac_dx\":%.1f,\"mac_dy\":%.1f,"
++                "\"posted_absolute\":%llu,\"posted_relative\":%llu,\"dropped_after_warp\":%llu,"
++                "\"warps\":%llu,\"warp_us\":%.1f,\"mouselook_moves\":%llu,\"mouselook_posted\":%llu,"
++                "\"mouselook_enters\":%llu,\"mouselook_exits\":%llu,\"clicks\":%llu,\"switches\":%llu,"
++                "\"raw_started\":%s,\"raw_switched_off\":%s,\"raw_interval_us\":%.0f,\"raw_mice\":%lu,"
++                "\"raw_moves\":%llu,\"raw_posted\":%llu,\"raw_dx\":%.1f,\"raw_dy\":%.1f,\"raw_sources\":%d,"
++                "\"pointer_ignored\":%llu,\"pointer_fallback\":%llu,"
++                "\"moves_delivered\":%llu,\"deliver_us\":%.1f,\"setpos_calls\":%llu,\"setpos_fast\":%llu,"
++                "\"setpos_us\":%.1f,\"setpos_max_us\":%.1f,\"getpos_calls\":%llu,\"getpos_us\":%.1f,"
++                "\"clip_calls\":%llu,\"consumer_tid\":%u,\"setpos_tid\":%u}\n",
++                [[NSDate date] timeIntervalSince1970] * 1000, getpid(), mouselook_process,
++                mouselook_allowed ? "true" : "false",
++                __atomic_load_n(&raw_on, __ATOMIC_ACQUIRE) ? "raw" : mouselookWindow ? "mouselook" : "legacy",
++                [NSApp isActive] ? "true" : "false",
++                clientWantsCursorHidden ? "true" : "false", cursorTransparent ? "true" : "false",
++                self.clippingCursor ? "true" : "false", mouselookHiddenWarp ? "true" : "false", handler,
++                retina_on ? "true" : "false", canvasScale, mouselookInterval * 1e6,
++                cocoa_stats.mac_moves, cocoa_stats.mac_move_ns / 1e3, cocoa_stats.mac_dx, cocoa_stats.mac_dy,
++                cocoa_stats.posted_absolute, cocoa_stats.posted_relative, cocoa_stats.dropped_after_warp,
++                cocoa_stats.warps, cocoa_stats.warp_ns / 1e3, cocoa_stats.mouselook_moves, cocoa_stats.mouselook_posted,
++                cocoa_stats.mouselook_enters, cocoa_stats.mouselook_exits, cocoa_stats.clicks, cocoa_stats.switches,
++                raw_queue ? "true" : "false", rawSwitchedOff ? "true" : "false", raw_interval / 1e3,
++                (unsigned long)[rawMice count], raw.moves, raw.posted, raw.dx, raw.dy, __builtin_popcount(raw.sources),
++                cocoa_stats.pointer_ignored, cocoa_stats.pointer_fallback,
++                wine.moves_delivered, wine.deliver_ns / 1e3, wine.setpos_calls, wine.setpos_fast,
++                wine.setpos_ns / 1e3, wine.setpos_max_ns / 1e3, wine.getpos_calls, wine.getpos_ns / 1e3,
++                wine.clip_calls, wine.consumer_tid, wine.setpos_tid);
++        fflush(inputStatsFile);
++        memset(&cocoa_stats, 0, sizeof(cocoa_stats));
+     }
+ 
+     - (BOOL) isKeyPressed:(uint16_t)keyCode
+@@ -1492,6 +2134,9 @@
+ 
+     - (void) windowWillOrderOut:(WineWindow*)window
+     {
++        if (window == mouselookWindow)
++            [self leaveMouselook];
++
+         if ([windowsBeingDragged containsObject:window])
+         {
+             [self window:window isBeingDragged:NO];
+@@ -1534,12 +2179,20 @@
+             event->window_drag_begin.no_activate = [NSEvent wine_commandKeyDown];
+         [window.queue postEvent:event];
+         macdrv_release_event(event);
++
++        [self updateMouselook];
+     }
+ 
+     - (void) handleMouseMove:(NSEvent*)anEvent
+     {
+         WineWindow* targetWindow;
+         BOOL drag = [anEvent type] != NSEventTypeMouseMoved;
++
++        if (mouselookWindow)
++        {
++            [self handleMouselookMove:anEvent];
++            return;
++        }
+ 
+         if ([windowsBeingDragged count])
+             targetWindow = nil;
+@@ -1576,7 +2229,10 @@
+             if (lastSetCursorPositionTime)
+             {
+                 if ([anEvent timestamp] <= lastSetCursorPositionTime)
++                {
++                    cocoa_stats.dropped_after_warp++;
+                     return;
++                }
+ 
+                 lastSetCursorPositionTime = 0;
+                 forceNextMouseMoveAbsolute = TRUE;
+@@ -1671,6 +2327,10 @@
+                 event->mouse_moved.drag = drag;
+ 
+                 [targetWindow.queue postEvent:event];
++                if (event->type == MOUSE_MOVED_ABSOLUTE)
++                    cocoa_stats.posted_absolute++;
++                else
++                    cocoa_stats.posted_relative++;
+             }
+ 
+             macdrv_release_event(event);
+@@ -1791,6 +2451,8 @@
+                 event->mouse_button.x = floor(pt.x);
+                 event->mouse_button.y = floor(pt.y);
+                 event->mouse_button.time_ms = [self ticksForEventTime:[theEvent timestamp]];
++                event->mouse_button.no_move = mouselookWindow != nil;
++                cocoa_stats.clicks++;
+ 
+                 [window.queue postEvent:event];
+ 
+@@ -1872,6 +2534,7 @@
+                 event->mouse_scroll.x = floor(pt.x);
+                 event->mouse_scroll.y = floor(pt.y);
+                 event->mouse_scroll.time_ms = [self ticksForEventTime:[theEvent timestamp]];
++                event->mouse_scroll.no_move = mouselookWindow != nil;
+ 
+                 if (CGEventGetIntegerValueField(cgevent, kCGScrollWheelEventIsContinuous))
+                 {
+@@ -1999,8 +2662,17 @@
+         else if (type == NSEventTypeMouseMoved || type == NSEventTypeLeftMouseDragged ||
+                  type == NSEventTypeRightMouseDragged || type == NSEventTypeOtherMouseDragged)
+         {
++            unsigned long long start = macdrv_stat_clock();
++
+             [self handleMouseMove:anEvent];
+             ret = mouseCaptureWindow && ![windowsBeingDragged count];
++            if (macdrv_input_stats_on)
++            {
++                cocoa_stats.mac_moves++;
++                cocoa_stats.mac_move_ns += macdrv_stat_clock() - start;
++                cocoa_stats.mac_dx += fabs([anEvent deltaX]);
++                cocoa_stats.mac_dy += fabs([anEvent deltaY]);
++            }
+         }
+         else if (type == NSEventTypeLeftMouseDown || type == NSEventTypeLeftMouseUp ||
+                  type == NSEventTypeRightMouseDown || type == NSEventTypeRightMouseUp ||
+@@ -2014,6 +2686,8 @@
+             [self handleScrollWheel:anEvent];
+             ret = mouseCaptureWindow != nil;
+         }
++        else if ((type == NSEventTypeKeyDown || type == NSEventTypeKeyUp) && [self handleMouselookSwitch:anEvent])
++            ret = TRUE;
+         else if (type == NSEventTypeKeyDown)
+         {
+             // -[NSApplication sendEvent:] seems to consume presses of the Help
+@@ -2118,6 +2792,21 @@
+             NSWindow* window = [note object];
+             if ([window isKindOfClass:[WineWindow class]])
+                 [self handleWindowDrag:(WineWindow *)window begin:YES];
++        }];
++
++        // Mouselook follows the key window.
++        [nc addObserverForName:NSWindowDidBecomeKeyNotification
++                        object:nil
++                         queue:[NSOperationQueue mainQueue]
++                    usingBlock:^(NSNotification *note){
++            [self updateMouselook];
++        }];
++
++        [nc addObserverForName:NSWindowDidResignKeyNotification
++                        object:nil
++                         queue:[NSOperationQueue mainQueue]
++                    usingBlock:^(NSNotification *note){
++            [self updateMouselook];
+         }];
+ 
+         [nc addObserverForName:NSWindowDidEndDraggingNotification
+@@ -2566,6 +3255,8 @@
+         // movement deltas are invalidated.  Make sure the next mouse move event
+         // starts over from an absolute baseline.
+         forceNextMouseMoveAbsolute = TRUE;
++
++        [self updateMouselook];
+     }
+ 
+     - (void)applicationDidChangeScreenParameters:(NSNotification *)notification
+@@ -2585,6 +3276,7 @@
+         macdrv_event* event;
+         WineEventQueue* queue;
+ 
++        [self updateMouselook];
+         [self invalidateGotFocusEvents];
+         [self releasePressedKeys];
+ 
+@@ -2957,11 +3649,54 @@
+     __block int ret;
+ 
+     OnMainThread(^{
+-        CGPoint physical = macdrv_v1_canvas_point((WineWindow *)NSApp.keyWindow, pos, TRUE);
+-        ret = [[WineApplicationController sharedController] setCursorPosition:cgpoint_mac_from_win(physical)];
++        WineApplicationController* controller = [WineApplicationController sharedController];
++        CGPoint physical;
++
++        // Mouselook may have started since the caller checked.
++        if ([controller recordMouselookPosition:pos])
++        {
++            ret = TRUE;
++            return;
++        }
++        physical = macdrv_v1_canvas_point((WineWindow *)NSApp.keyWindow, pos, TRUE);
++        ret = [controller setCursorPosition:cgpoint_mac_from_win(physical)];
++        if (ret)
++            [controller noteClientWarp];
+     });
+ 
+     return ret;
++}
++
++/***********************************************************************
++ *              macdrv_mouselook_set_cursor_position
++ *
++ * While mouselook is on, records the client's new cursor position (Wine
++ * coordinates) without moving the Mac pointer and returns non-zero.
++ * Returns zero when mouselook is off; the caller then warps as usual.
++ */
++int macdrv_mouselook_set_cursor_position(CGPoint pos)
++{
++    int handled;
++
++    if (!__atomic_load_n(&mouselook_on, __ATOMIC_ACQUIRE))
++        return 0;
++
++    os_unfair_lock_lock(&mouselook_lock);
++    if ((handled = mouselook_on))
++        mouselook_position = pos;
++    os_unfair_lock_unlock(&mouselook_lock);
++    return handled;
++}
++
++/***********************************************************************
++ *              macdrv_mouselook_active
++ *
++ * Whether the Mac pointer is frozen for mouselook, so that Wine's cursor
++ * position is authoritative.
++ */
++int macdrv_mouselook_active(void)
++{
++    return __atomic_load_n(&mouselook_on, __ATOMIC_ACQUIRE);
+ }
+ 
+ /***********************************************************************
+@@ -3002,6 +3737,7 @@
+             }
+         }
+ 
++        [controller setMouselookClipRect:clipping ? r : CGRectInfinite];
+         if (clipping)
+             ret = [controller startClippingCursor:rect];
+         else
+--- a/dlls/winemac.drv/cocoa_v1.h
++++ b/dlls/winemac.drv/cocoa_v1.h
+@@ -11,6 +11,8 @@
+ void macdrv_v1_canvas_restore(WineWindow *window);
+ CGRect macdrv_v1_canvas_frame(WineWindow *window, CGRect physical);
+ CGPoint macdrv_v1_canvas_point(WineWindow *window, CGPoint point, BOOL to_physical);
++/* Physical Wine pixels per logical canvas pixel; 1 when the canvas is inactive. */
++double macdrv_v1_canvas_scale(WineWindow *window);
+ CGRect macdrv_v1_canvas_clip(CGRect rect);
+ void macdrv_v1_canvas_event(macdrv_event *event);
+ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused);
+--- a/dlls/winemac.drv/cocoa_v1.m
++++ b/dlls/winemac.drv/cocoa_v1.m
+@@ -383,6 +383,14 @@
+                            origin.y+pad_y+(point.y-origin.y)*scale);
+     return CGPointMake(origin.x+(point.x-origin.x-pad_x)/scale,
+                        origin.y+(point.y-origin.y-pad_y)/scale);
++}
++
++double macdrv_v1_canvas_scale(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    if (!state || !state->active) return 1.0;
++    double scale = fmin(state->physical.size.width/state->pixels.width,
++                        state->physical.size.height/state->pixels.height);
++    return (isfinite(scale) && scale > 0) ? scale : 1.0;
+ }
+ 
+ CGRect macdrv_v1_canvas_clip(CGRect rect) {
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -65,6 +65,7 @@
+ 
+ #include <pthread.h>
+ #include <stdbool.h>
++#include <time.h>
+ 
+ #include "macdrv_res.h"
+ 
+@@ -146,6 +147,8 @@
+ extern bool retina_enabled;  /* Whether Retina mode is enabled via registry setting. */
+ extern bool retina_on;       /* Whether Retina mode is currently active (enabled and display is in default mode). */
+ extern bool enable_app_nap;
++extern bool mouselook_allowed;  /* This process may use mouselook (WINEMAC_MOUSELOOK lists its exe). */
++extern char mouselook_process[64];
+ 
+ static inline CGRect cgrect_mac_from_win(CGRect rect)
+ {
+@@ -235,6 +238,27 @@
+ extern int macdrv_get_cursor_position(CGPoint *pos);
+ extern int macdrv_set_cursor_position(CGPoint pos);
+ extern int macdrv_clip_cursor(CGRect rect);
++extern int macdrv_mouselook_set_cursor_position(CGPoint pos);
++extern int macdrv_mouselook_active(void);
++
++/* Input statistics (WINEMAC_INPUT_STATS). Wine threads add to these; the
++   Cocoa thread reports and resets them once a second. Times are nanoseconds. */
++struct macdrv_input_stats
++{
++    unsigned long long moves_delivered, deliver_ns;
++    unsigned long long setpos_calls, setpos_fast, setpos_ns, setpos_max_ns;
++    unsigned long long getpos_calls, getpos_ns;
++    unsigned long long clip_calls;
++    unsigned int consumer_tid, setpos_tid;
++};
++extern struct macdrv_input_stats macdrv_input_stats;
++extern bool macdrv_input_stats_on;
++#define MACDRV_STAT_ADD(field, value) \
++    do { if (macdrv_input_stats_on) __atomic_fetch_add(&macdrv_input_stats.field, (value), __ATOMIC_RELAXED); } while (0)
++static inline unsigned long long macdrv_stat_clock(void)
++{
++    return macdrv_input_stats_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++}
+ 
+ 
+ /* display */
+@@ -388,6 +412,7 @@
+             int             x;
+             int             y;
+             unsigned long   time_ms;
++            bool            no_move;    /* mouselook: at Wine's cursor position, not x,y */
+         }                                           mouse_button;
+         struct {
+             int             x;
+@@ -401,6 +426,7 @@
+             int             x;
+             int             y;
+             unsigned long   time_ms;
++            bool            no_move;    /* mouselook: at Wine's cursor position, not x,y */
+         }                                           mouse_scroll;
+         struct {
+             struct macdrv_query *query;
+--- a/dlls/winemac.drv/macdrv_main.c
++++ b/dlls/winemac.drv/macdrv_main.c
+@@ -57,6 +57,10 @@
+ bool use_confinement_cursor_clipping = true;
+ bool cursor_clipping_locks_windows = true;
+ bool use_precise_scrolling = true;
++bool mouselook_allowed = false;
++char mouselook_process[64];
++struct macdrv_input_stats macdrv_input_stats;
++bool macdrv_input_stats_on = false;
+ int gl_surface_mode = GL_SURFACE_IN_FRONT_OPAQUE;
+ bool retina_enabled = false;
+ bool enable_app_nap = false;
+@@ -281,6 +285,36 @@
+  *
+  * Set up the Mac driver options.
+  */
++/***********************************************************************
++ *              setup_mouselook
++ *
++ * Mouselook (relative mouse mode while the client hides and confines or
++ * re-centres the cursor) is opt-in per executable: WINEMAC_MOUSELOOK is a
++ * semicolon-separated list of exe names, matched case-insensitively.
++ */
++static void setup_mouselook(const WCHAR *appname)
++{
++    const char *list = getenv("WINEMAC_MOUSELOOK");
++    int i;
++
++    for (i = 0; appname[i] && i < ARRAY_SIZE(mouselook_process) - 1; i++)
++        mouselook_process[i] = appname[i] < 0x80 ? (char)appname[i] : '?';
++    mouselook_process[i] = 0;
++    macdrv_input_stats_on = getenv("WINEMAC_INPUT_STATS") && *getenv("WINEMAC_INPUT_STATS");
++
++    while (list && *list)
++    {
++        const char *end = strchr(list, ';');
++        size_t len = end ? (size_t)(end - list) : strlen(list);
++        if (len && len == strlen(mouselook_process) && !strncasecmp(list, mouselook_process, len))
++        {
++            mouselook_allowed = true;
++            break;
++        }
++        list = end ? end + 1 : NULL;
++    }
++}
++
+ static void setup_options(void)
+ {
+     static const WCHAR macdriverW[] = {'\\','M','a','c',' ','D','r','i','v','e','r',0};
+@@ -297,6 +331,7 @@
+     if ((p = wcsrchr(appname, '/'))) appname = p + 1;
+     if ((p = wcsrchr(appname, '\\'))) appname = p + 1;
+     len = lstrlenW(appname);
++    setup_mouselook(appname);
+ 
+     if (len && len < MAX_PATH)
+     {
+--- a/dlls/winemac.drv/mouse.c
++++ b/dlls/winemac.drv/mouse.c
+@@ -664,6 +664,7 @@
+     CGRect rect;
+ 
+     TRACE("%s %u\n", wine_dbgstr_rect(clip), reset);
++    MACDRV_STAT_ADD(clip_calls, 1);
+ 
+     if (reset) return TRUE;
+ 
+@@ -689,8 +690,16 @@
+ {
+     CGPoint pt;
+     BOOL ret;
+-
++    unsigned long long start;
++
++    /* In mouselook the Mac pointer is frozen and Wine's own position, which
++       the caller already filled in, is the real one. */
++    if (macdrv_mouselook_active()) return TRUE;
++
++    start = macdrv_stat_clock();
+     ret = macdrv_get_cursor_position(&pt);
++    MACDRV_STAT_ADD(getpos_calls, 1);
++    MACDRV_STAT_ADD(getpos_ns, macdrv_stat_clock() - start);
+     if (ret)
+     {
+         TRACE("pointer at (%g,%g) server pos %d,%d\n", pt.x, pt.y, pos->x, pos->y);
+@@ -839,7 +848,28 @@
+  */
+ BOOL macdrv_SetCursorPos(INT x, INT y)
+ {
+-    BOOL ret = macdrv_set_cursor_position(CGPointMake(x, y));
++    unsigned long long start, elapsed;
++    BOOL ret;
++
++    if (macdrv_input_stats_on)
++        macdrv_input_stats.setpos_tid = HandleToULong(NtCurrentTeb()->ClientId.UniqueThread);
++    MACDRV_STAT_ADD(setpos_calls, 1);
++
++    /* In mouselook the Mac pointer is frozen: re-centring is Wine-side only,
++       with no warp and no wait for the Cocoa thread. */
++    if (macdrv_mouselook_set_cursor_position(CGPointMake(x, y)))
++    {
++        MACDRV_STAT_ADD(setpos_fast, 1);
++        TRACE("mouselook position %d,%d\n", x, y);
++        return TRUE;
++    }
++
++    start = macdrv_stat_clock();
++    ret = macdrv_set_cursor_position(CGPointMake(x, y));
++    elapsed = macdrv_stat_clock() - start;
++    MACDRV_STAT_ADD(setpos_ns, elapsed);
++    if (macdrv_input_stats_on && elapsed > macdrv_input_stats.setpos_max_ns)
++        macdrv_input_stats.setpos_max_ns = elapsed;
+     if (ret)
+         TRACE("warped to %d,%d\n", x, y);
+     else
+@@ -890,7 +920,11 @@
+         }
+     }
+ 
+-    send_mouse_input(hwnd, event->window, flags | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
++    /* A mouselook click happens where Wine's cursor is; the frozen Mac pointer
++       position would otherwise move the cursor and turn the camera. */
++    if (!event->mouse_button.no_move)
++        flags |= MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
++    send_mouse_input(hwnd, event->window, flags,
+                      event->mouse_button.x, event->mouse_button.y,
+                      data, FALSE, event->mouse_button.time_ms);
+ }
+@@ -904,6 +938,7 @@
+ void macdrv_mouse_moved(HWND hwnd, const macdrv_event *event)
+ {
+     UINT flags = MOUSEEVENTF_MOVE;
++    unsigned long long start = macdrv_stat_clock();
+ 
+     TRACE("win %p/%p %s (%d,%d) drag %d time %lu (%lu ticks ago)\n", hwnd, event->window,
+           (event->type == MOUSE_MOVED_RELATIVE) ? "relative" : "absolute",
+@@ -915,6 +950,13 @@
+ 
+     send_mouse_input(hwnd, event->window, flags, event->mouse_moved.x, event->mouse_moved.y,
+                      0, event->mouse_moved.drag, event->mouse_moved.time_ms);
++
++    if (macdrv_input_stats_on)
++    {
++        macdrv_input_stats.consumer_tid = HandleToULong(NtCurrentTeb()->ClientId.UniqueThread);
++        MACDRV_STAT_ADD(moves_delivered, 1);
++        MACDRV_STAT_ADD(deliver_ns, macdrv_stat_clock() - start);
++    }
+ }
+ 
+ 
+@@ -925,17 +967,19 @@
+  */
+ void macdrv_mouse_scroll(HWND hwnd, const macdrv_event *event)
+ {
++    UINT position = event->mouse_scroll.no_move ? 0 : MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
++
+     TRACE("win %p/%p scroll (%d,%d) at (%d,%d) time %lu (%lu ticks ago)\n", hwnd,
+           event->window, event->mouse_scroll.x_scroll, event->mouse_scroll.y_scroll,
+           event->mouse_scroll.x, event->mouse_scroll.y,
+           event->mouse_scroll.time_ms, (NtGetTickCount() - event->mouse_scroll.time_ms));
+ 
+     if (event->mouse_scroll.y_scroll)
+-        send_mouse_input(hwnd, event->window, MOUSEEVENTF_WHEEL | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
++        send_mouse_input(hwnd, event->window, MOUSEEVENTF_WHEEL | position,
+                          event->mouse_scroll.x, event->mouse_scroll.y,
+                          event->mouse_scroll.y_scroll, FALSE, event->mouse_scroll.time_ms);
+     if (event->mouse_scroll.x_scroll)
+-        send_mouse_input(hwnd, event->window, MOUSEEVENTF_HWHEEL | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
++        send_mouse_input(hwnd, event->window, MOUSEEVENTF_HWHEEL | position,
+                          event->mouse_scroll.x, event->mouse_scroll.y,
+                          event->mouse_scroll.x_scroll, FALSE, event->mouse_scroll.time_ms);
+ }

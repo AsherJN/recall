@@ -1,0 +1,114 @@
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+#define AIRCONV_API
+using sm50_shader_t = void *;
+using sm50_bitcode_t = void *;
+using sm50_error_t = void *;
+struct SM50_SHADER_COMPILATION_ARGUMENT_DATA {};
+struct UnsupportedFeature { std::string msg = "mock conversion error"; };
+static bool conversion_fails;
+static int owned_vectors = 0;
+
+namespace llvm {
+template<class T, size_t N> struct SmallVector : std::vector<T> {
+  SmallVector() { ++owned_vectors; }
+  ~SmallVector() { --owned_vectors; }
+};
+struct raw_svector_ostream {
+  SmallVector<char, 0> &buffer;
+  explicit raw_svector_ostream(SmallVector<char, 0> &value) : buffer(value) {}
+  template<class T> raw_svector_ostream &operator<<(const T &) { buffer.push_back('x'); return *this; }
+};
+struct LLVMContext { void setOpaquePointers(bool) {} };
+struct Module { Module(const char *, LLVMContext &) {} };
+struct Error { explicit operator bool() const { return conversion_fails; } };
+template<class F> void handleAllErrors(Error, F function) { function(UnsupportedFeature{}); }
+}
+namespace microsoft {}
+namespace dxmt {
+namespace air {}
+namespace shader { namespace common {} }
+namespace dxbc {
+struct SM50ShaderInternal { struct { bool use_msad = false; bool use_samplepos = false; } shader_info; };
+template<class... T> llvm::Error convertDXBC(T &&...) { return {}; }
+template<class... T> llvm::Error convert_dxbc_vertex_hull_shader(T &&...) { return {}; }
+template<class... T> llvm::Error convert_dxbc_tesselator_domain_shader(T &&...) { return {}; }
+template<class... T> llvm::Error convert_dxbc_vertex_for_geometry_shader(T &&...) { return {}; }
+template<class... T> llvm::Error convert_dxbc_geometry_shader(T &&...) { return {}; }
+}
+static void initializeModule(llvm::Module &) {}
+static void linkMSAD(llvm::Module &) {}
+static void linkSamplePos(llvm::Module &) {}
+static void linkTessellation(llvm::Module &) {}
+static void runOptimizationPasses(llvm::Module &) {}
+}
+namespace metallib {
+struct MetallibWriter { void Write(llvm::Module &, llvm::raw_svector_ostream &out) { out << "mock library"; } };
+}
+
+@OWNED_TYPES@
+@COMPILE_APIS@
+
+// This retains the actual initialization ownership prologue and invalid-output
+// branch. DXBC parsing/reflection are outside the scope of this ownership test.
+static int SM50InitializeOwnership(sm50_shader_t *ppShader, sm50_error_t *ppError) {
+@INITIALIZE_PROLOGUE@
+  return 0;
+}
+
+static void check(bool condition, const char *message) {
+  if (!condition) throw std::runtime_error(message);
+}
+
+template<class Invoke>
+static void test_api(const char *name, Invoke invoke) {
+  conversion_fails = false;
+  sm50_bitcode_t bitcode = nullptr;
+  sm50_error_t error = nullptr;
+  check(invoke(&bitcode, &error) == 0 && bitcode && !error, "success outputs incorrect");
+  check(owned_vectors == 1, "success leaked a converter error object");
+  SM50DestroyBitcode(bitcode);
+  check(owned_vectors == 0, "bitcode cleanup leaked storage");
+
+  bitcode = nullptr;
+  conversion_fails = true;
+  check(invoke(&bitcode, &error) == 1 && !bitcode && error, "conversion failure outputs incorrect");
+  check(owned_vectors == 1, "error ownership not transferred exactly once");
+  SM50FreeError(error);
+  check(owned_vectors == 0, "caller could not free transferred error");
+
+  error = nullptr;
+  conversion_fails = false;
+  check(invoke(nullptr, &error) == 1 && error, "invalid output argument did not return error");
+  check(owned_vectors == 1, "invalid output argument leaked storage");
+  SM50FreeError(error);
+  check(owned_vectors == 0, "invalid argument error cleanup failed");
+  std::cout << "PASS " << name << ": success, conversion error, invalid output pointer\n";
+}
+
+int main() {
+  try {
+    sm50_shader_t shader_output = nullptr;
+    sm50_error_t error = nullptr;
+    check(SM50InitializeOwnership(&shader_output, &error) == 0 && !error, "initialize ownership success failed");
+    check(owned_vectors == 0, "initialize success leaked error object");
+    check(SM50InitializeOwnership(nullptr, &error) == 1 && error, "initialize ownership error failed");
+    check(owned_vectors == 1, "initialize error ownership was not transferred");
+    SM50FreeError(error);
+    check(owned_vectors == 0, "initialize error cleanup failed");
+    std::cout << "PASS initialization ownership prologue: success and invalid output pointer\n";
+
+    dxmt::dxbc::SM50ShaderInternal primary, secondary;
+    test_api("SM50Compile", [&](auto output, auto error_output) { return SM50Compile(&primary, nullptr, "mock", output, error_output); });
+    test_api("SM50CompileTessellationPipelineHull", [&](auto output, auto error_output) { return SM50CompileTessellationPipelineHull(&primary, &secondary, nullptr, "mock", output, error_output); });
+    test_api("SM50CompileTessellationPipelineDomain", [&](auto output, auto error_output) { return SM50CompileTessellationPipelineDomain(&primary, &secondary, nullptr, "mock", output, error_output); });
+    test_api("SM50CompileGeometryPipelineVertex", [&](auto output, auto error_output) { return SM50CompileGeometryPipelineVertex(&primary, &secondary, nullptr, "mock", output, error_output); });
+    test_api("SM50CompileGeometryPipelineGeometry", [&](auto output, auto error_output) { return SM50CompileGeometryPipelineGeometry(&primary, &secondary, nullptr, "mock", output, error_output); });
+    return 0;
+  } catch (const std::exception &error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
+}

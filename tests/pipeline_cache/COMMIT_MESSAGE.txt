@@ -1,0 +1,16 @@
+test: validate Metal pipeline archive reuse and recipe prewarming
+
+Exercise real Metal archive capture, strict hits, misses and rendering fallback
+with fresh-process comparisons against the enabled default framework cache.
+Validate production recipe serialization and native cache-manager prewarming,
+PSO identity reuse, zero startup budget, corruption recovery and disabled mode
+with real metallib assets and GPU pixel readback under ASan and UBSan.
+Prove bounded preparation expands immutable archive coverage across launches,
+skips missing-library entries fairly, and preserves distinct-library rendering.
+Reproduce loaded-archive serialization failure with a direct Metal probe.
+
+Add production-recorder stress for 8192 valid recipes,2304 queued records,
+isolated diagnostics, bounded payload, delayed dependencies, distinct capacity
+failures, actual Metal memory-hit repair and transient path-write recovery.
+Verify every saved dependency hash and distinguish overloaded retries from
+zero-drop performance claims.

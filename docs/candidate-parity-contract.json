@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "profile": "v1.0",
+  "candidate_commit": "962d082d97e9a87e87846ec1d136b566a99ef77f",
+  "default_resolution": [1920, 1200],
+  "supported_resolutions": [
+    [1920, 1080],
+    [1920, 1200],
+    [2560, 1440],
+    [2560, 1600],
+    [3840, 2160],
+    [3840, 2400]
+  ],
+  "registry": {
+    "HKCU/Software/Wine/Mac Driver": {
+      "RetinaMode": "Y"
+    }
+  },
+  "launch_preferences": {
+    "UseCustomWorldScale": "1",
+    "DynamicRenderScale": "0",
+    "FullscreenWindow": "0",
+    "FullscreenWindowEnabled": "0",
+    "WindowedFullscreen": "0",
+    "WindowMode": "0",
+    "FullScreenWidth": "1920",
+    "FullScreenHeight": "1200",
+    "FullScreenRefresh": "120",
+    "WindowedWidth": "1920",
+    "WindowedHeight": "1200",
+    "WindowedPosX": "100",
+    "WindowedPosY": "100"
+  },
+  "baseline_preferences": {
+    "FrameRateCap": "600",
+    "UseCustomFrameRates": "1",
+    "GFXPresetLevel": "1",
+    "PhysicsQuality": "3",
+    "VerticalSyncEnabled": "0",
+    "ShowFPSCounter": "1",
+    "ShowRTT": "1",
+    "WindowedRefresh": "120"
+  },
+  "environment": {
+    "WINEMSYNC": "1",
+    "WINEESYNC": "0",
+    "ROSETTA_ADVERTISE_AVX": "1",
+    "WINE_SIMULATE_WRITECOPY": "1",
+    "CX_ACTIVE_GRAPHICS_BACKEND": "dxmt",
+    "CX_GRAPHICS_BACKEND": "dxmt",
+    "WINEDLLOVERRIDES": "d3d11,dxgi,d3d10core,winemetal=b;d3d12=",
+    "DXMT_CANVAS_DRAWABLES": "3",
+    "DXMT_CANVAS_OVERLAY": "0",
+    "DXMT_USE_DEFAULT_METAL_CACHE": "1",
+    "DXMT_PIPELINE_CACHE_NAMESPACE": "ow2-source-v1",
+    "DXMT_PIPELINE_CACHE_PREWARM_MS": "10000",
+    "DXMT_PIPELINE_CACHE_PREWARM_LIMIT": "128",
+    "DXMT_PIPELINE_CACHE_PREFER_EXPENSIVE": "1",
+    "WINEMAC_MOUSELOOK": "Overwatch.exe",
+    "DXMT_PREPARE_SHADERS": "1"
+  },
+  "renderer_profile": "config/dxmt-source60-1200.conf",
+  "renderer_profile_sha256": "908714b7136bd21711681713fbab945ad195a6bacb8775b6c45de63d570fa9f7",
+  "reference_identity": "docs/candidate-v6.json"
+}

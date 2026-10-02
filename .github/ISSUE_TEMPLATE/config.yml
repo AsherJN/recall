@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Fix a common problem
+    url: https://github.com/AsherJN/recall/blob/main/docs/SUPPORT.md#if-something-goes-wrong
+    about: Quick fixes for black screens, displays, Battle.net and more.
+  - name: Install, update or uninstall
+    url: https://github.com/AsherJN/recall/blob/main/docs/INSTALLATION.md
+    about: Requirements, external drives, updates and removing Recall.

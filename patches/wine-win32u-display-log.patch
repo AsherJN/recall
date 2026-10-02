@@ -1,0 +1,128 @@
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index 8798fbf..bb4937f 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -26,6 +26,13 @@
+ 
+ #include <pthread.h>
+ #include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/time.h>
++#include <unistd.h>
++#include <dlfcn.h>
++#include <execinfo.h>
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -2806,6 +2813,70 @@ void reset_monitor_update_serial(void)
+     pthread_mutex_unlock( &display_lock );
+ }
+ 
++/* WINE_DISPLAY_LOG=<file> (diagnostics): every forced display-device update (a full query
++ * of the display driver that rewrites the display registry keys) and every display mode
++ * change notification, with the reason, a native backtrace and the time it took. */
++static FILE *display_log_file;
++static pthread_mutex_t display_log_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++static FILE *display_log(void)
++{
++    static int initialized;
++    const char *value;
++    char path[1024];
++
++    if (initialized) return display_log_file;
++    pthread_mutex_lock( &display_log_mutex );
++    if (!initialized)
++    {
++        if ((value = getenv( "WINE_DISPLAY_LOG" )) && *value)
++        {
++            snprintf( path, sizeof(path), "%s.%d", value, (int)getpid() );
++            if ((display_log_file = fopen( path, "a" ))) setvbuf( display_log_file, NULL, _IOLBF, 0 );
++        }
++        initialized = 1;
++    }
++    pthread_mutex_unlock( &display_log_mutex );
++    return display_log_file;
++}
++
++static double display_log_now(void)
++{
++    struct timeval now;
++    gettimeofday( &now, NULL );
++    return now.tv_sec + now.tv_usec / 1e6;
++}
++
++static void display_log_event( const char *event, double elapsed_ms )
++{
++    void *frames[12];
++    char line[2048];
++    size_t pos;
++    int count, i;
++    FILE *file = display_log();
++
++    if (!file) return;
++    pos = snprintf( line, sizeof(line), "%.3f tid=%04x %s ms=%.1f |", display_log_now(),
++                    (unsigned int)GetCurrentThreadId(), event, elapsed_ms );
++    count = backtrace( frames, 12 );
++    for (i = 1; i < count && pos < sizeof(line) - 128; i++)
++    {
++        Dl_info info;
++        const char *module = "?", *slash;
++        if (dladdr( frames[i], &info ) && info.dli_fname)
++        {
++            /* offsets from the image base resolve against the unstripped build with atos */
++            module = (slash = strrchr( info.dli_fname, '/' )) ? slash + 1 : info.dli_fname;
++            pos += snprintf( line + pos, sizeof(line) - pos, " %s+%#lx", module,
++                             (unsigned long)((char *)frames[i] - (char *)info.dli_fbase) );
++        }
++        else pos += snprintf( line + pos, sizeof(line) - pos, " %p", frames[i] );
++    }
++    pthread_mutex_lock( &display_log_mutex );
++    fprintf( file, "%s\n", line );
++    pthread_mutex_unlock( &display_log_mutex );
++}
++
+ static BOOL lock_display_devices( BOOL force )
+ {
+     static const WCHAR wine_service_station_name[] =
+@@ -2833,15 +2904,21 @@ static BOOL lock_display_devices( BOOL force )
+         return TRUE;
+     }
+ 
+-    if (!force && !update_display_cache_from_registry( serial )) force = TRUE;
+-    if (force)
+     {
+-        if (!get_vulkan_gpus( &ctx.vulkan_gpus )) WARN( "Failed to find any vulkan GPU\n" );
+-        if (!(status = update_display_devices( &ctx ))) commit_display_devices( &ctx );
+-        else WARN( "Failed to update display devices, status %#x\n", status );
+-        release_display_manager_ctx( &ctx );
+-
+-        ret = update_display_cache_from_registry( serial );
++        BOOL requested = force;
++        if (!force && !update_display_cache_from_registry( serial )) force = TRUE;
++        if (force)
++        {
++            double start = display_log() ? display_log_now() : 0;
++            if (!get_vulkan_gpus( &ctx.vulkan_gpus )) WARN( "Failed to find any vulkan GPU\n" );
++            if (!(status = update_display_devices( &ctx ))) commit_display_devices( &ctx );
++            else WARN( "Failed to update display devices, status %#x\n", status );
++            release_display_manager_ctx( &ctx );
++
++            ret = update_display_cache_from_registry( serial );
++            if (start) display_log_event( requested ? "forced_update" : "update_after_failed_read",
++                                          (display_log_now() - start) * 1000 );
++        }
+     }
+ 
+     if (!ret)
+@@ -4301,6 +4378,8 @@ static void display_mode_changed( BOOL broadcast )
+ {
+     DEVMODEW current_mode = {.dmSize = sizeof(DEVMODEW)};
+ 
++    display_log_event( broadcast ? "display_mode_changed(broadcast)" : "display_mode_changed(driver)", 0 );
++
+     if (!update_display_cache( TRUE ))
+     {
+         ERR( "Failed to update display cache after mode change.\n" );

@@ -1,0 +1,21 @@
+# Offline preparation validation
+
+`python3 tests/pipeline_cache/run_offline_prepare.py --build-helper` builds the real standalone helper with `DXMT_PIPELINE_CACHE_OFFLINE_TOOL`, plus a separate normal game-mode manager library. It uses only fresh isolated caches under its `logs/dxmt/offline-prepare-proof-*` output.
+
+The test learns three actual Metal pipelines with the existing rendering/readback probe, prepares one under the normal startup budget, then checks that offline compaction preserves that key while adding the other two. A fresh process strictly verifies archive coverage without mutating cache files. Removing an old recipe or AIR dependency must prevent replacement publication; corrupt archive bytes must be detected. The wrapper's safe rejection of failed preparation is separately exercised by `tests/test_prepare_dxmt_pipelines.py`.
+
+A second stage captures 256 legal descriptor variants through the production codec, using vertex-buffer mutability flags with the same no-buffer fixture shader. Two variants are checked with real GPU pixel readback. Offline preparation and fresh strict verification then cover all 259 recipes, proving the standalone budget exceeds the normal 128-state startup default without changing that gameplay default. Runtime archive hits, lookup-reason metadata, and unavailable inventory metadata are inspected. This is correctness/coverage evidence, not a game frame-rate benchmark.
+
+The Python publication tests cover game/writer exclusion, helper source/binary integrity, preservation of prior coverage and learned bytes, strict verification/hash rejection, game startup before publication, atomic nonempty-directory exchange and inverse exchange, unsupported/failed exchange without changing the active cache, rollback after backup placement fails, explicit unsafe failure preserving both caches when rollback exchange also fails or an interruption occurs immediately after the successful swap, backup integrity after successful publication, and disk-headroom/up-to-date skip paths. They mock the native result while exercising actual isolated cloning, leases, hashes and directory publication. Native Metal correctness is covered by the independent test above.
+
+Each report includes source hashes and whether source changed during its run. The generated fixture/cache/artifact footprint is only a few MiB. No real game cache, game install, global graphics cache or user file is modified.
+
+Publication now uses macOS `renameatx_np(RENAME_SWAP)`: the active directory name always exists throughout the exchange. Tests run the real syscall on nonempty temporary directories, verify inode/content exchange and restoration, and confirm a missing-target failure preserves the existing directory. A publication pointer file records the active/candidate/backup locations before the exchange. No real cache is used by these tests.
+
+## Bounded real-cache preparation
+
+The launcher estimates the next batch from the existing archive's measured bytes per key, targeting 90% of the unchanged 128 MiB archive budget. New catalogs start with at most 256 additions; established catalogs add at most 1,024 keys, retain every previously prepared key, and stay below the 7,168-key manifest bound. Archives already at 85% of the byte budget skip recompaction so tiny gains do not repeatedly create large backups.
+
+A failed archive expansion retries at most three times, halving only the proposed additions and cloning the unchanged original anew each time. A plain missing-dependency/no-expansion result without an archive failure does not retry. Publication still requires preserved old coverage, strict fresh-process archive verification, unchanged recipe/AIR hashes and matching archive bytes.
+
+The actual game-cache experiment prepared 768 keys (512 old plus 256 new) into a 116,678,592-byte archive and strictly verified all 768 without failure. All 9,037 recipe files and 9,434 AIR files matched the active cache byte-for-byte. Its isolated clone was then removed at the root agent's request; the report, strict-verification results, complete compressed learned-file hash manifest and cleanup verification remain under `logs/dxmt/real-cache-capacity-20260911-212332/`. The experiment did not publish or modify the active cache.

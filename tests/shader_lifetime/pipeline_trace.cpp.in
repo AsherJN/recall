@@ -1,0 +1,129 @@
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
+#include <filesystem>
+#include <iostream>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace dxmt {
+struct Sha1Digest { std::string string() const { return std::string(40, '0'); } };
+using mutex = std::mutex;
+using condition_variable = std::condition_variable;
+}
+static unsigned GetCurrentProcessId() { return 42; }
+@SHADER_TRACE@
+@PIPELINE_READY@
+using namespace dxmt;
+
+static void check(bool condition, const char *message) {
+  if (!condition) throw std::runtime_error(message);
+}
+struct MTL_COMPILED_GRAPHICS_PIPELINE { int state = 0; };
+struct MTL_COMPILED_COMPUTE_PIPELINE { int state = 0; };
+struct MTL_COMPILED_TESSELLATION_MESH_PIPELINE { int state = 0; unsigned outputs = 0, threads = 0; };
+struct Ready : dxmt::PipelineReady {
+  std::atomic_bool entered{false};
+  uint64_t wait() {
+    entered.store(true);
+    return dxmt::PipelineReady::wait();
+  }
+};
+struct Metal {
+  bool fail = false;
+  int calls = 0;
+  int newRenderPipelineState(int, int &) { ++calls; return fail ? 0 : 42; }
+  int newComputePipelineState(int, int &) { ++calls; return fail ? 0 : 42; }
+};
+struct Device { Metal metal; Metal &GetMTLDevice() { return metal; } };
+static dxmt::mutex ts_global_mutex;
+struct Fixture {
+  Device device;
+  Device *device_ = &device;
+  Ready ready_;
+  int state_ = 0, state_mesh_ = 0, state_rasterization_ = 0;
+  struct { unsigned NumOutputElement = 7, ThreadsPerPatch = 3; } hull_reflection;
+  const uint64_t trace_id_ = nextPipelineTraceId();
+};
+@PIPELINE_CLASSES@
+
+template<class Pipeline>
+static void test_pipeline() {
+  for (bool failure : {false, true}) {
+    Pipeline pipeline;
+    pipeline.device.metal.fail = failure;
+    pipeline.SetIsDone(false);
+    check(!pipeline.GetIsDone(), "false scheduler update completed task");
+    typename Pipeline::Output result;
+    std::thread producer([&] {
+      while (!pipeline.ready_.entered.load()) std::this_thread::yield();
+      pipeline.create();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      pipeline.SetIsDone(true);
+    });
+    pipeline.GetPipeline(&result);
+    check(result.state == (failure ? 0 : 42), "wait failed to acquire pipeline result");
+    producer.join();
+    check(pipeline.device.metal.calls == 1, "instrumentation duplicated Metal creation");
+    check(pipeline.GetIsDone(), "scheduler cannot observe completion");
+    pipeline.SetIsDone(false);
+    check(pipeline.GetIsDone(), "false scheduler update reset one-shot completion");
+    pipeline.GetPipeline(&result); // Ready path must not produce another wait row.
+    check(result.state == (failure ? 0 : 42), "ready path changed returned pipeline");
+    check((pipeline.ready_.wait() > 0) == ShaderTraceSink::instance().enabled(),
+          "publication timing did not follow enabled tracing");
+  }
+}
+
+int main(int argc, char **argv) {
+  try {
+    check(argc == 2, "expected test mode");
+    const std::string mode = argv[1];
+    auto &sink = ShaderTraceSink::instance();
+    if (mode == "pipelines" || mode == "disabled") {
+      test_pipeline<Test_graphics>();
+      test_pipeline<Test_compute>();
+      test_pipeline<Test_gs>();
+      test_pipeline<Test_ts>();
+      sink.pipeline(1, nextPipelineTraceId(), "graphics", "wait", 100, true);
+      if (mode == "disabled") {
+        check(!sink.enabled(), "quiet pipeline initialized tracing");
+        std::cout << "PASS disabled actual pipeline methods\n";
+        return 0;
+      }
+    } else if (mode == "cap") {
+      for (unsigned i = 0; i < 100005; ++i) {
+        sink.write("0,sha,var,missing,ready,0,0,0,0,0,0,0,0\n");
+        sink.pipeline(1, i + 1, "graphics", "createMetal", 1, false);
+      }
+    } else if (mode == "shutdown") {
+      sink.pipeline(1, 1, "graphics", "createMetal", 1, false);
+      std::atomic_bool start{false};
+      std::vector<std::thread> workers;
+      for (unsigned i = 0; i < 4; ++i) workers.emplace_back([&] {
+        while (!start.load()) std::this_thread::yield();
+        for (unsigned j = 0; j < 1000; ++j)
+          sink.pipeline(1, 2, "compute", "createMetal", 1, false);
+      });
+      start.store(true);
+      sink.shutdown();
+      for (auto &worker : workers) worker.join();
+    } else {
+      throw std::runtime_error("unknown test mode");
+    }
+    sink.shutdown();
+    check(!sink.enabled(), "shutdown left sink enabled");
+    const auto file = std::string(std::getenv("DXMT_SHADER_LOG")) + "-pipelines-42.csv";
+    const auto size = std::filesystem::file_size(file);
+    sink.pipeline(1, 1, "gs", "createMetal", 999, false);
+    sink.write("late write must be ignored\n");
+    sink.shutdown();
+    check(std::filesystem::file_size(file) == size, "late write changed a closed stream");
+    std::cout << "PASS native " << mode << '\n';
+    return 0;
+  } catch (const std::exception &error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
+}

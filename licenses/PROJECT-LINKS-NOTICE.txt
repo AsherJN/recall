@@ -1,0 +1,61 @@
+Mosaic News artwork
+
+Owner-supplied large-logo-news.pdf, used at the owner's request on 2026-09-14.
+Original SHA-256: e68ba7865f71c8fa28a955baaad966add50c9972879be5e5eb2d9a9228a5a898
+Rendered with Poppler pdftocairo as a transparent 1250-pixel-wide PNG. Text,
+EXIF and timestamp metadata excluded. Original PDF remains untouched locally.
+MosaicLogo.png SHA-256: 7d596a74bfaefce23a7cad874d7b14a016b2ae00b2c551260596623b32791aba
+Mosaic artwork and branding remain the property of their respective owner;
+the project's source-code license does not grant trademark rights.
+
+LinkedIn profile-link mark
+
+Official LI-In-Bug.png from:
+https://content.linkedin.com/content/dam/me/brand/en-us/brand-home/downloads/LinkedIn-Logos.zip
+Retrieved 2026-09-14. Used only to link to the owner's LinkedIn profile.
+Guidance: https://brand.linkedin.com/in-logo
+Bundled LinkedInMark.png SHA-256:
+3c0149f26168b5fe0f43e68664abe40341a6443b3cd435d18a73e12f64f8b600
+LinkedIn and the [in] Logo are registered trademarks or trademarks of LinkedIn
+Corporation and its affiliates in the United States and/or other countries.
+No affiliation or endorsement is implied. Trademark rights are not granted
+under this project's source-code license.
+
+Recall artwork
+
+Owner-supplied app icon, banner and lockup, received 2026-10-01. Text metadata
+removed; pixels unchanged. Wordmark.png is the lockup cropped to its artwork;
+WordmarkDark.png is the same lockup with its black and gray parts turned white
+at the same strength, for the dark appearance.
+AppIcon.png SHA-256: cf35f2034332cb5071b7b1e057fe4c5e767e73dafb8f13e2f40ca5ac993d044e
+Banner.png SHA-256: 95cf86bd46fdd56f2765ac8498191a187c4888c4d1de73c34ace8fdaa706a3d9
+Wordmark.png SHA-256: 214af160c00a88ae0260a7a31e19c210096233278d683c84da8d1c31a04153a7
+WordmarkDark.png SHA-256: 8237bef1d48e0ec229e9ed589657e97f1feb22151e8f6d87e1a7943e72fc8617
+The Recall name, icon and lockup identify this project; the project's
+source-code license does not grant trademark rights to them.
+
+Author photo
+
+Owner-supplied portrait, used at the owner's request on 2026-10-01: a square
+320-pixel crop with all metadata, including location, removed.
+AuthorPhoto.jpg SHA-256: e747a105c7c3af851b78ca01bf1a037e6e089f70908a4b093c7ba566ff883f19
+The photo is not covered by the project's source-code license.
+
+Ko-fi
+
+The app links to the owner's Ko-fi page with text and a system symbol only;
+no Ko-fi artwork is bundled.
+
+README artwork
+
+Rendered from HTML for the repository's README on 2026-10-02, with no metadata.
+ReadmeBenchmark.png charts the project's own CrossOver comparison.
+AuthorPhotoRound.png is AuthorPhoto.jpg cropped to a circle.
+ButtonMosaic.png contains MosaicLogo.png and ButtonLinkedIn.png contains
+LinkedInMark.png, under the terms described above; ButtonCoffee.png uses a
+drawn cup, not Ko-fi artwork.
+ReadmeBenchmark.png SHA-256: b58c75717c5b505f4b84efd13fe78ca4751e77a26bccc8c5219d6de9a46cb60e
+AuthorPhotoRound.png SHA-256: 36401eb5d72ff67cba56969843fc597d1d20b78f75872c6a5320a34638eda65d
+ButtonCoffee.png SHA-256: e1a140debece937489f23c835dd8774533d9f09f892e4c0d39b90d168747d4bd
+ButtonMosaic.png SHA-256: ea5da8825e2c7b0994d3740c10abe4dc01f0b191466edd8c34bb4bc6e927ef0c
+ButtonLinkedIn.png SHA-256: 1f2c35468d22bb0a8aec2808b1d6a1946833d03ff0180acc8cc8607ee570f8f2

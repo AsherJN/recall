@@ -1,0 +1,205 @@
+#include <atomic>
+#include <cstdlib>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+namespace dxmt {
+struct Sha1Digest {
+  std::string string() const { return std::string(40, '0'); }
+};
+}
+static unsigned GetCurrentProcessId() { return 42; }
+@SHADER_TRACE@
+using dxmt::Sha1Digest;
+using dxmt::ShaderCompileTrace;
+
+static void check(bool condition, const char *message) {
+  if (!condition) throw std::runtime_error(message);
+}
+#define ERR(...) do {} while (false)
+using sm50_shader_t = void *;
+using sm50_bitcode_t = void *;
+struct SM50_COMPILED_BITCODE { void *Data; size_t Size; };
+static std::unordered_set<void *> allocations;
+static void *allocate() {
+  void *allocation = malloc(16);
+  allocations.insert(allocation);
+  return allocation;
+}
+static void release(void *allocation) {
+  if (!allocation) return;
+  check(allocations.erase(allocation) == 1, "invalid or duplicate free");
+  free(allocation);
+}
+static void SM50Destroy(sm50_shader_t shader) { release(shader); }
+#define free release
+struct CachedSM50Shader {
+  sm50_shader_t shader = nullptr;
+  void *arguments_info_buffer = nullptr;
+  void *dxbc_ = nullptr;
+  ~CachedSM50Shader() @CACHE_DESTRUCTOR@
+};
+#undef free
+
+enum class Failure { none, cache_library, cache_function, compile, library_error, library_null, function };
+static Failure failure;
+static int compiler_calls, bitcode_destroys, library_calls;
+static int active_ir_holders;
+static void SM50GetCompiledBitcode(sm50_bitcode_t bitcode, SM50_COMPILED_BITCODE *out) {
+  *out = {bitcode, 16};
+}
+static void SM50DestroyBitcode(sm50_bitcode_t bitcode) {
+  ++bitcode_destroys;
+  release(bitcode);
+}
+
+namespace WMT {
+struct String { const char *getUTF8String() const { return "mock"; } };
+struct Handle {
+  int value = 0;
+  explicit operator bool() const { return value != 0; }
+  bool operator==(std::nullptr_t) const { return value == 0; }
+  bool operator!=(std::nullptr_t) const { return value != 0; }
+};
+struct Error : Handle { String description() const { return {}; } };
+struct Function : Handle {};
+struct DispatchData : Handle {};
+template<class T> struct Reference : T {
+  Reference() = default;
+  Reference(T source) : T(source) {}
+  Reference &operator=(std::nullptr_t) { this->value = 0; return *this; }
+};
+struct Pool { ~Pool() {} };
+static Pool MakeAutoreleasePool() { return {}; }
+static Reference<DispatchData> MakeDispatchData(void *, size_t) { return DispatchData{{2}}; }
+struct Library : Handle {
+  Reference<Function> newFunction(const char *) {
+    if ((value == 1 && failure == Failure::cache_function) || failure == Failure::function)
+      return {};
+    return Function{{1}};
+  }
+};
+struct Device {
+  Library newLibrary(Reference<DispatchData> data, Reference<Error> &error) {
+    ++library_calls;
+    if (data.value == 2)
+      check(active_ir_holders == 0, "parsed IR was retained during Metal compilation");
+    if ((data.value == 1 && failure == Failure::cache_library) || failure == Failure::library_error) {
+      error.value = 1;
+      return {};
+    }
+    error.value = 0;
+    if (failure == Failure::library_null) return {};
+    return Library{{data.value}};
+  }
+};
+}
+
+struct Shader {
+  int pending = 1;
+  int ends = 0;
+  int ensures = 0;
+  int cache_writes = 0;
+  bool available = true;
+  bool cache_hit = false;
+  Sha1Digest digest;
+  const Sha1Digest &sha1() { return digest; }
+  void ir_use_end() { --pending; ++ends; --active_ir_holders; }
+  void ir_ensure() { ++ensures; }
+  sm50_shader_t handle() { return available ? this : nullptr; }
+  void dump() {}
+  WMT::Reference<WMT::DispatchData> find_cached_variant(Sha1Digest &) {
+    return WMT::DispatchData{{cache_hit ? 1 : 0}};
+  }
+  void update_cached_variant(Sha1Digest &, WMT::Reference<WMT::DispatchData>) {
+    check(active_ir_holders == 0, "parsed IR was retained during cache write");
+    ++cache_writes;
+  }
+};
+using ManagedShader = Shader *;
+struct Device {
+  WMT::Device metal;
+  WMT::Device &GetMTLDevice() { return metal; }
+};
+struct ThreadpoolWork {};
+static std::atomic_uint64_t g_compiled_shader_variants{0};
+struct Task : ThreadpoolWork {
+  std::vector<ManagedShader> ir_holders_;
+  ManagedShader shader_;
+  Device *device_;
+  Sha1Digest variant_digest_;
+  uint64_t queued_at_ = ShaderCompileTrace::timestamp();
+  int sm50_common = 0;
+  std::string func_name = "regression";
+  WMT::Reference<WMT::Function> function_;
+  Task(Shader &shader, Shader &extra, Device &device)
+      : ir_holders_{&shader, &extra}, shader_(&shader), device_(&device) {}
+  sm50_bitcode_t proc(const char *, int *) {
+    ++compiler_calls;
+    for (auto *shader : ir_holders_)
+      check(shader->handle() != nullptr, "converter received null shader IR");
+    return failure == Failure::compile ? nullptr : allocate();
+  }
+  ThreadpoolWork *RunThreadpoolWork() @COMPILE_WORK@
+};
+
+static void test_metadata(bool parsed_ir, bool reflection, bool retained_dxbc) {
+  {
+    CachedSM50Shader shader;
+    if (parsed_ir) shader.shader = allocate();
+    if (reflection) shader.arguments_info_buffer = allocate();
+    if (retained_dxbc) shader.dxbc_ = allocate();
+  }
+  check(allocations.empty(), "shader destruction leaked reflection after early IR release");
+}
+static void test_compile(Failure mode, bool cached, int missing_ir, int expected_compiles, int expected_destroys) {
+  failure = mode;
+  compiler_calls = bitcode_destroys = library_calls = 0;
+  active_ir_holders = 2;
+  Shader primary, extra;
+  Device device;
+  primary.cache_hit = cached;
+  primary.available = missing_ir != 1;
+  extra.available = missing_ir != 2;
+  Task task(primary, extra, device);
+  check(task.RunThreadpoolWork() == &task, "compile did not signal task completion");
+  check(primary.pending == 0 && extra.pending == 0 && primary.ends == 1 && extra.ends == 1,
+        "IR guards failed to release each holder exactly once");
+  check(compiler_calls == expected_compiles, "unexpected compiler invocation");
+  check(bitcode_destroys == expected_destroys, "compiled bitcode was not destroyed exactly once");
+  check(allocations.empty(), "compile work leaked an allocation");
+  if (mode == Failure::library_null || mode == Failure::library_error || mode == Failure::function)
+    check(primary.cache_writes == 0, "invalid Metal library/function was written to the shader cache");
+  if (cached && mode == Failure::none)
+    check(primary.ensures == 0 && extra.ensures == 0, "cache hit unnecessarily restored IR");
+}
+
+int main() {
+  int failed = 0;
+  auto run = [&](const char *name, auto test) {
+    try { test(); std::cout << "PASS " << name << '\n'; }
+    catch (const std::exception &error) {
+      ++failed;
+      std::cerr << "FAIL " << name << ": " << error.what() << '\n';
+      for (void *allocation : allocations) free(allocation);
+      allocations.clear();
+    }
+  };
+  run("released IR with reflection", [] { test_metadata(false, true, true); });
+  run("retained IR with reflection", [] { test_metadata(true, true, false); });
+  run("no argument metadata", [] { test_metadata(false, false, true); });
+  run("cache hit", [] { test_compile(Failure::none, true, 0, 0, 0); });
+  run("cache library rejection falls back", [] { test_compile(Failure::cache_library, true, 0, 1, 1); });
+  run("cache function rejection falls back", [] { test_compile(Failure::cache_function, true, 0, 1, 1); });
+  run("cache miss", [] { test_compile(Failure::none, false, 0, 1, 1); });
+  run("primary IR restoration failure", [] { test_compile(Failure::none, false, 1, 0, 0); });
+  run("secondary IR restoration failure", [] { test_compile(Failure::none, false, 2, 0, 0); });
+  run("converter failure", [] { test_compile(Failure::compile, false, 0, 1, 0); });
+  run("Metal library error", [] { test_compile(Failure::library_error, false, 0, 1, 1); });
+  run("Metal null library", [] { test_compile(Failure::library_null, false, 0, 1, 1); });
+  run("Metal missing function", [] { test_compile(Failure::function, false, 0, 1, 1); });
+  return failed != 0;
+}

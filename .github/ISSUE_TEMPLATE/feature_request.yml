@@ -1,0 +1,16 @@
+name: Suggest an idea
+description: Something that would make Recall better.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: What would you like Recall to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters
+      description: What would it make easier or better for you?

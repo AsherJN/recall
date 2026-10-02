@@ -1,0 +1,136 @@
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <mach/mach.h>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <thread>
+
+// Native equivalent of the bridge's owning MakeAutoreleasePool wrapper.
+namespace WMT {
+struct Pool {
+  NSAutoreleasePool *value = [[NSAutoreleasePool alloc] init];
+  ~Pool() { [value drain]; }
+};
+Pool MakeAutoreleasePool() { return {}; }
+}
+
+static std::atomic<int> live{0};
+@interface LifetimeToken : NSObject
+@end
+@implementation LifetimeToken
+- (instancetype)init { if ((self = [super init])) ++live; return self; }
+- (void)dealloc { --live; [super dealloc]; }
+@end
+
+struct ThreadpoolWork {
+  virtual ThreadpoolWork *RunThreadpoolWork() = 0;
+  virtual ~ThreadpoolWork() = default;
+};
+template <typename T> struct task_trait;
+template <> struct task_trait<ThreadpoolWork *> {
+  ThreadpoolWork *run_task(ThreadpoolWork *task) @RUN_TASK@
+};
+
+static uint64_t footprint() {
+  task_vm_info_data_t info{};
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) abort();
+  return info.phys_footprint;
+}
+static void require(bool value, const char *message) {
+  if (!value) { fprintf(stderr, "%s\n", message); abort(); }
+}
+
+struct LifetimeWork : ThreadpoolWork {
+  bool throws = false;
+  ThreadpoolWork *dependency = nullptr;
+  ThreadpoolWork *RunThreadpoolWork() override {
+    [[[LifetimeToken alloc] init] autorelease];
+    if (throws) throw std::runtime_error("expected task failure");
+    return dependency ? dependency : this;
+  }
+};
+
+struct MetalWork : ThreadpoolWork {
+  id<MTLDevice> device;
+  id<MTLFunction> function;
+  id<MTLComputePipelineState> state = nil;
+  MetalWork(id<MTLDevice> d, id<MTLFunction> f) : device(d), function(f) {}
+  ~MetalWork() { [state release]; }
+  ThreadpoolWork *RunThreadpoolWork() override {
+    NSError *error = nil;
+    auto next = [device newComputePipelineStateWithFunction:function error:&error];
+    require(next != nil && error == nil, "Metal pipeline creation failed");
+    [state release]; state = next;
+    return this;
+  }
+};
+
+int main(int argc, const char **argv) {
+  require(argc == 3, "usage: harness checks|metal iterations");
+  const bool checks = !strcmp(argv[1], "checks");
+  const int iterations = atoi(argv[2]);
+  std::thread worker([&] {
+    NSAutoreleasePool *outer = [[NSAutoreleasePool alloc] init];
+    task_trait<ThreadpoolWork *> trait;
+    if (checks) {
+      LifetimeWork dependency, work;
+      work.dependency = &dependency;
+      require(trait.run_task(&work) == &dependency, "dependency identity changed");
+      require(live == 0, "dependency-yield temporaries survived task");
+      work.dependency = nullptr;
+      require(trait.run_task(&work) == &work, "completion identity changed");
+      require(live == 0, "completed task temporaries survived");
+      work.throws = true;
+      try { trait.run_task(&work); abort(); } catch (const std::runtime_error &) {}
+      require(live == 0, "exception path failed to drain pool");
+      puts("{\"checks\":\"PASS: completed, dependency, exception paths drain temporaries\"}");
+      [outer drain]; return;
+    }
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    NSError *error = nil;
+    NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
+      "kernel void write_value(device uint *out [[buffer(0)]], uint id [[thread_position_in_grid]]) { out[id] = 0x12345678u + id; }";
+    id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
+    require(library != nil, "Metal library unavailable");
+    id<MTLFunction> function = [library newFunctionWithName:@"write_value"];
+    // Warm framework/compiler setup in a drained pool, outside the timed pass.
+    { auto pool = WMT::MakeAutoreleasePool(); MetalWork warm(device, function); warm.RunThreadpoolWork(); }
+    uint64_t before = footprint();
+    auto began = std::chrono::steady_clock::now();
+    uint64_t peak = before, after = 0;
+    {
+      MetalWork work(device, function);
+      for (int i = 0; i < iterations; ++i) {
+        require(trait.run_task(&work) == &work, "Metal completion identity changed");
+        if (i % 100 == 0) peak = std::max(peak, footprint());
+      }
+      // Use the owned PSO after its task pool drained; catches premature release.
+      id<MTLCommandQueue> queue = [device newCommandQueue];
+      id<MTLBuffer> buffer = [device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+      id<MTLCommandBuffer> command = [queue commandBuffer];
+      id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+      [encoder setComputePipelineState:work.state];
+      [encoder setBuffer:buffer offset:0 atIndex:0];
+      [encoder dispatchThreads:MTLSizeMake(64,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+      [encoder endEncoding]; [command commit]; [command waitUntilCompleted];
+      require(command.status == MTLCommandBufferStatusCompleted, "GPU command failed");
+      for (unsigned i = 0; i < 64; ++i)
+        require(((uint32_t *)buffer.contents)[i] == 0x12345678u+i, "owned PSO readback failed");
+      [buffer release]; [queue release];
+      after = footprint(); peak = std::max(peak, after);
+    }
+    double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-began).count();
+    [function release]; [library release]; [device release];
+    [outer drain];
+    printf("{\"iterations\":%d,\"elapsed_ms\":%.3f,\"footprint_before\":%llu,\"footprint_before_outer_drain\":%llu,\"peak_footprint\":%llu,\"footprint_after_outer_drain\":%llu,\"gpu_readback\":\"PASS\"}\n",
+      iterations, elapsed, (unsigned long long)before, (unsigned long long)after,
+      (unsigned long long)peak, (unsigned long long)footprint());
+  });
+  worker.join();
+}

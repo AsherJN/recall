@@ -1,0 +1,10 @@
+GitHub mark
+
+The vector in app/Sources/ProjectLinks.swift is transcribed from GitHub’s
+official favicon, used to identify a link to the project repository.
+Source: https://github.githubassets.com/favicons/favicon.svg
+Retrieved: 2026-09-14
+Source SHA-256: 6a9577cd4f7fa6b75bde1025af85b944e9dd1388373b55ccba6e9f80ac2eae60
+
+The GitHub name and logo are trademarks of GitHub, Inc. This project does not
+claim ownership of the mark or imply GitHub endorsement.

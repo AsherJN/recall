@@ -1,0 +1,139 @@
+{
+ "schema_version": 1,
+ "status": "release 1.0.0 source",
+ "sources": {
+  "dxmt": {
+   "url": "https://github.com/NerRobDog/dxmt",
+   "commit": "c5dc3a0dfe9108e667da43de871324bd298c9c02",
+   "license": "LGPL-2.1-or-later",
+   "patch": "patches/dxmt-v1-private.patch",
+   "patch_sha256": "5afcbde9512381c37e975450d08f7fd3cef1e8755739f1f5b4ae8f1563de5199",
+   "directx_headers_commit": "9df86f2341616ef1888ae59919feaa6d4fad693d",
+   "additional_patches": [
+    {
+     "patch": "patches/dxmt-v1-performance.patch",
+     "sha256": "b119feb670a3e2ffe656159118e99a75abc5b9a8097e77096c512a01b81861f2",
+     "applies_after": "patches/dxmt-v1-private.patch"
+    },
+    {
+     "patch": "patches/dxmt-portable-metal.patch",
+     "sha256": "3b9d6a3248c62e8eb3b623fbd3f5c4939d6973dfa366e827b7d25e814428745d",
+     "applies_after": "patches/dxmt-v1-performance.patch"
+    }
+   ]
+  },
+  "wine": {
+   "url": "https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.3.0.tar.gz",
+   "license": "LGPL-2.1-or-later plus component notices",
+   "patch": "patches/wine-v1-canvas.patch",
+   "patch_sha256": "33d57c155761838988d98777a7cddb1b2d00417d07b2e19ca9533221aa9b6f65",
+   "additional_patch": "patches/wine-mouselook.patch",
+   "additional_patch_sha256": "4e9d4ab2aff6ec38b03100d4802d2764efe1e33caf151cdb4c5de7a8dfa3dfdb",
+   "additional_patch_applies_after": "patches/wine-v1-canvas.patch",
+   "v1_patches": [
+    {
+     "patch": "patches/wine-server-registry-save.patch",
+     "sha256": "8f89556d5daff60c75ae60720ae5125c68021abc244a95df5f6352468323a1a3"
+    },
+    {
+     "patch": "patches/wine-ntdll-syscall-log.patch",
+     "sha256": "c972f4311b832ede507fe470d48c569cbf0851c42aa153fd5fe6cc7c3d6d9e2c"
+    },
+    {
+     "patch": "patches/wine-win32u-display-log.patch",
+     "sha256": "1d0dae5d4810becf72bbb79d2259b97683f09481c91617ae543fd510d853aeff"
+    },
+    {
+     "patch": "patches/wine-winemac-activation.patch",
+     "sha256": "daa3f4b0ce44aec0712a257a975a6c95fafa9f7984bb3355d94bb7a1a576e2f2"
+    }
+   ],
+   "v1_patches_apply_after": "patches/wine-portable-directory-boolean.patch and Soju's ncrypt-persisted-keys.patch"
+  },
+  "soju": {
+   "url": "https://github.com/BCD1210/soju",
+   "commit": "3a350b32bf906dd2a509b18c642a5a2676de022a",
+   "engine_tag": "engine-v1.5",
+   "archive_sha256": "7b96a4407308493ae92bebe96039bbc8d0bf3b86c22cb99c782f73cf7be3738e",
+   "script_license": "GPL-3.0",
+   "references_only": true
+  },
+  "native_library_archive": {
+   "url": "https://github.com/frankea/Whisky/releases/download/v3.1.1/Libraries.tar.gz",
+   "exact_source_and_per_component_license_status": "pending before binary build/distribution"
+  },
+  "freetype": {
+   "version": "2.13.3",
+   "url": "https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.gz"
+  },
+  "wine_mono": {
+   "version": "10.4.1",
+   "url": "https://github.com/wine-mono/wine-mono/releases/download/wine-mono-10.4.1/wine-mono-10.4.1-x86.tar.xz",
+   "component_notices_required": true
+  }
+ },
+ "toolchain": {
+  "llvm": "15.0.7 x86_64",
+  "llvm_mingw": "20251216 ucrt macOS universal",
+  "bison": "3.8.2",
+  "metal_tools": "Apple Metal compiler (Xcode 27 Metal Toolchain component), developer-side only; DXMT_METAL_CACHE reuses path-free outputs of byte-identical shader sources",
+  "python": "3.10 or later for source tooling",
+  "build_recipe_end_to_end_status": "not yet reconstructed from clean source",
+  "macos_sdk": "Command Line Tools, macOS 26.5 SDK"
+ },
+ "runtime_policy": {
+  "drawables": 3,
+  "compiler_threads": 8,
+  "max_frame_latency": 1,
+  "overlay": false,
+  "pacing": {
+   "enabled": true,
+   "mode": 3,
+   "target_us": 1000
+  },
+  "fps": "player controlled",
+  "prepare_shaders": true
+ },
+ "patches": [
+  {
+   "path": "patches/dxmt-v1-private.patch",
+   "sha256": "5afcbde9512381c37e975450d08f7fd3cef1e8755739f1f5b4ae8f1563de5199"
+  },
+  {
+   "path": "patches/wine-v1-canvas.patch",
+   "sha256": "33d57c155761838988d98777a7cddb1b2d00417d07b2e19ca9533221aa9b6f65"
+  },
+  {
+   "path": "patches/wine-mouselook.patch",
+   "sha256": "4e9d4ab2aff6ec38b03100d4802d2764efe1e33caf151cdb4c5de7a8dfa3dfdb"
+  },
+  {
+   "path": "patches/dxmt-v1-performance.patch",
+   "sha256": "b119feb670a3e2ffe656159118e99a75abc5b9a8097e77096c512a01b81861f2"
+  },
+  {
+   "path": "patches/dxmt-portable-metal.patch",
+   "sha256": "3b9d6a3248c62e8eb3b623fbd3f5c4939d6973dfa366e827b7d25e814428745d"
+  },
+  {
+   "path": "patches/wine-portable-directory-boolean.patch",
+   "sha256": "9c7f811b1eb83d8c322d42509a82c1bcd786f101ce1b26fc1dc0c5badebe619b"
+  },
+  {
+   "path": "patches/wine-server-registry-save.patch",
+   "sha256": "8f89556d5daff60c75ae60720ae5125c68021abc244a95df5f6352468323a1a3"
+  },
+  {
+   "path": "patches/wine-ntdll-syscall-log.patch",
+   "sha256": "c972f4311b832ede507fe470d48c569cbf0851c42aa153fd5fe6cc7c3d6d9e2c"
+  },
+  {
+   "path": "patches/wine-win32u-display-log.patch",
+   "sha256": "1d0dae5d4810becf72bbb79d2259b97683f09481c91617ae543fd510d853aeff"
+  },
+  {
+   "path": "patches/wine-winemac-activation.patch",
+   "sha256": "daa3f4b0ce44aec0712a257a975a6c95fafa9f7984bb3355d94bb7a1a576e2f2"
+  }
+ ]
+}

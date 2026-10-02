@@ -1,0 +1,203 @@
+diff --git a/server/mach.c b/server/mach.c
+index 0f75d89..f8c3023 100644
+--- a/server/mach.c
++++ b/server/mach.c
+@@ -27,6 +27,7 @@
+ #include <signal.h>
+ #include <stdarg.h>
+ #include <sys/types.h>
++#include <sys/wait.h>
+ #include <unistd.h>
+ #ifdef HAVE_SYS_SYSCTL_H
+ #include <sys/sysctl.h>
+@@ -53,7 +54,11 @@ static mach_port_t server_mach_port;
+ 
+ void sigchld_callback(void)
+ {
+-    assert(0);  /* should never be called on MacOS */
++    pid_t pid;
++    int status;
++
++    /* the only child processes on macOS are periodic registry saves */
++    while ((pid = waitpid( -1, &status, WNOHANG )) > 0) registry_child_exited( pid, status );
+ }
+ 
+ static void mach_set_error(kern_return_t mach_error)
+diff --git a/server/object.h b/server/object.h
+index 104113a..1dc780b 100644
+--- a/server/object.h
++++ b/server/object.h
+@@ -277,6 +277,7 @@ extern unsigned short native_machine;
+ extern int wow64_using_32bit_prefix;
+ extern void init_registry(void);
+ extern void flush_registry(void);
++extern void registry_child_exited( pid_t pid, int status );
+ 
+ static inline int is_machine_32bit( unsigned short machine )
+ {
+diff --git a/server/registry.c b/server/registry.c
+index 5f6ac5d..528bd53 100644
+--- a/server/registry.c
++++ b/server/registry.c
+@@ -33,8 +33,10 @@
+ #include <stdarg.h>
+ #include <string.h>
+ #include <stdlib.h>
++#include <signal.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <sys/wait.h>
+ #include <unistd.h>
+ 
+ #include "ntstatus.h"
+@@ -138,12 +140,22 @@ struct save_branch_info
+ {
+     struct key  *key;
+     const char  *filename;
++    int          in_child;  /* being written by the periodic save process */
+ };
+ 
+ #define MAX_SAVE_BRANCH_INFO 3
+ static int save_branch_count;
+ static struct save_branch_info save_branch_info[MAX_SAVE_BRANCH_INFO];
+ 
++/* The periodic save runs in a forked copy of the server: writing a large branch takes
++ * the server about 0.1 s, and every client request would wait for it. */
++static pid_t save_pid;        /* process writing the periodic save, 0 if none */
++static timeout_t save_start;  /* when it was started (monotonic time) */
++
++/* WINESERVER_REGISTRY_LOG=<file>: log each change to a saved key (diagnostics) */
++static FILE *change_log;
++static int change_log_lines;
++
+ unsigned int supported_machines_count = 0;
+ unsigned short supported_machines[8];
+ unsigned short native_machine = 0;
+@@ -762,10 +774,31 @@ static void check_notify( struct key *key, unsigned int change, int not_subtree
+     }
+ }
+ 
++/* log a change to a key that is saved to disk, if WINESERVER_REGISTRY_LOG is set */
++static void log_key_change( const struct key *key, unsigned int change )
++{
++    static int initialized;
++
++    if (!initialized)
++    {
++        const char *path = getenv( "WINESERVER_REGISTRY_LOG" );
++        initialized = 1;
++        if (path && *path && (change_log = fopen( path, "a" ))) setvbuf( change_log, NULL, _IOLBF, 0 );
++    }
++    if (!change_log || change_log_lines >= 100000) return;
++    change_log_lines++;
++    fprintf( change_log, "%.3f %04x %s ", (double)(current_time - ticks_1601_to_1970) / TICKS_PER_SEC,
++             current && current->process ? current->process->id : 0,
++             change == REG_NOTIFY_CHANGE_NAME ? "subkeys" : "values" );
++    dump_path( key, NULL, change_log );
++    fputc( '\n', change_log );
++}
++
+ /* update key modification time */
+ static void touch_key( struct key *key, unsigned int change )
+ {
+     key->modif = current_time;
++    if (!(key->flags & KEY_VOLATILE)) log_key_change( key, change );
+     make_dirty( key );
+ 
+     /* do notifications */
+@@ -2131,16 +2164,83 @@ done:
+     return ret;
+ }
+ 
++/* write the dirty branches in a child process; returns 0 if it could not be started */
++static int start_save_process(void)
++{
++    sigset_t all;
++    pid_t pid;
++    int i, ok = 1;
++
++    if ((pid = fork()) == -1) return 0;
++    if (pid)
++    {
++        save_pid = pid;
++        save_start = monotonic_time;
++        for (i = 0; i < save_branch_count; i++)
++        {
++            /* the child writes the branch as it is now; later changes dirty it again */
++            save_branch_info[i].in_child = !!(save_branch_info[i].key->flags & KEY_DIRTY);
++            make_clean( save_branch_info[i].key );
++        }
++        return 1;
++    }
++
++    /* child: only write files, then leave without running exit handlers */
++    sigfillset( &all );
++    sigprocmask( SIG_SETMASK, &all, NULL );
++    if (fchdir( config_dir_fd ) == -1) _exit( 1 );
++    for (i = 0; i < save_branch_count; i++)
++        if (!save_branch( save_branch_info[i].key, save_branch_info[i].filename )) ok = 0;
++    _exit( ok ? 0 : 1 );
++}
++
++/* a child process exited; status is from waitpid, or -1 if it is unknown */
++void registry_child_exited( pid_t pid, int status )
++{
++    int i, saved = status != -1 && WIFEXITED( status ) && !WEXITSTATUS( status );
++
++    if (!save_pid || pid != save_pid) return;
++    save_pid = 0;
++    for (i = 0; i < save_branch_count; i++)
++    {
++        /* a failed save leaves the whole branch to be written again */
++        if (save_branch_info[i].in_child && !saved) save_branch_info[i].key->flags |= KEY_DIRTY;
++        save_branch_info[i].in_child = 0;
++    }
++    if (!saved) fprintf( stderr, "wineserver: periodic registry save failed (status %#x)\n", status );
++}
++
++/* wait for a running periodic save, so that nothing older can replace what is written next */
++static void wait_for_save_process(void)
++{
++    int status;
++
++    if (!save_pid) return;
++    if (waitpid( save_pid, &status, 0 ) != save_pid) status = -1;
++    registry_child_exited( save_pid, status );
++}
++
+ /* periodic saving of the registry */
+ static void periodic_save( void *arg )
+ {
+-    int i;
++    int i, dirty = 0;
+ 
+-    if (fchdir( config_dir_fd ) == -1) return;
+     save_timeout_user = NULL;
++    if (save_pid)
++    {
++        /* still writing the previous save; stop it if it hangs, its branches stay dirty */
++        if (monotonic_time - save_start > 60 * TICKS_PER_SEC) kill( save_pid, SIGKILL );
++        set_periodic_save_timer();
++        return;
++    }
+     for (i = 0; i < save_branch_count; i++)
+-        save_branch( save_branch_info[i].key, save_branch_info[i].filename );
+-    if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
++        if (save_branch_info[i].key->flags & KEY_DIRTY) dirty = 1;
++    if (dirty && !start_save_process() && fchdir( config_dir_fd ) != -1)
++    {
++        for (i = 0; i < save_branch_count; i++)
++            save_branch( save_branch_info[i].key, save_branch_info[i].filename );
++        if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
++    }
+     set_periodic_save_timer();
+ }
+ 
+@@ -2156,6 +2256,7 @@ void flush_registry(void)
+ {
+     int i;
+ 
++    wait_for_save_process();
+     if (fchdir( config_dir_fd ) == -1) return;
+     for (i = 0; i < save_branch_count; i++)
+     {

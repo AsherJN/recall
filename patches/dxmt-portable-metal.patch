@@ -1,0 +1,18 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -114,12 +114,12 @@ endif
+ 
+ xcrun = find_program('xcrun')
+ 
+-metalir_generator = generator(xcrun,
++metalir_generator = generator(find_program('portable_metal.py'),
+   output    : [ '@BASENAME@.air'],
+   arguments : [ '-sdk', 'macosx', 'metal', '-o', '@OUTPUT@', '-c', '@INPUT@', '@EXTRA_ARGS@'],
+ )
+ 
+-metallib_generator = generator(xcrun,
++metallib_generator = generator(find_program('portable_metal.py'),
+   output    : [ '@BASENAME@.metallib'],
+   arguments : [ '-sdk', 'macosx', 'metallib', '-o', '@OUTPUT@', '@INPUT@'],
+ )

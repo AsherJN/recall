@@ -1,0 +1,1070 @@
+--- a/dlls/winemac.drv/Makefile.in
++++ b/dlls/winemac.drv/Makefile.in
+@@ -26,6 +26,7 @@
+ 	cocoa_opengl.m \
+ 	cocoa_status_item.m \
+ 	cocoa_window.m \
++	cocoa_v1.m \
+ 	d3dmetal.c \
+ 	d3dmetal_objc.m \
+ 	display.c \
+--- a/dlls/winemac.drv/cocoa_app.h
++++ b/dlls/winemac.drv/cocoa_app.h
+@@ -122,6 +122,7 @@
+ 
+     - (void) computeEventTimeAdjustmentFromTicks:(unsigned long long)tickcount uptime:(uint64_t)uptime_ns;
+     - (double) ticksForEventTime:(NSTimeInterval)eventTime;
++    - (void) releasePressedKeys;
+ 
+     - (void) windowGotFocus:(WineWindow*)window;
+ 
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -22,6 +22,7 @@
+ #import "cocoa_cursorclipping.h"
+ #import "cocoa_event.h"
+ #import "cocoa_window.h"
++#import "cocoa_v1.h"
+ #import "cocoa_icon_utils.h"
+ 
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+@@ -126,6 +127,35 @@
+ 
+ @end
+ 
++
++
++/* The keyboard layout Wine builds its key tables from.
++ *
++ * Windows keeps the keyboard layout and the IME apart: with the Korean IME
++ * active, VK_W still maps to 'W' (MapVirtualKey, ToUnicode) and the Hangul
++ * composition happens inside the IME.  macOS folds both into one input source,
++ * and the Korean input method carries a layout whose letter keys produce jamo.
++ * Building the key tables from that layout makes every letter key
++ * unrecognisable to a game: Unreal maps letters by character, so W arrives as
++ * U+3148 and is dropped, and a W held while the source is switched stays down
++ * because its release maps the same way.
++ *
++ * So while an input method is selected, use the ASCII-capable layout it sits
++ * on, which is what Windows would report.  Composition is unaffected: it goes
++ * through the input method itself (NSTextInputContext), not these tables. */
++static TISInputSourceRef CopyKeyboardLayoutForKeyTables(void)
++{
++    TISInputSourceRef source = TISCopyCurrentKeyboardInputSource();
++    TISInputSourceRef layout = NULL;
++    CFStringRef type = source ? TISGetInputSourceProperty(source, kTISPropertyInputSourceType) : NULL;
++
++    if (type && !CFEqual(type, kTISTypeKeyboardLayout))
++        layout = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
++    if (!layout)
++        layout = TISCopyCurrentKeyboardLayoutInputSource();
++    if (source) CFRelease(source);
++    return layout;
++}
+ 
+ @implementation WineApplicationController
+ 
+@@ -322,6 +352,34 @@
+                         [self tryToActivateIgnoringOtherApps:YES];
+ 
+                     return;
++                }
++            }
++
++            /* Soju: suppress Dock icons for processes listed in WINE_NO_DOCK_ICON
++               (semicolon-separated exe names). Modeled on CrossOver's hack 24141. */
++            {
++                const char* nodock = getenv("WINE_NO_DOCK_ICON");
++                if (nodock)
++                {
++                    /* The Windows exe path may sit in any argv slot (the loader
++                       rewrites argv after NSProcessInfo snapshots it), so match
++                       the basename of every argument against the list. */
++                    NSArray* list = [[[NSString stringWithUTF8String:nodock] lowercaseString] componentsSeparatedByString:@";"];
++                    NSCharacterSet* seps = [NSCharacterSet characterSetWithCharactersInString:@"/\\"];
++                    BOOL blocked = NO;
++                    NSArray* args = [[NSProcessInfo processInfo] arguments];
++                    NSUInteger limit = MIN((NSUInteger)2, args.count);
++                    for (NSUInteger i = 0; i < limit; i++)
++                    {
++                        NSString* base = [[[args[i] componentsSeparatedByCharactersInSet:seps] lastObject] lowercaseString];
++                        if (base.length && [list containsObject:base]) { blocked = YES; break; }
++                    }
++                    if (blocked)
++                    {
++                        if (activateIfTransformed)
++                            [self tryToActivateIgnoringOtherApps:YES];
++                        return;
++                    }
+                 }
+             }
+ 
+@@ -554,7 +612,7 @@
+         }
+ 
+         inputSource = TISCopyCurrentKeyboardInputSource();
+-        inputSourceLayout = TISCopyCurrentKeyboardLayoutInputSource();
++        inputSourceLayout = CopyKeyboardLayoutForKeyTables();
+         if (!force && EqualInputSource(inputSource, lastKeyboardInputSource) &&
+             EqualInputSource(inputSourceLayout, lastKeyboardLayoutInputSource))
+         {
+@@ -1376,6 +1434,43 @@
+         return (pressedKeyCodes[index] & mask) != 0;
+     }
+ 
++    /* Tell Wine that every key we still believe is held has been released.
++     *
++     * macOS delivers the key up to whoever has focus at the time, so a key held
++     * across a focus change (Command-Tab, an input source switch, a notification
++     * taking focus) is never released as far as Wine is concerned, and a game
++     * goes on walking forward until the key is pressed and let go again. */
++    - (void) releasePressedKeys
++    {
++        WineWindow* window = [self frontWineWindow];
++        NSUInteger modifiers = [NSEvent modifierFlags];
++        double time_ms = [self ticksForEventTime:[[NSProcessInfo processInfo] systemUptime]];
++        int bits = sizeof(pressedKeyCodes[0]) * 8;
++        unsigned int i;
++
++        /* Nowhere to deliver a release: keep our record of the held keys, so
++         * the real key up, when it does arrive, is still recognised and
++         * forwarded rather than dropped as a release of an unpressed key. */
++        if (!window) return;
++
++        for (i = 0; i < sizeof(pressedKeyCodes) / sizeof(pressedKeyCodes[0]) * bits; i++)
++        {
++            macdrv_event* event;
++
++            if (!pressedKeyCodes[i / bits]) { i += bits - 1; continue; }
++            if (![self isKeyPressed:i]) continue;
++
++            [self noteKey:i pressed:FALSE];
++
++            event = macdrv_create_event(KEY_RELEASE, window);
++            event->key.keycode   = i;
++            event->key.modifiers = modifiers;
++            event->key.time_ms   = time_ms;
++            [window.queue postEvent:event];
++            macdrv_release_event(event);
++        }
++    }
++
+     - (void) noteKey:(uint16_t)keyCode pressed:(BOOL)pressed
+     {
+         int bits = sizeof(pressedKeyCodes[0]) * 8;
+@@ -1464,7 +1559,7 @@
+ 
+             windowUnderNumber = [NSWindow windowNumberAtPoint:point
+                                   belowWindowWithWindowNumber:0];
+-            targetWindow = (WineWindow*)[NSApp windowWithWindowNumber:windowUnderNumber];
++            targetWindow = (WineWindow*)macdrv_v1_canvas_owner([NSApp windowWithWindowNumber:windowUnderNumber]);
+             if (!NSMouseInRect(point, [targetWindow contentRectForFrameRect:[targetWindow frame]], NO))
+                 targetWindow = nil;
+         }
+@@ -1937,7 +2032,13 @@
+             {
+                 WineWindow* window = (WineWindow*)[anEvent window];
+                 [self noteKey:keyCode pressed:FALSE];
+-                if ([window isKindOfClass:[WineWindow class]])
++                /* An event that arrives without a window of ours behind it (a
++                 * full screen game, a window torn down mid-press) would drop the
++                 * release and leave the key stuck down in Wine.  Send it to the
++                 * front window instead. */
++                if (![window isKindOfClass:[WineWindow class]])
++                    window = [self frontWineWindow];
++                if (window)
+                     [window postKeyEvent:anEvent];
+             }
+         }
+@@ -2485,6 +2586,7 @@
+         WineEventQueue* queue;
+ 
+         [self invalidateGotFocusEvents];
++        [self releasePressedKeys];
+ 
+         if (!temporarilyIgnoreResignEventsForDialog)
+         {
+@@ -2511,6 +2613,40 @@
+         // Note that "flag" is often wrong.  WineWindows are NSPanels and NSPanels
+         // don't count as "visible windows" for this purpose.
+         [self unminimizeWindowIfNoneVisible];
++
++        /* Soju: WINE_DOCK_REOPEN_CMD: Windows apps that "close to the tray"
++           (Steam) hide their window; there is no tray on macOS, so a Dock click
++           would do nothing. If nothing is visible after the unminimize attempt,
++           run the command (e.g. "steam.exe steam://open/main") to bring it back. */
++        {
++            const char* cmd = getenv("WINE_DOCK_REOPEN_CMD");
++            if (cmd && *cmd)
++            {
++                BOOL anyVisible = NO;
++                for (NSWindow* w in [NSApp windows])
++                {
++                    /* Only count windows a user can actually see. Tray-parked apps
++                       (Epic Games Launcher) keep tiny transparent helper windows
++                       parked far off-screen, and those are still "visible" to AppKit. */
++                    if ([w isKindOfClass:[WineWindow class]] && [w isVisible] && ![w isMiniaturized]
++                        && [w alphaValue] > 0.0 && w.frame.size.width > 1 && w.frame.size.height > 1)
++                    {
++                        BOOL onScreen = NO;
++                        for (NSScreen* screen in [NSScreen screens])
++                            if (NSIntersectsRect(w.frame, screen.frame)) { onScreen = YES; break; }
++                        if (onScreen) { anyVisible = YES; break; }
++                    }
++                }
++                if (!anyVisible)
++                {
++                    NSTask* task = [[NSTask alloc] init];
++                    task.launchPath = @"/bin/sh";
++                    task.arguments = @[@"-c", [NSString stringWithUTF8String:cmd]];
++                    @try { [task launch]; } @catch (NSException* e) { NSLog(@"WINE_DOCK_REOPEN_CMD failed: %@", e); }
++                    [task release];
++                }
++            }
++        }
+         return YES;
+     }
+ 
+@@ -2696,7 +2832,7 @@
+     OnMainThread(^{
+         TISInputSourceRef inputSourceLayout;
+ 
+-        inputSourceLayout = TISCopyCurrentKeyboardLayoutInputSource();
++        inputSourceLayout = CopyKeyboardLayoutForKeyTables();
+         if (inputSourceLayout)
+         {
+             CFDataRef data = TISGetInputSourceProperty(inputSourceLayout,
+@@ -2804,7 +2940,7 @@
+     OnMainThread(^{
+         NSPoint location = [NSEvent mouseLocation];
+         location = [[WineApplicationController sharedController] flippedMouseLocation:location];
+-        *pos = cgpoint_win_from_mac(NSPointToCGPoint(location));
++        *pos = macdrv_v1_canvas_point((WineWindow *)NSApp.keyWindow, cgpoint_win_from_mac(NSPointToCGPoint(location)), FALSE);
+     });
+ 
+     return TRUE;
+@@ -2821,7 +2957,8 @@
+     __block int ret;
+ 
+     OnMainThread(^{
+-        ret = [[WineApplicationController sharedController] setCursorPosition:cgpoint_mac_from_win(pos)];
++        CGPoint physical = macdrv_v1_canvas_point((WineWindow *)NSApp.keyWindow, pos, TRUE);
++        ret = [[WineApplicationController sharedController] setCursorPosition:cgpoint_mac_from_win(physical)];
+     });
+ 
+     return ret;
+@@ -2841,7 +2978,7 @@
+     OnMainThread(^{
+         WineApplicationController* controller = [WineApplicationController sharedController];
+         BOOL clipping = FALSE;
+-        CGRect rect = r;
++        CGRect rect = macdrv_v1_canvas_clip(r);
+ 
+         if (!CGRectIsInfinite(rect))
+             rect = cgrect_mac_from_win(rect);
+--- a/dlls/winemac.drv/cocoa_event.m
++++ b/dlls/winemac.drv/cocoa_event.m
+@@ -27,6 +27,7 @@
+ #import "cocoa_event.h"
+ #import "cocoa_app.h"
+ #import "cocoa_window.h"
++#import "cocoa_v1.h"
+ 
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+@@ -213,6 +214,8 @@
+              lastEvent->event->type == MOUSE_MOVED_ABSOLUTE) &&
+             lastEvent->event->deliver == INT_MAX &&
+             lastEvent->event->window == event->event->window &&
++            (!macdrv_v1_canvas_active((WineWindow *)event->event->window) ||
++             lastEvent->event->type == event->event->type) &&
+             lastEvent->event->mouse_moved.drag == event->event->mouse_moved.drag)
+         {
+             if (event->event->type == MOUSE_MOVED_RELATIVE)
+@@ -239,9 +242,22 @@
+ 
+     - (void) postEvent:(macdrv_event*)inEvent
+     {
++        macdrv_event *copy = NULL;
++        if ([NSThread isMainThread] && macdrv_v1_canvas_active((WineWindow *)inEvent->window) &&
++            (inEvent->type == MOUSE_MOVED_ABSOLUTE || inEvent->type == MOUSE_BUTTON || inEvent->type == MOUSE_SCROLL))
++        {
++            // The source event can be delivered to another queue. Transform
++            // only our private copy; these three payloads contain no objects.
++            copy = macdrv_create_event(inEvent->type, (WineWindow *)inEvent->window);
++            *copy = *inEvent;
++            copy->refs = 1;
++            inEvent = copy;
++        }
++        macdrv_v1_canvas_event(inEvent);
+         MacDrvEvent* event = [[MacDrvEvent alloc] initWithEvent:inEvent];
+         [self postEventObject:event];
+         [event release];
++        if (copy) macdrv_release_event(copy);
+     }
+ 
+     - (MacDrvEvent*) getEventMatchingMask:(macdrv_event_mask)mask
+@@ -353,15 +369,19 @@
+ 
+         for (event in events)
+         {
++            // Queued fullscreen events already use logical Wine coordinates.
++            // Cursor warps arrive in physical coordinates; keep that contract
++            // when rewriting pending button/scroll positions after a warp.
++            CGPoint mapped = macdrv_v1_canvas_point((WineWindow *)event->event->window, pos, FALSE);
+             if (event->event->type == MOUSE_BUTTON)
+             {
+-                event->event->mouse_button.x = pos.x;
+-                event->event->mouse_button.y = pos.y;
++                event->event->mouse_button.x = floor(mapped.x);
++                event->event->mouse_button.y = floor(mapped.y);
+             }
+             else if (event->event->type == MOUSE_SCROLL)
+             {
+-                event->event->mouse_scroll.x = pos.x;
+-                event->event->mouse_scroll.y = pos.y;
++                event->event->mouse_scroll.x = floor(mapped.x);
++                event->event->mouse_scroll.y = floor(mapped.y);
+             }
+         }
+ 
+--- /dev/null
++++ b/dlls/winemac.drv/cocoa_v1.h
+@@ -0,0 +1,18 @@
++/* Private, opt-in fixed-canvas presentation. No effect until DXMT registers a view. */
++#import <AppKit/AppKit.h>
++#include "macdrv_cocoa.h"
++@class WineWindow;
++BOOL macdrv_v1_canvas_active(WineWindow *window);
++BOOL macdrv_v1_canvas_requested(WineWindow *window);
++void macdrv_v1_canvas_settled(WineWindow *window);
++void macdrv_v1_canvas_failed(WineWindow *window);
++void macdrv_v1_canvas_transition(WineWindow *window, BOOL entering);
++void macdrv_v1_canvas_layout(WineWindow *window);
++void macdrv_v1_canvas_restore(WineWindow *window);
++CGRect macdrv_v1_canvas_frame(WineWindow *window, CGRect physical);
++CGPoint macdrv_v1_canvas_point(WineWindow *window, CGPoint point, BOOL to_physical);
++CGRect macdrv_v1_canvas_clip(CGRect rect);
++void macdrv_v1_canvas_event(macdrv_event *event);
++void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused);
++/* Maps the canvas overlay presentation window to the Wine window that owns it. */
++NSWindow *macdrv_v1_canvas_owner(NSWindow *window);
+--- /dev/null
++++ b/dlls/winemac.drv/cocoa_v1.m
+@@ -0,0 +1,502 @@
++/* Fixed logical game canvas inside native macOS fullscreen.
++ * The normal Wine coordinate system and native display mode remain unchanged
++ * for unregistered windows. All geometry state is owned by the Cocoa thread.
++ */
++#include "config.h"
++#import "cocoa_v1.h"
++#import "cocoa_window.h"
++#import "cocoa_app.h"
++#import "cocoa_event.h"
++#import <QuartzCore/QuartzCore.h>
++#import <objc/runtime.h>
++#include <math.h>
++#include <stdio.h>
++#include <unistd.h>
++
++@interface OWCanvas : NSObject {
++@public
++    NSView *client;
++    NSSize pixels;
++    NSRect savedBounds, savedClientFrame;
++    NSUInteger savedAutoresizing;
++    NSColor *savedBackground;
++    CGRect physical;
++    BOOL active, layingOut, requested, transitioning;
++    unsigned transitions, windowsPid;
++    /* Overlay presentation window state (see overlayAttach). */
++    NSWindow *overlay;
++    NSView *metalView;
++    NSRect savedMetalFrame;
++    NSUInteger savedMetalAutoresizing;
++    BOOL overlayActive;
++}
++@end
++@implementation OWCanvas
++- (void)dealloc { [client release]; [savedBackground release]; [overlay release]; [metalView release]; [super dealloc]; }
++@end
++
++/* Overlay presentation window. Wine's own window is always composited by the
++ * window server (3-6 ms from GPU completion to the panel, with vsync-grid runs
++ * on about 30% of game frames), while a plain borderless window hosting a
++ * plain Metal layer in the same process is flipped directly (0.1 ms; measured
++ * with tests/presentation/display_path_probe.m, arm64 and x86_64 alike). While
++ * the canvas is fullscreen the game's Metal view is therefore hosted in such a
++ * window, placed over the Wine window's content area: never key, ignoring
++ * mouse events, so the Wine window keeps focus, input, cursor clipping and the
++ * input mapping. It is a standalone window above the menu bar level that joins
++ * the fullscreen space (a child window or a normal-level auxiliary window in
++ * the space is displayed but Core Animation reports no presentation times for
++ * it, measured 2026-09-13), shown only while the Wine window has focus. The
++ * first such window created for a fullscreen space never reports presentation
++ * times while every later one does (probe and fixture, 2026-09-13), so a
++ * throwaway window is created first and each attach uses a fresh overlay. The view returns to the Wine
++ * client view when the canvas leaves fullscreen.
++ * Opt-in with DXMT_CANVAS_OVERLAY=1 (the launcher sets it). */
++@interface OWOverlayWindow : NSWindow
++@end
++@implementation OWOverlayWindow
++- (BOOL)canBecomeKeyWindow { return NO; }
++- (BOOL)canBecomeMainWindow { return NO; }
++@end
++
++static BOOL overlayEnabled(void) {
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char *value = getenv("DXMT_CANVAS_OVERLAY");
++        enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
++    }
++    return enabled > 0;
++}
++
++static NSWindow *makeOverlayWindow(NSRect content) {
++    OWOverlayWindow *overlay = [[OWOverlayWindow alloc] initWithContentRect:content styleMask:NSWindowStyleMaskBorderless
++                                                                     backing:NSBackingStoreBuffered defer:NO];
++    [overlay setReleasedWhenClosed:NO];
++    [overlay setOpaque:YES];
++    [overlay setBackgroundColor:NSColor.blackColor];
++    [overlay setHasShadow:NO];
++    [overlay setIgnoresMouseEvents:YES];
++    [overlay setAnimationBehavior:NSWindowAnimationBehaviorNone];
++    [overlay setLevel:NSMainMenuWindowLevel + 1];
++    [overlay setCollectionBehavior:NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary |
++                                    NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorIgnoresCycle];
++    overlay.contentView.wantsLayer = YES;
++    overlay.contentView.layer.backgroundColor = NSColor.blackColor.CGColor;
++    return overlay;
++}
++
++/* Per attach: the first overlay window created for a fullscreen space reports
++ * no presentation times (probe and fixture, 2026-09-13); a throwaway window
++ * takes that slot every time the canvas enters a space. */
++static NSWindow *warmupOverlay;
++static void overlayWarmUp(NSRect content) {
++    [warmupOverlay orderOut:nil];
++    [warmupOverlay release];
++    warmupOverlay = makeOverlayWindow(content);
++    [warmupOverlay orderFrontRegardless];
++    [warmupOverlay orderOut:nil];
++}
++
++static char canvasKey;
++static OWCanvas *canvas(WineWindow *window) {
++    return window ? objc_getAssociatedObject(window, &canvasKey) : nil;
++}
++
++static void record(WineWindow *window, const char *event) {
++    OWCanvas *state = canvas(window);
++    const char *prefix = getenv("DXMT_CANVAS_LOG");
++    if (!state || !prefix || !*prefix || state->transitions++ >= 256) return;
++    char path[PATH_MAX];
++    if (snprintf(path, sizeof(path), "%s-%d.jsonl", prefix, getpid()) >= sizeof(path)) return;
++    FILE *file = fopen(path, "a");
++    if (!file) return;
++    fprintf(file, "{\"schema\":1,\"native_pid\":%d,\"windows_pid\":%u,\"unix_ms\":%.0f,\"host_s\":%.9f,\"event\":\"%s\",\"active\":%s,"
++        "\"logical\":[%.0f,%.0f],\"physical\":[%.0f,%.0f],\"focused\":%s}\n",
++        getpid(), state->windowsPid, NSDate.date.timeIntervalSince1970*1000, CACurrentMediaTime(), event, state->active ? "true" : "false",
++        state->pixels.width, state->pixels.height, state->physical.size.width, state->physical.size.height,
++        window.isKeyWindow ? "true" : "false");
++    fclose(file);
++}
++
++BOOL macdrv_v1_canvas_active(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    return state && state->active;
++}
++
++BOOL macdrv_v1_canvas_requested(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    return state && state->requested;
++}
++
++/* Drawable pool depth for the registered canvas layer. Two drawables force the
++ * translator's encoding thread to wait for the on-screen drawable to be released
++ * at every refresh; measured 2026-09-12 gameplay spent about 7% of wall time in
++ * that wait and locked presentation to the display's slower refresh steps. Three
++ * is Core Animation's default and matches the windowed path. The Direct3D
++ * frame-latency limit still bounds CPU run-ahead. DXMT_CANVAS_DRAWABLES=2 keeps
++ * the previous behaviour for a controlled comparison. */
++static NSUInteger canvasDrawableCount(void) {
++    static NSUInteger count;
++    if (!count) {
++        const char *value = getenv("DXMT_CANVAS_DRAWABLES");
++        long parsed = value && *value ? strtol(value, NULL, 10) : 0;
++        count = (parsed == 2 || parsed == 3) ? (NSUInteger)parsed : 3;
++    }
++    return count;
++}
++
++static NSView *clientMetalView(OWCanvas *state) {
++    for (NSView *view in state->client.subviews)
++        if ([view.layer isKindOfClass:CAMetalLayer.class]) return view;
++    return nil;
++}
++
++/* Same on-screen placement as the scaled Wine client view: the game image
++ * aspect-fitted and centred in the window's content area, drawn at display
++ * pixels. The input mapping (macdrv_v1_canvas_point) is unchanged by design. */
++static void overlayLayout(WineWindow *window, OWCanvas *state) {
++    if (!state->overlayActive) return;
++    NSRect content = [window contentRectForFrameRect:window.frame];
++    if (!NSEqualRects(state->overlay.frame, content)) [state->overlay setFrame:content display:NO];
++    NSRect bounds = state->overlay.contentView.bounds;
++    double scale = fmin(bounds.size.width/state->pixels.width, bounds.size.height/state->pixels.height);
++    if (!isfinite(scale) || scale <= 0) return;
++    double w = floor(state->pixels.width*scale), h = floor(state->pixels.height*scale);
++    NSRect frame = NSMakeRect(floor((bounds.size.width-w)/2), floor((bounds.size.height-h)/2), w, h);
++    NSView *view = state->metalView;
++    if (!NSEqualRects(view.frame, frame)) [view setFrame:frame];
++    CAMetalLayer *layer = (CAMetalLayer *)view.layer;
++    double backing = state->overlay.backingScaleFactor;
++    layer.contentsScale = backing;
++    layer.drawableSize = CGSizeMake(llround(w*backing), llround(h*backing));
++    layer.maximumDrawableCount = canvasDrawableCount();
++}
++
++static void overlayObserve(void);
++
++static void overlayDetach(WineWindow *window, OWCanvas *state) {
++    if (!state->overlayActive) return;
++    NSView *view = state->metalView;
++    [state->overlay orderOut:nil];
++    if (view.window == state->overlay) {
++        /* Still owned by the translator: return it to the Wine client view. */
++        [view removeFromSuperview];
++        [view setFrame:state->savedMetalFrame];
++        [view setAutoresizingMask:state->savedMetalAutoresizing];
++        [state->client addSubview:view positioned:NSWindowBelow relativeTo:nil];
++    }
++    state->overlayActive = NO;
++    [view release];
++    state->metalView = nil;
++    record(window, "overlay_detached");
++}
++
++static void overlayAttach(WineWindow *window, OWCanvas *state) {
++    if (!overlayEnabled() || !state->active || state->transitioning) return;
++    NSView *view = clientMetalView(state);
++    if (state->overlayActive) {
++        if (!view) return;
++        /* A new swapchain view appeared while the overlay held the old one. */
++        overlayDetach(window, state);
++    }
++    if (!view || view.superview != state->client) return;
++    NSRect content = [window contentRectForFrameRect:window.frame];
++    overlayWarmUp(content);
++    [state->overlay release];
++    state->overlay = makeOverlayWindow(content);
++    overlayObserve();
++    state->metalView = [view retain];
++    state->savedMetalFrame = view.frame;
++    state->savedMetalAutoresizing = view.autoresizingMask;
++    [view removeFromSuperview];
++    [view setAutoresizingMask:NSViewNotSizable];
++    [state->overlay.contentView addSubview:view];
++    state->overlayActive = YES;
++    overlayLayout(window, state);
++    if (window.isKeyWindow) [state->overlay orderFrontRegardless];
++    record(window, "overlay_attached");
++}
++
++static void overlayFocus(WineWindow *window, OWCanvas *state, BOOL focused) {
++    if (!state->overlayActive) return;
++    if (focused) { overlayLayout(window, state); [state->overlay orderFrontRegardless]; }
++    else [state->overlay orderOut:nil];
++}
++
++/* Cmd-Tab and hide/unhide: the overlay is removed when the application
++ * deactivates. AppKit restores the key window some time after activation (the
++ * probe measured about a second) and with the overlay present the Wine window
++ * was measured not to get it back at all, so after activation the canvas
++ * window is made key again if nothing is, and the overlay returns only once
++ * the Wine window is key. */
++static void overlayReactivate(void) {
++    for (NSWindow *candidate in NSApp.windows) {
++        OWCanvas *state = [candidate isKindOfClass:WineWindow.class] ? canvas((WineWindow *)candidate) : nil;
++        if (!state || !state->overlayActive) continue;
++        if (NSApp.isActive && NSApp.keyWindow == nil && candidate.isVisible) [candidate makeKeyAndOrderFront:nil];
++        overlayFocus((WineWindow *)candidate, state, NSApp.isActive && candidate.isKeyWindow);
++    }
++}
++
++static void overlayDeactivate(void) {
++    for (NSWindow *candidate in NSApp.windows) {
++        OWCanvas *state = [candidate isKindOfClass:WineWindow.class] ? canvas((WineWindow *)candidate) : nil;
++        if (state && state->overlayActive) overlayFocus((WineWindow *)candidate, state, NO);
++    }
++}
++
++static void overlayReactivateLater(void) {
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ overlayReactivate(); });
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ overlayReactivate(); });
++}
++
++static void overlayObserve(void) {
++    static BOOL observing;
++    if (observing) return;
++    observing = YES;
++    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
++    [center addObserverForName:NSApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue
++                    usingBlock:^(NSNotification *note) { overlayReactivateLater(); }];
++    [center addObserverForName:NSApplicationDidUnhideNotification object:nil queue:NSOperationQueue.mainQueue
++                    usingBlock:^(NSNotification *note) { overlayReactivateLater(); }];
++    [center addObserverForName:NSApplicationDidResignActiveNotification object:nil queue:NSOperationQueue.mainQueue
++                    usingBlock:^(NSNotification *note) { overlayDeactivate(); }];
++    [center addObserverForName:NSApplicationDidHideNotification object:nil queue:NSOperationQueue.mainQueue
++                    usingBlock:^(NSNotification *note) { overlayDeactivate(); }];
++}
++
++NSWindow *macdrv_v1_canvas_owner(NSWindow *window) {
++    if (!window || ![window isKindOfClass:OWOverlayWindow.class]) return window;
++    for (NSWindow *candidate in NSApp.windows) {
++        OWCanvas *state = [candidate isKindOfClass:WineWindow.class] ? canvas((WineWindow *)candidate) : nil;
++        if (state && state->overlay == window) return candidate;
++    }
++    return window;
++}
++
++static void updateLayers(WineWindow *window, OWCanvas *state) {
++    double scale = state->active ? fmin(state->physical.size.width/state->pixels.width,
++                                      state->physical.size.height/state->pixels.height) : 1.0;
++    if (!isfinite(scale) || scale <= 0) return;
++    for (NSView *view in state->client.subviews) {
++        if (![view.layer isKindOfClass:CAMetalLayer.class]) continue;
++        CAMetalLayer *layer = (CAMetalLayer *)view.layer;
++        // Render the final enlargement at display pixels, rather than leaving
++        // Core Animation to magnify a low-resolution finished drawable.
++        layer.drawableSize = CGSizeMake(llround(state->pixels.width*scale), llround(state->pixels.height*scale));
++        layer.contentsScale = (retina_on ? 2.0 : 1.0)*scale;
++        layer.maximumDrawableCount = canvasDrawableCount();
++    }
++    if (state->active) overlayAttach(window, state);
++    overlayLayout(window, state);
++}
++
++__attribute__((visibility("default"))) void macdrv_v1_update_metal_layer(void *object) {
++    for (WineWindow *window in NSApp.windows) {
++        OWCanvas *state = canvas(window);
++        if (!state || !state->active) continue;
++        for (NSView *view in state->client.subviews)
++            if (view.layer == object) { updateLayers(window, state); return; }
++        if (state->metalView && state->metalView.layer == object) { overlayLayout(window, state); return; }
++    }
++}
++
++void macdrv_v1_canvas_layout(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    if (!state || !state->active || state->layingOut) return;
++    NSView *root = window.contentView;
++    NSRect frame = [window contentRectForFrameRect:window.frame];
++    [[WineApplicationController sharedController] flipRect:&frame];
++    state->physical = cgrect_win_from_mac(NSRectToCGRect(frame));
++    double retina = retina_on ? 2.0 : 1.0;
++    double width = root.frame.size.width, height = root.frame.size.height;
++    NSSize logical = NSMakeSize(state->pixels.width/retina, state->pixels.height/retina);
++    double scale = fmin(width/logical.width, height/logical.height);
++    if (!isfinite(scale) || scale <= 0) return;
++    state->layingOut = YES;
++    // Root coordinates stay in logical points. Its extra bounds surround the
++    // fixed-size client with equal bars; subviews inherit the uniform transform.
++    [root setBounds:NSMakeRect(-(width/scale-logical.width)/2, -(height/scale-logical.height)/2,
++                              width/scale, height/scale)];
++    [state->client setAutoresizingMask:NSViewNotSizable];
++    [state->client setFrame:NSMakeRect(0, 0, logical.width, logical.height)];
++    [window setBackgroundColor:NSColor.blackColor];
++    updateLayers(window, state);
++    state->layingOut = NO;
++}
++
++CGRect macdrv_v1_canvas_frame(WineWindow *window, CGRect physical) {
++    OWCanvas *state = canvas(window);
++    if (!state || !state->active) return physical;
++    state->physical = physical;
++    physical.size = NSSizeToCGSize(state->pixels);
++    return physical;
++}
++
++void macdrv_v1_canvas_restore(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    if (!state || state->active) return;
++    overlayDetach(window, state);
++    // Cocoa resizes bounds proportionally during the exit animation. Restore
++    // after the final physical frame, otherwise each toggle compounds scaling.
++    [window.contentView setBounds:state->savedBounds];
++    [state->client setFrame:state->savedClientFrame];
++    [state->client setAutoresizingMask:state->savedAutoresizing];
++    updateLayers(window, state);
++}
++
++void macdrv_v1_canvas_transition(WineWindow *window, BOOL entering) {
++    OWCanvas *state = canvas(window);
++    if (!state) return;
++    if (!state->transitioning) state->requested = entering;
++    state->transitioning = YES;
++    if (entering && !state->active) {
++        state->savedBounds = window.contentView.bounds;
++        state->savedClientFrame = state->client.frame;
++        state->savedAutoresizing = state->client.autoresizingMask;
++        [state->savedBackground release];
++        state->savedBackground = [window.backgroundColor retain];
++    }
++    state->active = entering;
++    if (entering) macdrv_v1_canvas_layout(window);
++    else {
++        overlayDetach(window, state);
++        [window.contentView setBounds:state->savedBounds];
++        [state->client setFrame:state->savedClientFrame];
++        [state->client setAutoresizingMask:state->savedAutoresizing];
++        [window setBackgroundColor:state->savedBackground];
++    }
++    record(window, entering ? "enter_fullscreen" : "exit_fullscreen");
++}
++
++CGPoint macdrv_v1_canvas_point(WineWindow *window, CGPoint point, BOOL to_physical) {
++    OWCanvas *state = canvas(window);
++    if (!state || !state->active) return point;
++    double scale = fmin(state->physical.size.width/state->pixels.width,
++                        state->physical.size.height/state->pixels.height);
++    if (!isfinite(scale) || scale <= 0) return point;
++    double pad_x = (state->physical.size.width-state->pixels.width*scale)/2;
++    double pad_y = (state->physical.size.height-state->pixels.height*scale)/2;
++    CGPoint origin = state->physical.origin;
++    if (to_physical)
++        return CGPointMake(origin.x+pad_x+(point.x-origin.x)*scale,
++                           origin.y+pad_y+(point.y-origin.y)*scale);
++    return CGPointMake(origin.x+(point.x-origin.x-pad_x)/scale,
++                       origin.y+(point.y-origin.y-pad_y)/scale);
++}
++
++CGRect macdrv_v1_canvas_clip(CGRect rect) {
++    WineWindow *window = (WineWindow *)NSApp.keyWindow;
++    if (CGRectIsInfinite(rect) || !macdrv_v1_canvas_active(window)) return rect;
++    CGPoint a = macdrv_v1_canvas_point(window, rect.origin, YES);
++    CGPoint b = macdrv_v1_canvas_point(window, CGPointMake(CGRectGetMaxX(rect), CGRectGetMaxY(rect)), YES);
++    return CGRectMake(a.x, a.y, b.x-a.x, b.y-a.y);
++}
++
++void macdrv_v1_canvas_event(macdrv_event *event) {
++    // Absolute positions are in Wine screen pixels already. Relative motion is
++    // intentionally unchanged so raw mouse sensitivity is independent of scale.
++    WineWindow *window = (WineWindow *)event->window;
++    if (![NSThread isMainThread] || !macdrv_v1_canvas_active(window)) return;
++    int *x = NULL, *y = NULL;
++    switch (event->type) {
++    case MOUSE_MOVED_ABSOLUTE: x=&event->mouse_moved.x; y=&event->mouse_moved.y; break;
++    case MOUSE_BUTTON: x=&event->mouse_button.x; y=&event->mouse_button.y; break;
++    case MOUSE_SCROLL: x=&event->mouse_scroll.x; y=&event->mouse_scroll.y; break;
++    default: return;
++    }
++    CGPoint p = macdrv_v1_canvas_point(window, CGPointMake(*x,*y), NO);
++    *x = floor(p.x); *y = floor(p.y);
++}
++
++void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
++    OWCanvas *state = canvas(window);
++    if (!state) return;
++    if (focused) macdrv_v1_canvas_layout(window);
++    overlayFocus(window, state, focused);
++    record(window, focused ? "focus_gained" : "focus_lost");
++}
++
++/* Explicit bridge registration is per-window and preserves the existing
++ * macdrv_functions ABI. Older drivers report unavailable through dlsym. */
++__attribute__((visibility("default"))) unsigned
++macdrv_v1_configure_canvas(void *client_view, unsigned width, unsigned height, unsigned windows_pid) {
++    __block unsigned result = 0;
++    dispatch_block_t configure = ^{
++        NSView *view = (NSView *)client_view;
++        WineWindow *window = (WineWindow *)macdrv_v1_canvas_owner(view.window);
++        if (!view || ![window isKindOfClass:WineWindow.class] ||
++            width != 1920 || (height != 1080 && height != 1200)) return;
++        OWCanvas *state = canvas(window);
++        if (!state) {
++            state = [[[OWCanvas alloc] init] autorelease];
++            state->client = [view retain];
++            objc_setAssociatedObject(window, &canvasKey, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++        }
++        if (state->client != view) {
++            [state->client release];
++            state->client = [view retain];
++        }
++        state->pixels = NSMakeSize(width,height);
++        state->windowsPid = windows_pid;
++        if (!state->active) state->savedBounds = window.contentView.bounds;
++        updateLayers(window, state);
++        record(window, "registered");
++        result = 1;
++    };
++    if ([NSThread isMainThread]) configure();
++    else OnMainThread(configure);
++    return result;
++}
++
++/* Called only through the explicit DXMT bridge. Never changes display modes.
++ * Cocoa transitions are asynchronous; requests received during an animation
++ * are reconciled by the did-enter/did-exit callbacks, without blocking Wine. */
++static void requestTransition(WineWindow *window, OWCanvas *state) {
++    if (state->transitioning) return;
++    BOOL actual = (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
++    if (actual == state->requested) return;
++    [window setCollectionBehavior:(window.collectionBehavior | NSWindowCollectionBehaviorFullScreenPrimary)
++                                   & ~NSWindowCollectionBehaviorFullScreenAuxiliary];
++    [window toggleFullScreen:nil];
++}
++
++void macdrv_v1_canvas_settled(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    if (!state) return;
++    state->transitioning = NO;
++    if (state->active) overlayAttach(window, state);
++    else overlayDetach(window, state);
++    // A green-button transition remains supported. Reconciliation is needed
++    // only when a subsequent explicit game request arrived during animation.
++    if (state->requested != state->active) requestTransition(window, state);
++}
++
++void macdrv_v1_canvas_failed(WineWindow *window) {
++    OWCanvas *state = canvas(window);
++    if (!state) return;
++    state->transitioning = NO;
++    state->requested = state->active;
++    if (!state->active) overlayDetach(window, state);
++    record(window, "fullscreen_transition_failed");
++}
++
++__attribute__((visibility("default"))) unsigned
++macdrv_v1_set_fullscreen(void *client_view, unsigned width, unsigned height, unsigned enable) {
++    __block unsigned result = 0;
++    dispatch_block_t action = ^{
++        NSView *view = (NSView *)client_view;
++        WineWindow *window = (WineWindow *)macdrv_v1_canvas_owner(view.window);
++        OWCanvas *state = [window isKindOfClass:WineWindow.class] ? canvas(window) : nil;
++        if (!state || enable > 2 || width < 640 || width > 3840 || height < 480 || height > 2160) return;
++        if (enable == 2) { result = state->requested || state->active; return; }
++        state->pixels = NSMakeSize(width, height);
++        state->requested = enable != 0;
++        if (state->active) macdrv_v1_canvas_layout(window);
++        requestTransition(window, state);
++        record(window, enable ? "game_fullscreen_requested" : "game_windowed_requested");
++        result = 1;
++    };
++    if ([NSThread isMainThread]) action(); else OnMainThread(action);
++    return result;
++}
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -27,6 +27,7 @@
+ #include <dlfcn.h>
+ 
+ #import "cocoa_window.h"
++#import "cocoa_v1.h"
+ 
+ #include "macdrv_cocoa.h"
+ #import "cocoa_app.h"
+@@ -1155,9 +1156,9 @@
+     {
+         NSUInteger style = [self styleMask];
+ 
+-        if (behavior & NSWindowCollectionBehaviorParticipatesInCycle &&
++        if (macdrv_v1_canvas_requested(self) || enteringFullScreen || exitingFullScreen || (behavior & NSWindowCollectionBehaviorParticipatesInCycle &&
+             style & NSWindowStyleMaskResizable && !(style & NSWindowStyleMaskUtilityWindow) && !maximized &&
+-            !(self.parentWindow || self.latentParentWindow))
++            !(self.parentWindow || self.latentParentWindow)))
+         {
+             behavior |= NSWindowCollectionBehaviorFullScreenPrimary;
+             behavior &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
+@@ -2207,7 +2208,7 @@
+                                forWindow:self];
+ 
+         event = macdrv_create_event(WINDOW_FRAME_CHANGED, self);
+-        event->window_frame_changed.frame = cgrect_win_from_mac(NSRectToCGRect(frame));
++        event->window_frame_changed.frame = macdrv_v1_canvas_frame(self, cgrect_win_from_mac(NSRectToCGRect(frame)));
+         event->window_frame_changed.fullscreen = isFullscreen;
+         event->window_frame_changed.in_resize = resizing;
+         event->window_frame_changed.skip_size_move_loop = skipSizeMove;
+@@ -2726,7 +2727,7 @@
+ 
+     - (void) toggleFullScreen:(id)sender
+     {
+-        if (!self.disabled && !maximized)
++        if (!self.disabled && (!maximized || macdrv_v1_canvas_requested(self)))
+             [super toggleFullScreen:sender];
+     }
+ 
+@@ -3011,6 +3012,7 @@
+     {
+         macdrv_query* query;
+         NSSize size;
++        if (macdrv_v1_canvas_active(self)) return proposedSize;
+ 
+         query = macdrv_create_query();
+         query->type = QUERY_MIN_MAX_INFO;
+@@ -3036,6 +3038,7 @@
+         /* CrossOver Hack #18896: don't return here based on causing_becomeKeyWindow */
+ 
+         [controller windowGotFocus:self];
++        macdrv_v1_canvas_focus(self, TRUE);
+     }
+ 
+     - (void) windowDidChangeOcclusionState:(NSNotification*)notification
+@@ -3091,6 +3094,8 @@
+     {
+         enteringFullScreen = FALSE;
+         enteredFullScreenTime = [[NSProcessInfo processInfo] systemUptime];
++        macdrv_v1_canvas_layout(self);
++        macdrv_v1_canvas_settled(self);
+         if (pendingOrderOut)
+             [self doOrderOut];
+     }
+@@ -3099,7 +3104,9 @@
+     {
+         exitingFullScreen = FALSE;
+         [self setFrameAndWineFrame:nonFullscreenFrame];
++        macdrv_v1_canvas_restore(self);
+         [self windowDidResize:nil];
++        macdrv_v1_canvas_settled(self);
+         if (pendingOrderOut)
+             [self doOrderOut];
+     }
+@@ -3108,12 +3115,17 @@
+     {
+         enteringFullScreen = FALSE;
+         enteredFullScreenTime = 0;
++        macdrv_v1_canvas_transition(self, FALSE);
++        macdrv_v1_canvas_failed(self);
++        macdrv_v1_canvas_restore(self);
+         if (pendingOrderOut)
+             [self doOrderOut];
+     }
+ 
+     - (void) windowDidFailToExitFullScreen:(NSWindow*)window
+     {
++        macdrv_v1_canvas_transition(self, TRUE);
++        macdrv_v1_canvas_failed(self);
+         exitingFullScreen = FALSE;
+         [self windowDidResize:nil];
+         if (pendingOrderOut)
+@@ -3146,6 +3158,7 @@
+         if (causing_becomeKeyWindow) return;
+         if ([[WineApplicationController sharedController] temporarilyIgnoreResignEventsForDialog]) return;
+ 
++        macdrv_v1_canvas_focus(self, FALSE);
+         event = macdrv_create_event(WINDOW_LOST_FOCUS, self);
+         [queue postEvent:event];
+         macdrv_release_event(event);
+@@ -3164,6 +3177,7 @@
+         }
+ 
+         if (ignore_windowResize || exitingFullScreen) return;
++        macdrv_v1_canvas_layout(self);
+ 
+         if ([self preventResizing])
+         {
+@@ -3236,12 +3250,14 @@
+     - (void) windowWillEnterFullScreen:(NSNotification*)notification
+     {
+         enteringFullScreen = TRUE;
++        macdrv_v1_canvas_transition(self, TRUE);
+         nonFullscreenFrame = self.wine_fractionalFrame;
+     }
+ 
+     - (void) windowWillExitFullScreen:(NSNotification*)notification
+     {
+         exitingFullScreen = TRUE;
++        macdrv_v1_canvas_transition(self, FALSE);
+         [self postWindowFrameChanged:nonFullscreenFrame fullscreen:FALSE resizing:FALSE skipSizeMove:FALSE];
+     }
+ 
+@@ -3615,7 +3631,8 @@
+     WineWindow* window = (WineWindow*)w;
+ 
+     OnMainThread(^{
+-        [window setFrameFromWine:NSRectFromCGRect(cgrect_mac_from_win(*new_frame))];
++        if (macdrv_v1_canvas_active(window)) macdrv_v1_canvas_layout(window);
++        else [window setFrameFromWine:NSRectFromCGRect(cgrect_mac_from_win(*new_frame))];
+     });
+ }
+ 
+@@ -3633,7 +3650,7 @@
+ 
+         frame = [window contentRectForFrameRect:[window wine_fractionalFrame]];
+         [[WineApplicationController sharedController] flipRect:&frame];
+-        *out_frame = cgrect_win_from_mac(NSRectToCGRect(frame));
++        *out_frame = macdrv_v1_canvas_frame(window, cgrect_win_from_mac(NSRectToCGRect(frame)));
+     });
+ }
+ 
+@@ -3910,6 +3927,7 @@
+             [view wine_setBackingSize:(int[2]){ 0 }];
+             [(WineWindow*)[view window] updateForGLSubviews];
+         }
++        macdrv_v1_canvas_layout((WineWindow *)view.window);
+     });
+ }
+ }
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -47,6 +47,38 @@
+ 
+ 
+ /* CrossOver Hack #16933 */
++
++/* Soju: apps listed in WINE_CUSTOM_FRAME (semicolon-separated exe names) draw
++ * their own title bar inside the client area (Qt/Electron style custom frames,
++ * e.g. GOG GALAXY). Adding a macOS title bar on top of that hides the first
++ * rows of their UI, so such windows get no Cocoa title bar or buttons. */
++static BOOL is_custom_frame_app(void)
++{
++    static int result = -1;
++
++    if (result == -1)
++    {
++        const char *list = getenv("WINE_CUSTOM_FRAME");
++        WCHAR *name = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
++        WCHAR *exe = wcsrchr(name, '\\');
++        char exe_a[MAX_PATH];
++        int i;
++
++        result = 0;
++        exe = exe ? exe + 1 : name;
++        for (i = 0; exe[i] && i < MAX_PATH - 1; i++) exe_a[i] = (char)exe[i];
++        exe_a[i] = 0;
++        while (list && *list)
++        {
++            const char *end = strchr(list, ';');
++            size_t len = end ? (size_t)(end - list) : strlen(list);
++            if (len == strlen(exe_a) && !strncasecmp(list, exe_a, len)) { result = 1; break; }
++            list = end ? end + 1 : NULL;
++        }
++    }
++    return result;
++}
++
+ static BOOL is_main_quicken_window(HWND hwnd)
+ {
+     static const WCHAR qw_exeW[] = {'q','w','.','e','x','e',0};
+@@ -127,7 +159,10 @@
+         return wf;
+     }
+ 
+-    return get_window_features_for_style(style, ex_style, data->shaped);
++    wf = get_window_features_for_style(style, ex_style, data->shaped);
++    if (wf.title_bar && is_custom_frame_app())
++        wf.title_bar = wf.close_button = wf.minimize_button = wf.maximize_button = FALSE;
++    return wf;
+ }
+ 
+ 
+@@ -1653,6 +1688,9 @@
+ 
+     /* CW HACK 16933: No Cocoa window decorations for the Quicken main window. */
+     if (is_main_quicken_window(hwnd)) return FALSE;
++    /* Soju: custom-frame apps keep their caption inside the client area. */
++    if (wf.title_bar && is_custom_frame_app())
++        wf.title_bar = wf.close_button = wf.minimize_button = wf.maximize_button = FALSE;
+ 
+     *style_mask = ex_style = 0;
+     if (wf.title_bar)
