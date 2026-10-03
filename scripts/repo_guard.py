@@ -36,6 +36,9 @@ REVIEWED_ASSETS = {
     'app/Resources/ButtonCoffee.png': {'e1a140debece937489f23c835dd8774533d9f09f892e4c0d39b90d168747d4bd'},
     'app/Resources/ButtonMosaic.png': {'ea5da8825e2c7b0994d3740c10abe4dc01f0b191466edd8c34bb4bc6e927ef0c'},
     'app/Resources/ButtonLinkedIn.png': {'1f2c35468d22bb0a8aec2808b1d6a1946833d03ff0180acc8cc8607ee570f8f2'},
+    'app/Resources/HowItWorksStack.png': {'bcdd822c8001984822d71c047d1a64543e7ada9de9d720fec63f9afe3e0357cf'},
+    'app/Resources/HowItWorksMouse.png': {'409eef05ccad7ad05e8075d57bf9debc0dc01e053c6061827d035f63164c372e'},
+    'app/Resources/HowItWorksShaders.png': {'0fedfb291cfd28805a2bfc4b3fbd9db6d639f00b5a424c572ea1e06c1ab44016'},
 }
 
 MAX_BYTES = 2 * 1024 * 1024

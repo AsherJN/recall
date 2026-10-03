@@ -59,3 +59,12 @@ AuthorPhotoRound.png SHA-256: 36401eb5d72ff67cba56969843fc597d1d20b78f75872c6a53
 ButtonCoffee.png SHA-256: e1a140debece937489f23c835dd8774533d9f09f892e4c0d39b90d168747d4bd
 ButtonMosaic.png SHA-256: ea5da8825e2c7b0994d3740c10abe4dc01f0b191466edd8c34bb4bc6e927ef0c
 ButtonLinkedIn.png SHA-256: 1f2c35468d22bb0a8aec2808b1d6a1946833d03ff0180acc8cc8607ee570f8f2
+
+How-it-works artwork
+
+Rendered from HTML for docs/HOW-IT-WORKS.md on 2026-10-03, with no metadata.
+HowItWorksStack.png is a diagram of the software layers; HowItWorksMouse.png
+and HowItWorksShaders.png chart the project's own measurements.
+HowItWorksStack.png SHA-256: bcdd822c8001984822d71c047d1a64543e7ada9de9d720fec63f9afe3e0357cf
+HowItWorksMouse.png SHA-256: 409eef05ccad7ad05e8075d57bf9debc0dc01e053c6061827d035f63164c372e
+HowItWorksShaders.png SHA-256: 0fedfb291cfd28805a2bfc4b3fbd9db6d639f00b5a424c572ea1e06c1ab44016

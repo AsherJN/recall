@@ -61,6 +61,8 @@ CrossOver is the most popular way to play Windows games on a Mac, so it's the co
 
 <sub>1% low FPS is the frame rate during the slowest 1% of frames: the dips you feel in a fight. A stutter is a frame that took longer than 50 ms. Both apps ran Overwatch fullscreen at 1920 × 1080 on the Low preset, with V-Sync off and Dynamic Render Scale off, on macOS 26.6.2; CrossOver used its default graphics setting, D3DMetal. Each run measured about two minutes of gameplay, with loading screens and menus removed. The full results and method are in the [performance notes](docs/PERFORMANCE.md).</sub>
 
+Curious how Recall gets these results? See [how Recall runs faster](docs/HOW-IT-WORKS.md).
+
 **Your aim.** Overwatch is decided by flicks and tracking, so how the mouse reaches the game matters as much as frame rate. CrossOver waits for macOS to update the pointer, 120 times a second, and drops a little of your movement each time the game snaps its hidden cursor back to the center. Recall reads the mouse directly, up to 2,000 times a second, the way native Mac games do, so none of your movement is lost and it reaches the game with less delay. [How each one handles the mouse](docs/PERFORMANCE.md#mouse-input).
 
 **Price.** CrossOver costs $74 with a year of updates, or $494 for life. Recall is free.
