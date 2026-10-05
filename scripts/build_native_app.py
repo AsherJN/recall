@@ -19,7 +19,7 @@ ROOT=Path(__file__).resolve().parents[1]
 # The bundle and executable name players see; Brand.swift holds the in-app
 # copy. The bundle identifier keeps its original value so updates carry over.
 APP_NAME='Recall'
-APP_BUILD='35'
+APP_BUILD='36'
 RESOURCES=('MosaicLogo.png','LinkedInMark.png','AuthorPhoto.jpg','Wordmark.png','WordmarkDark.png')
 def run(*args):subprocess.run([str(a) for a in args],check=True)
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()

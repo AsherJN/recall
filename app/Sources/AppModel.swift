@@ -223,6 +223,20 @@ final class AppModel {
             .map { $0.url.deletingPathExtension().lastPathComponent }
         screen = .moveApp
     }
+    /// True when nothing is running, so quitting needs no confirmation.
+    var quitsNow:Bool { isPreview || !busy }
+    /// Quits the app. AppKit ignores a quit while a sheet is attached to the
+    /// window, so when nothing is running, close the sheet first and quit once
+    /// it has gone.
+    func quit() {
+        guard sheet != nil,quitsNow else { NSApp.terminate(nil);return }
+        sheet=nil
+        Task {
+            var waits=0
+            while waits<40 && NSApp.windows.contains(where:{ $0.attachedSheet != nil }) { try? await Task.sleep(for:.milliseconds(50));waits+=1 }
+            NSApp.terminate(nil)
+        }
+    }
     /// Copies this app into Applications (verified like an update), moves older
     /// copies to the Trash, then reopens it from there and ejects the disk image.
     func moveToApplications() {
@@ -236,7 +250,7 @@ final class AppModel {
             let volume=await AppLocation.diskImageVolume(containing:AppLocation.original(of:bundle))
             UpdateInstaller.relaunch(target,ejecting:volume)
             self.busy=false
-            NSApp.terminate(nil)
+            self.quit()
         }
     }
     /// A copy at least as new is already installed: open it instead.
@@ -246,7 +260,7 @@ final class AppModel {
             let volume=await AppLocation.diskImageVolume(containing:AppLocation.original(of:Bundle.main.bundleURL))
             UpdateInstaller.relaunch(copy.url,ejecting:volume)
             self.busy=false
-            NSApp.terminate(nil)
+            self.quit()
         }
     }
     private func route(autoLaunch:Bool) async throws {
@@ -338,7 +352,7 @@ final class AppModel {
                 update = .installing
                 UpdateInstaller.relaunch(Bundle.main.bundleURL)
                 busy=false
-                NSApp.terminate(nil)
+                quit()
             } catch {
                 update = .available(item)
                 if !Task.isCancelled { updateNotice=Self.updateMessage((error as? SetupFailure)?.code ?? "") }

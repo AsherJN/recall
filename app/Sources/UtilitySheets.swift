@@ -495,7 +495,7 @@ struct UninstallSheet:View {
             case .done(let appRemoved):
                 SheetHero(symbol:"checkmark",title:"Uninstalled",subtitle:appRemoved ? "Overwatch, Battle.net and this app are in the Trash." : "Overwatch and Battle.net are in the Trash.")
                 LauncherNotice(text:appRemoved ? "Empty the Trash to free the storage. Quit to finish." : "\(Brand.name) couldn’t move itself to the Trash. Quit, then drag \(Brand.name) from Applications to the Trash and empty it.")
-                Button("Quit") { NSApp.terminate(nil) }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                Button("Quit") { model.quit() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                     .controlSize(.large).keyboardShortcut(.defaultAction)
             }
         }.font(LauncherStyle.font(14)).padding(32).frame(width:520)

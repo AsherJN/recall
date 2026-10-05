@@ -233,7 +233,7 @@ struct SetupView: View {
             } else {
                 LauncherPrimaryAction(title:"Move to Applications",action:model.moveToApplications).keyboardShortcut(.defaultAction).disabled(model.busy)
             }
-            Button("Quit") { NSApp.terminate(nil) }.buttonStyle(.borderless).disabled(model.busy)
+            Button("Quit") { model.quit() }.buttonStyle(.borderless).disabled(model.busy)
         case .readyToInstall:
             LauncherPrimaryAction(title:model.clientInstalled ? "Finish Setup" : "Install Battle.net",action:model.setup).keyboardShortcut(.defaultAction).disabled(model.busy)
         case .checking: EmptyView()

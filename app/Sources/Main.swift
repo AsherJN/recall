@@ -36,7 +36,7 @@ import Darwin
         add("Uninstall \(Brand.name)…",#selector(uninstall))
         app.addItem(.separator())
         let hide=NSMenuItem(title:"Hide \(Brand.name)",action:#selector(NSApplication.hide(_:)),keyEquivalent:"h");app.addItem(hide)
-        app.addItem(NSMenuItem(title:"Quit \(Brand.name)",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q"))
+        add("Quit \(Brand.name)",#selector(quit),"q")
         let editItem=NSMenuItem();main.addItem(editItem);let edit=NSMenu(title:"Edit");editItem.submenu=edit
         for (title,selector,key) in [("Copy",#selector(NSText.copy(_:)),"c"),("Select All",#selector(NSText.selectAll(_:)),"a")] { edit.addItem(NSMenuItem(title:title,action:selector,keyEquivalent:key)) }
         let windowItem=NSMenuItem();main.addItem(windowItem);let wm=NSMenu(title:"Window");windowItem.submenu=wm
@@ -100,6 +100,7 @@ import Darwin
         guard model.isPreview else { return };NSApp.appearance=NSAppearance(named:sender.title == "Dark appearance" ? .darkAqua : .aqua)
     }
     @objc func launch() { show();model.launch() }
+    @objc func quit() { model.quit() }
     @objc func settings() { show();model.sheet = .settings }
     @objc func about() { show();model.sheet = .about }
     @objc func uninstall() { show();model.sheet = .uninstall }
@@ -109,7 +110,7 @@ import Darwin
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows:Bool)->Bool { show();model.reopen();return false }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication)->Bool { false }
     func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply {
-        if model.isPreview || !model.busy { return .terminateNow }
+        if model.quitsNow { return .terminateNow }
         if !model.canCancel { show();model.notice="Finishing the current step. You can quit as soon as it completes.";return .terminateCancel }
         model.cancel()
         Task { while model.busy { try? await Task.sleep(for:.milliseconds(100)) };sender.reply(toApplicationShouldTerminate:true) }
