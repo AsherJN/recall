@@ -45,6 +45,31 @@ import Foundation
         // Nothing fits a tiny display: the choice is kept (the worker does the same).
         let tiny=MainDisplay(name:"Tiny",builtIn:false,points:CGSize(width:800,height:500),pixels:CGSize(width:800,height:500))
         precondition(tiny.fitted(r(1920,1080)) == r(1920,1080))
+
+        // A new installation, and Troubleshooting's reset: 1080p in the main display's shape.
+        precondition(DisplayResolution.initial(for:macBook) == r(1920,1200) && DisplayResolution.initial(for:monitor) == r(1920,1080))
+        precondition(DisplayResolution.initial(for:wide) == r(1920,1080) && DisplayResolution.initial(for:nil) == r(1920,1200))
+        // Sizes chosen in Overwatch's Video settings: named, fitted and described like Settings' own.
+        precondition(r(5120,2160).aspect == "21:9" && r(3440,1440).aspect == "21:9" && r(5120,1440).aspect == "32:9" && r(5120,2880).aspect == "16:9")
+        // A player's 21:9 5K2K monitor ("looks like 2560 x 1080"): its own size fits and matches.
+        let ultrawide=MainDisplay(name:"LG 5K2K",builtIn:false,points:CGSize(width:2560,height:1080),pixels:CGSize(width:5120,height:2160))
+        precondition(ultrawide.aspect == "21:9" && ultrawide.fits(r(5120,2160)) && !ultrawide.fits(r(5120,2880)))
+        precondition(ultrawide.caption(for:r(5120,2160)).hasPrefix("Matches your main display exactly"))
+        precondition(ultrawide.caption(for:r(3840,2160)).hasPrefix("Your main display is wider than 16:9, so the picture has black bars at the sides."))
+        precondition(ultrawide.caption(for:r(3440,1440)).hasPrefix("Scaled up to fill your main display."))
+        precondition(ultrawide.fitted(r(5120,2880)) == r(3840,2160))
+        // The same 21:9 size on a 16:9 monitor: bars above and below.
+        precondition(uhd.caption(for:r(3440,1440)).hasPrefix("Your main display is taller than 21:9, so the picture has black bars above and below."))
+        // Settings' sizes keep their wording.
+        precondition(monitor.caption(for:r(1920,1200)).hasPrefix("Your main display is wider than 16:10, so the picture has black bars at the sides."))
+        precondition(macBook.caption(for:r(1920,1080)).hasPrefix("Your main display is taller than 16:9, so the picture has black bars above and below."))
+        precondition(macBook.caption(for:r(3840,2400)).hasPrefix("Too large for this main display: Overwatch uses 2560 × 1600"))
+        precondition(macBook.caption(for:r(1920,1200)).hasPrefix("Scaled up to fill your main display."))
+        precondition(monitor.caption(for:r(2560,1440)).hasPrefix("Matches your main display exactly"))
+        precondition(monitor.caption(for:r(3840,2160)).hasPrefix("Larger than your main display"))
+        // A 5K display at its default 2x: Overwatch lists 5120 x 2880.
+        let fiveK=MainDisplay(name:"Studio Display",builtIn:false,points:CGSize(width:2560,height:1440),pixels:CGSize(width:5120,height:2880))
+        precondition(fiveK.fits(r(5120,2880)) && fiveK.caption(for:r(5120,2880)).hasPrefix("Matches your main display exactly"))
         if let main=MainDisplay.current { print("main display:",main.name,main.size,main.aspect) }
         print("display options: all checks passed")
     }

@@ -73,9 +73,9 @@ def extract(work, name, prefix=None):
 
 V1_PATCHES = {
     'wine-server-registry-save.patch': '8f89556d5daff60c75ae60720ae5125c68021abc244a95df5f6352468323a1a3',
-    'wine-ntdll-syscall-log.patch': 'c972f4311b832ede507fe470d48c569cbf0851c42aa153fd5fe6cc7c3d6d9e2c',
+    'wine-ntdll-syscall-log.patch': 'beac5bba576e36a0971e6581e812817e87f5cb8c41003c2e4edfe0e8f269623a',
     'wine-win32u-display-log.patch': '1d0dae5d4810becf72bbb79d2259b97683f09481c91617ae543fd510d853aeff',
-    'wine-winemac-activation.patch': 'daa3f4b0ce44aec0712a257a975a6c95fafa9f7984bb3355d94bb7a1a576e2f2',
+    'wine-winemac-activation.patch': '4921a4a9fe12333e5b179f809837d221db1514bdc61bc80a4613110049383a7d',
 }
 
 

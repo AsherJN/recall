@@ -121,6 +121,21 @@ The DMG opens as a fixed Finder window with the app, an Applications shortcut
 and a background drawn by `scripts/dmg_background.swift`. dmgbuild writes that
 layout without scripting Finder; `--plain` skips it.
 
+Runtime `phase2-20261004.4`, shipped with app 1.1.0, is `phase2-20261004.3` with
+the project's license in `licenses/` changed from MIT to the Apache License 2.0 and
+its NOTICE (`scripts/derive_runtime.py --relicense`); every other file is
+unchanged. Runtime `phase2-20261004.3` is `phase2-20261004.2` with
+only the Mac driver replaced (`scripts/build_wine_native.py winemac`, then
+`scripts/derive_runtime.py --native winemac`), so the fullscreen canvas takes a
+display's own size, such as an ultrawide or 5K monitor's. Runtime
+`phase2-20261004.2` is `phase2-20261004.1` with
+ntdll replaced and a game app added, so macOS can turn Game Mode on for Overwatch:
+`scripts/build_wine_native.py ntdll`, then `scripts/derive_runtime.py --native ntdll
+--game-mode`, which makes `lib/wine/game-mode/Overwatch.app` with
+`scripts/game_mode_app.py`. `phase2-20261004.1` is `phase2-20261001.2` with every
+Mach-O file re-stamped to require macOS 15.0 (`derive_runtime.py --minimum-macos
+15.0`); only that field and the signatures differ.
+
 Runtime `phase2-20261001.2`, shipped with app 1.0.0, is `phase2-20260930.1` with
 only the Mac driver replaced: `scripts/build_wine_native.py winemac` builds it,
 and `scripts/derive_runtime.py --native winemac` swaps it in after checking that

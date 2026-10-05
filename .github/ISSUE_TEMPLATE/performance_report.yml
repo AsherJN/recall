@@ -55,6 +55,14 @@ body:
       description: Overwatch's performance stats can show it, if you have them turned on.
       placeholder: 90–105
   - type: dropdown
+    id: workshop
+    attributes:
+      label: Did you run 929PJ code in a custom game first?
+      description: Workshop code 929PJ, played from Custom Games for 5 to 10 minutes, gets Overwatch's graphics ready before your first match.
+      options:
+        - "Yes"
+        - "No"
+  - type: dropdown
     id: feel
     attributes:
       label: How does it play?

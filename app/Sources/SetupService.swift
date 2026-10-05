@@ -15,7 +15,7 @@ struct SetupFailure: Error {
         switch code {
         case "cancelled": return "Setup is paused. Continue when you’re ready; completed steps are saved."
         case "apple_silicon_required": return "This version requires a Mac with Apple Silicon (M1 or later)."
-        case "macos_26_required": return "This version requires macOS 26 or later. Update macOS, then check again."
+        case "macos_15_required": return "This version requires macOS 15 or later. Update macOS, then check again."
         case "rosetta_required": return "Rosetta is needed to run the game. Choose Install Rosetta and follow Apple’s instructions."
         case "install_location_unavailable": return "The drive with your installation isn’t connected. Connect it, then try again."
         case "unsupported_volume_format": return "This drive’s format isn’t supported. Choose a drive formatted as APFS or Mac OS Extended."
@@ -78,8 +78,12 @@ final class SetupService {
                     while let end=pending.firstIndex(of:10) {
                         let line=pending[..<end]; pending.removeSubrange(...end)
                         if let value=(try? JSONSerialization.jsonObject(with:Data(line))) as? [String:Any] {
-                            events.append(value)
-                            if events.count>256 { events.removeFirst() }
+                            // Graphics progress reaches the caller as it arrives but isn't kept: a
+                            // long preparation would push the launch's own events out of the last 256.
+                            if value["stage"] as? String != "graphics" {
+                                events.append(value)
+                                if events.count>256 { events.removeFirst() }
+                            }
                             Task { @MainActor in event(value) }
                         }
                     }

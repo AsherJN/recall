@@ -1,4 +1,4 @@
-/* Native Phase 2 setup worker. Original project contributions: MIT.
+/* Native Phase 2 setup worker. Original project contributions: Apache-2.0.
  * Foundation/libarchive/CommonCrypto are supplied by macOS; no player Python.
  * The future app supplies a reviewed archive URL/hash/version, never arbitrary
  * downloaded executable instructions. JSON events are deliberately account-free.
@@ -164,10 +164,11 @@ static NSTask *task(NSString *executable, NSArray *args, NSDictionary *env, NSSt
     if(![p launchAndReturnError:nil]) fail(@"process_launch_failed");
     return p;
 }
-static int waitTask(NSTask *p, double seconds) {
+// tick, if any, runs while the task does and once after it exits.
+static int waitTaskTicking(NSTask *p, double seconds, void (^tick)(void)) {
     childPID=p.processIdentifier;
     NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:seconds];
-    while(p.running && deadline.timeIntervalSinceNow>0 && !cancelRequested) [NSThread sleepForTimeInterval:0.05];
+    while(p.running && deadline.timeIntervalSinceNow>0 && !cancelRequested) {[NSThread sleepForTimeInterval:0.05];if(tick)tick();}
     if(p.running) {
         kill(p.processIdentifier,SIGTERM);
         NSDate *grace=[NSDate dateWithTimeIntervalSinceNow:2];
@@ -175,8 +176,9 @@ static int waitTask(NSTask *p, double seconds) {
         if(p.running)kill(p.processIdentifier,SIGKILL);
         [p waitUntilExit];childPID=0;if(cancelRequested)fail(@"cancelled");return 124;
     }
-    [p waitUntilExit];childPID=0;if(cancelRequested)fail(@"cancelled");return p.terminationStatus;
+    [p waitUntilExit];childPID=0;if(tick)tick();if(cancelRequested)fail(@"cancelled");return p.terminationStatus;
 }
+static int waitTask(NSTask *p, double seconds) { return waitTaskTicking(p,seconds,nil); }
 static BOOL busy(NSString *engine) {
     if(![fm fileExistsAtPath:join(root,@"environment")]) return NO;
     NSTask *p=task(join(engine,@"bin/wineserver"),@[@"-w"],wineEnv(engine),@"server-check.log");
@@ -194,7 +196,7 @@ static void preflight(void) {
     int silicon=0;size_t size=sizeof(silicon);
     sysctlbyname("hw.optional.arm64",&silicon,&size,NULL,0);
     if(!silicon)fail(@"apple_silicon_required");
-    if(NSProcessInfo.processInfo.operatingSystemVersion.majorVersion<26)fail(@"macos_26_required");
+    if(NSProcessInfo.processInfo.operatingSystemVersion.majorVersion<15)fail(@"macos_15_required");
     if(waitTask(task(@"/usr/bin/arch",@[@"-x86_64",@"/usr/bin/true"],nil,@"rosetta-check.log"),10))fail(@"rosetta_required");
     event(@"preflight_ok",@{@"free_bytes":@(freeBytes()),@"runtime_headroom_bytes":@(6ULL<<30)});
 }
@@ -359,7 +361,8 @@ static void prepare(void) {
     if(waitTask(task(join(engine,@"bin/wineserver"),@[@"-w"],wineEnv(engine),@"wineboot-wait.log"),60))fail(@"environment_initialization_busy");
     if(![fm fileExistsAtPath:join(prefix,@"system.reg")])fail(@"environment_registry_missing");
     configureRetina();
-    NSInteger width,height;chosenResolution(&width,&height);configureDisplay(width,height);
+    // An update keeps a resolution chosen in the game since the last launch.
+    NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,YES);configureDisplay(width,height);
     NSMutableDictionary *s=state();s[@"prepared_runtime"]=s[@"active_runtime"];writeJSON(s,join(root,@"state.json"));
     saveStage(@"environment_ready");ownedPreparation=NO;
 }
@@ -387,12 +390,65 @@ static void endSession(NSString *engine) {
  * mode shows Windows pixels at half size, so its window looked small. A Mac-sized client
  * scales both layers by 2: Qt through QT_SCALE_FACTOR, Chromium through its device scale
  * factor. Neither reaches Overwatch: the game ships no Qt, never sees Battle.net's
- * Chromium flags, and Wine's own DPI is unchanged. */
-static NSMutableDictionary *clientEnvironment(NSMutableDictionary *env, BOOL large) {
+ * Chromium flags, and Wine's own DPI is unchanged.
+ * Apple's Metal Performance HUD (Settings, launch --metal-hud 1) reaches Overwatch the
+ * same way: Battle.net starts the game with its own environment. MTL_HUD_ELEMENTS lists
+ * the HUD's default panel ("gamemode" is undocumented) plus the shader compiler, which
+ * shows the game compiling shaders, the cause of a first match's stutters. Battle.net
+ * draws on the CPU (SwiftShader), so it has no Metal layer for the HUD.
+ * macOS Game Mode: the contract's WINE_GAME_MODE makes Wine start Overwatch from the
+ * engine's game app (lib/wine/game-mode/Overwatch.app). launch --game-mode 0 leaves it out,
+ * so the game starts as before; the app passes it only for a hidden "gameMode" default. */
+static NSMutableDictionary *clientEnvironment(NSMutableDictionary *env, BOOL large, BOOL hud, BOOL gameMode) {
     if(large)env[@"QT_SCALE_FACTOR"]=@"2";
+    if(!gameMode)[env removeObjectForKey:@"WINE_GAME_MODE"];
+    if(hud)[env addEntriesFromDictionary:@{@"MTL_HUD_ENABLED":@"1",@"MTL_HUD_DISABLE_MENU_BAR":@"1",
+        @"MTL_HUD_ELEMENTS":@"device,rosetta,layersize,memory,gamemode,fps,gputime,frameinterval,frameintervalgraph,shaders"}];
     return env;
 }
-static void launchClient(BOOL diagnostic, BOOL play, BOOL large) {
+/* The pipeline helper prints progress lines ({"graphics":phase,...}) among its log
+ * lines. While it runs they become graphics events for the launcher's "Preparing
+ * graphics" details. Only known fields pass, bounded; the rest stays in the log. */
+static NSDictionary *graphicsProgress(NSData *line) {
+    NSDictionary *value=[NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
+    if(![value isKindOfClass:NSDictionary.class] || ![value[@"graphics"] isKindOfClass:NSString.class])return nil;
+    NSString *phase=value[@"graphics"];
+    if(![@[@"kept",@"learned",@"warming",@"checking",@"preparing",@"pipelines",@"verifying",@"done"] containsObject:phase])return nil;
+    NSMutableDictionary *result=[@{@"phase":phase} mutableCopy];
+    for(NSString *key in @[@"folders",@"added",@"learned",@"ready",@"target",@"warmed"]) {
+        NSNumber *number=value[key];
+        if([number isKindOfClass:NSNumber.class] && number.longLongValue>=0 && number.longLongValue<=1000000)result[key]=@(number.longLongValue);
+    }
+    NSArray *items=value[@"items"];
+    if([phase isEqual:@"pipelines"] && [items isKindOfClass:NSArray.class]) {
+        NSMutableArray *kept=[NSMutableArray array];
+        for(NSArray *item in [items subarrayWithRange:NSMakeRange(0,MIN(items.count,(NSUInteger)400))]) {
+            if(![item isKindOfClass:NSArray.class] || item.count!=3 || ![item[0] isKindOfClass:NSString.class] || !matches(item[0],@"^[0-9a-f]{12}$")
+               || ![item[1] isKindOfClass:NSNumber.class] || ![item[2] isKindOfClass:NSNumber.class])continue;
+            double ms=[item[1] doubleValue];
+            if(ms>=0 && ms<=600000)[kept addObject:@[item[0],@(ms),@([item[2] boolValue])]];
+        }
+        result[@"items"]=kept;
+    }
+    return result;
+}
+static void (^graphicsFeed(NSString *log))(void) {
+    __block unsigned long long offset=0;NSMutableData *pending=[NSMutableData data];
+    return ^{
+        NSFileHandle *in=[NSFileHandle fileHandleForReadingAtPath:log];if(!in)return;
+        [in seekToFileOffset:offset];NSData *data=[in readDataToEndOfFile];[in closeFile];
+        offset+=data.length;[pending appendData:data];
+        for(;;) {
+            NSRange end=[pending rangeOfData:[NSData dataWithBytes:"\n" length:1] options:0 range:NSMakeRange(0,pending.length)];
+            if(end.location==NSNotFound) {if(pending.length>(1<<20))[pending setLength:0];break;}
+            NSData *line=[pending subdataWithRange:NSMakeRange(0,end.location)];
+            [pending replaceBytesInRange:NSMakeRange(0,end.location+1) withBytes:NULL length:0];
+            NSDictionary *value=line.length && ((const char *)line.bytes)[0]=='{' ? graphicsProgress(line) : nil;
+            if(value)event(@"graphics",value);
+        }
+    };
+}
+static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL gameMode) {
     NSString *engine=runtime();if(![fm fileExistsAtPath:clientPath()])fail(@"battlenet_not_installed");
     NSArray *existing=sessionProcesses();
     if(diagnostic && existing.count)fail(@"close_game_before_maintenance");
@@ -411,7 +467,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large) {
         event(@"displays_changed",nil);closeClient(@"close_game_before_maintenance");existing=@[];
     }
     if(focusSession(existing)) {
-        if(play && !game)task(join(engine,@"bin/wine"),client,clientEnvironment(wineEnv(engine),large),@"battlenet-play.log");
+        if(play && !game)task(join(engine,@"bin/wine"),client,clientEnvironment(wineEnv(engine),large,hud,gameMode),@"battlenet-play.log");
         if(!game)task(NSProcessInfo.processInfo.arguments[0],@[@"watch",@"--root",root],nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
         return;
     }
@@ -421,7 +477,9 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large) {
     if(displaysChanged)endSession(engine);
     // A legacy installation needs one fully idle session to restore Retina.
     configureRetina();
-    NSInteger width,height;chosenResolution(&width,&height);
+    NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,YES);
+    if([source isEqual:@"game"])event(@"display_from_game",@{@"width":@(width),@"height":@(height)});
+    else if([source isEqual:@"game_reset"])event(@"display_restored",@{@"width":@(width),@"height":@(height)});
     NSInteger gameWidth=width,gameHeight=height;fittedResolution(&gameWidth,&gameHeight);
     configurePreferences(width,height,gameWidth,gameHeight,NO);
     if(gameWidth!=width || gameHeight!=height)
@@ -433,13 +491,17 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large) {
     NSString *pipeline=helperPath(@"ow2-pipeline");
     if([fm isExecutableFileAtPath:pipeline]) {
         event(@"preparing_pipelines",nil);
-        int code=waitTask(task(pipeline,@[root],nil,@"pipeline-preparation.log"),600);
+        // With Game Mode the game runs as the engine's game app, which keeps its own
+        // compiled-shader cache; the helper warms that cache when it is new to this Mac.
+        NSString *gameApp=join(engine,@"lib/wine/game-mode/Overwatch.app");
+        NSArray *arguments=gameMode && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")] ? @[root,gameApp] : @[root];
+        int code=waitTaskTicking(task(pipeline,arguments,nil,@"pipeline-preparation.log"),600,graphicsFeed(join(join(root,@"logs"),@"pipeline-preparation.log")));
         if(code==75)fail(@"pipeline_cache_busy");
         if(code)event(@"pipeline_preparation_skipped",nil);
     }
     if(focusSession(sessionProcesses()))return;
     if(displays) {NSMutableDictionary *s=state();s[@"session_displays"]=displays;writeJSON(s,join(root,@"state.json"));}
-    NSDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),large);
+    NSDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),large,hud,gameMode);
     NSTask *p=task(join(engine,@"bin/wine"),client,env,@"battlenet.log");
     saveStage(@"battlenet_started");event(@"battlenet_open",@{@"pid":@(p.processIdentifier)});
     task(NSProcessInfo.processInfo.arguments[0],@[@"watch",@"--root",root],nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
@@ -499,20 +561,37 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         monitorMode=[command isEqual:@"watch"];
         ownRoot(options[@"root"] ?: defaultRoot);
         if([command isEqual:@"preflight"])preflight();
-        else if([command isEqual:@"status"])event(@"status",@{@"state":state(),@"battlenet_installed":@([fm fileExistsAtPath:clientPath()]),@"game_installed":@([fm fileExistsAtPath:join(root,@"environment/drive_c/Program Files (x86)/Overwatch/_retail_/Overwatch.exe")]),@"free_bytes":@(freeBytes())});
+        else if([command isEqual:@"status"]) {
+            // The resolution Overwatch opens at next on the main display.
+            NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,NO);
+            NSMutableDictionary *next=[@{@"width":@(width),@"height":@(height),@"from_game":@([source isEqual:@"game"]),@"per_display":@(displayMemory(state()))} mutableCopy];
+            if(mainScreen())next[@"screen"]=mainScreen();
+            event(@"status",@{@"state":state(),@"display_next":next,@"battlenet_installed":@([fm fileExistsAtPath:clientPath()]),@"game_installed":@([fm fileExistsAtPath:join(root,@"environment/drive_c/Program Files (x86)/Overwatch/_retail_/Overwatch.exe")]),@"free_bytes":@(freeBytes())});
+        }
         else if([command isEqual:@"onboarded"]) { NSMutableDictionary *s=state();s[@"onboarding_complete"]=@YES;writeJSON(s,join(root,@"state.json"));event(@"onboarding_complete",nil); }
         else if([command isEqual:@"session"])event(@"session",@{@"processes":sessionProcesses()});
         else if([command isEqual:@"watch"])watchClient();
         else if([command isEqual:@"display"]) {
             // 0.1.x apps sent only a height (1080 or 1200, 1920 wide).
             NSString *width=options[@"width"] ?: @"1920",*height=options[@"height"] ?: @"";
-            if(!matches(width,@"^[0-9]{3,5}$") || !matches(height,@"^[0-9]{3,5}$"))fail(@"unsupported_resolution");
+            if(!matches(width,@"^[0-9]{3,5}$") || !matches(height,@"^[0-9]{3,5}$") ||
+               !supportedResolution(width.integerValue,height.integerValue))fail(@"unsupported_resolution");
             configureDisplay(width.integerValue,height.integerValue);
+        }
+        else if([command isEqual:@"display-memory"]) {
+            // Settings › Remember a resolution for each display.
+            NSString *enabled=options[@"enabled"];
+            if(![enabled isEqual:@"0"] && ![enabled isEqual:@"1"])fail(@"invalid_arguments");
+            NSMutableDictionary *s=state();s[@"display_memory"]=@([enabled isEqual:@"1"]);writeJSON(s,join(root,@"state.json"));
+            event(@"display_memory",@{@"enabled":@([enabled isEqual:@"1"])});
         }
         else if([command isEqual:@"repair-retina"])configureRetina();
         else if([command isEqual:@"restore-candidate"]) {
             configureRetina();
-            NSInteger width,height;chosenResolution(&width,&height);configurePreferences(width,height,width,height,YES);
+            // The qualified baseline's resolution unless the player has chosen one.
+            NSInteger width,height;NSString *source;
+            if(state()[@"display_height"])nextResolution(&width,&height,&source,YES);else chosenResolution(&width,&height);
+            configurePreferences(width,height,width,height,YES);
         }
         else if([command isEqual:@"download"])event(@"download_complete",@{@"file":[download(options[@"url"],options[@"sha256"]) lastPathComponent]});
         else if([command isEqual:@"install-runtime"])installRuntime(options[@"archive"] ?: download(options[@"url"],options[@"sha256"]),options[@"sha256"],options[@"version"],[options[@"repair"] isEqual:@"1"]);
@@ -520,8 +599,10 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         else if([command isEqual:@"prepare"])prepare();
         else if([command isEqual:@"install-battlenet"])installClient(options[@"installer"] ?: download(options[@"url"],options[@"sha256"]),options[@"sha256"]);
         // --battlenet-scale 1 keeps Battle.net at Windows' size (Settings); 2 is the default.
-        else if([command isEqual:@"launch"])launchClient(NO,[options[@"play"] isEqual:@"1"],![options[@"battlenet-scale"] isEqual:@"1"]);
-        else if([command isEqual:@"diagnostic-launch"])launchClient(YES,NO,![options[@"battlenet-scale"] isEqual:@"1"]);
+        // --metal-hud 1 shows Apple's Metal Performance HUD over Overwatch (Settings); off by default.
+        // --game-mode 0 starts Overwatch without macOS Game Mode (hidden app default); on by default.
+        else if([command isEqual:@"launch"])launchClient(NO,[options[@"play"] isEqual:@"1"],![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"]);
+        else if([command isEqual:@"diagnostic-launch"])launchClient(YES,NO,![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"]);
         else if([command isEqual:@"close-client"]) {closeClient(@"close_game_before_update");event(@"client_closed",nil);}
         else if([command isEqual:@"parity-report"])event(@"parity_report",parityReport(runtime(),wineEnv(runtime())));
         else if([command isEqual:@"uninstall"])uninstall();

@@ -57,6 +57,7 @@
     "DXMT_PIPELINE_CACHE_PREWARM_LIMIT": "128",
     "DXMT_PIPELINE_CACHE_PREFER_EXPENSIVE": "1",
     "WINEMAC_MOUSELOOK": "Overwatch.exe",
+    "WINE_GAME_MODE": "Overwatch.exe",
     "DXMT_PREPARE_SHADERS": "1"
   },
   "renderer_profile": "config/dxmt-source60-1200.conf",

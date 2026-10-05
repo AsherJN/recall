@@ -25,11 +25,18 @@ Remove account names and personal file paths before posting.
 - <a id="id-external-monitor"></a>**Playing on an external monitor.** Overwatch opens on your main display, the
   one with the menu bar. In System Settings › Displays, select the monitor and
   set Use as to Main display (Settings › Displays… in the app opens that page).
-  Then, in the app's Settings, choose 16:9 for most monitors and TVs and the
-  monitor's own resolution for the sharpest picture, for example 2560 × 1440 on
-  a 1440p monitor. The choice saves right away and applies the next time
-  Overwatch starts.
-  Settings names your main display and says how each choice will look on it.
+  Then, in Overwatch under Options › Video, choose the monitor's own resolution
+  for the sharpest picture, for example 2560 × 1440 on a 1440p monitor or
+  5120 × 2160 on a 5K2K ultrawide. Recall remembers it for that monitor, and
+  your MacBook screen keeps its own. You can also set it in the app under
+  Settings › Fullscreen resolution, which names your main display and says how
+  each size will look on it.
+- **Matches stutter.** Play Workshop code 929PJ from Custom Games and let it
+  run for 5 to 10 minutes; your Mac gets Overwatch's graphics ready ahead of
+  time. See [Your first matches](INSTALLATION.md#your-first-matches).
+- **The game is black or the wrong size.** Quit Overwatch, choose Settings ›
+  Reset Display Settings, then play again. Overwatch opens at 1080p; your
+  graphics and FPS settings stay as they are.
 - **I don't want Battle.net to open with Recall.** Choose Cancel while it opens,
   or turn off Settings › Open Battle.net when Recall opens; then start it with
   Open Battle.net.
@@ -41,8 +48,8 @@ Remove account names and personal file paths before posting.
 
 ## Known issues
 
-- Extra stutter in the first few matches while the game compiles shaders,
-  and again briefly after an update that changes how shaders are prepared.
+- Extra stutter in the first few matches while the game compiles shaders.
+  Workshop code 929PJ gets ahead of it (see above).
 - If a problem starts after a Blizzard or macOS update, check for a Recall
   update with Recall › Check for Updates….
 - Changing the graphics quality preset makes Overwatch reset Render Scale to

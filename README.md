@@ -10,7 +10,7 @@
   <a href="https://github.com/AsherJN/recall/releases/latest"><img src="https://img.shields.io/badge/Download_for_Mac_%C2%B7_Free-FFAA2E?style=for-the-badge" height="40" alt="Download Recall for Mac, free"></a>
 </p>
 
-<p align="center"><sub>M1 or newer · macOS Tahoe 26 or later · Notarized by Apple</sub></p>
+<p align="center"><sub>M1 or newer · macOS Sequoia 15 or later · Notarized by Apple</sub></p>
 
 <p align="center"><sub>Made by Josh · <a href="#why-i-built-recall">Support the project</a></sub></p>
 
@@ -38,7 +38,7 @@ Recall offers the most optimized and seamless Overwatch experience on Apple Sili
 - **Smoother matches.** In the same match on the same Mac, Recall averaged 70% more frames per second than CrossOver, with 1% lows nearly five times higher and 95% fewer stutters.
 - **Aim that keeps up.** Recall reads your mouse directly, up to 2,000 times a second. Your flicks and tracking reach the game sooner and land exactly where your hand put them.
 - **Free.** No price, trial, subscription, ads or account. The code is open source.
-- **Download, sign in, play.** Recall installs what it needs and opens Battle.net for you. Play on your MacBook's screen or an external monitor, up to 4K.
+- **Download, sign in, play.** Recall installs what it needs and opens Battle.net for you. Play on your MacBook's screen or an external monitor, ultrawide and 5K included.
 
 ## Recall vs. CrossOver
 
@@ -80,7 +80,7 @@ CrossOver is the right tool if you play many Windows games. If Overwatch is your
 | You need | |
 |---|---|
 | Mac | Apple Silicon: M1 or newer. Intel Macs aren't supported. |
-| macOS | macOS Tahoe 26 or later |
+| macOS | macOS Sequoia 15 or later |
 | Memory | 16 GB recommended |
 | Storage | 85–95 GB free, on your Mac or an external SSD |
 | Also | A free Blizzard account, an internet connection, and Rosetta (Recall checks for it during setup) |
@@ -133,12 +133,14 @@ You sign in to Battle.net itself, and Recall never asks for your password. Recal
 <summary><b>Why do my first matches stutter a little?</b></summary>
 
 The first time you play, the game prepares its shaders, the small programs your Mac's graphics chip uses to draw each scene. This causes brief stutters in your first few matches and settles down the more you play.
+
+To get ahead of it, play Workshop code **929PJ** from Custom Games before you queue and let it run for 5 to 10 minutes.
 </details>
 
 <details>
 <summary><b>Can I use an external monitor?</b></summary>
 
-Yes. Set it as your main display in macOS System Settings, then choose the game resolution in Recall's Settings, up to 4K. See the [display setup instructions](docs/SUPPORT.md#id-external-monitor).
+Yes. Set it as your main display in macOS System Settings, then choose its resolution in Overwatch's Video settings; Recall keeps it. See the [display setup instructions](docs/SUPPORT.md#id-external-monitor).
 </details>
 
 <details>
@@ -150,7 +152,7 @@ Yes. Choose an external SSD during setup and keep it connected while you play. T
 <details>
 <summary><b>What happens when Overwatch or macOS updates?</b></summary>
 
-Overwatch updates through Battle.net, as usual. If a Blizzard or macOS update needs a fix on the Mac side, it arrives as a Recall update. Recall checks for new versions when it opens and lets you choose when to install them.
+Overwatch updates through Battle.net, as usual. If a Blizzard or macOS update needs a fix on the Mac side, it arrives as a Recall update. Recall checks for new versions when it opens and lets you choose when to install them. The shaders Recall has learned carry over through updates, so you don't start from scratch.
 </details>
 
 <details>
@@ -167,6 +169,6 @@ For troubleshooting and privacy information, see [Support and privacy](docs/SUPP
 
 Interested in the code? Start with the [architecture](docs/DEVELOPMENT.md) and [build instructions](docs/BUILDING.md).
 
-Recall uses Wine from CodeWeavers' published CrossOver sources, DXMT by Feifan He through NerRobDog's fork, and Soju's runtime build recipe. Recall's original code is [MIT-licensed](LICENSE); dependencies and patches keep their own licenses. See the [third-party notices](THIRD_PARTY_NOTICES.md).
+Recall uses Wine from CodeWeavers' published CrossOver sources, DXMT by Feifan He through NerRobDog's fork, and Soju's runtime build recipe. Recall's original code is licensed under [Apache 2.0](LICENSE); dependencies and patches keep their own licenses. See the [third-party notices](THIRD_PARTY_NOTICES.md).
 
 Recall is an independent community project, not affiliated with or endorsed by Blizzard Entertainment, Apple or CodeWeavers. Overwatch, Mac, CrossOver and other product names are trademarks of their respective owners.

@@ -25,6 +25,15 @@ final class AppModel {
     var autoOpenBattleNet=UserDefaults.standard.object(forKey:"autoOpenBattleNet") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoOpenBattleNet,forKey:"autoOpenBattleNet") }
     }
+    /// Apple's Metal Performance HUD over Overwatch (worker: launch --metal-hud). Battle.net
+    /// starts the game with its own environment, so Settings changes it only while
+    /// Battle.net is closed (see running).
+    var metalHUD=UserDefaults.standard.bool(forKey:"metalHUD") {
+        didSet { UserDefaults.standard.set(metalHUD,forKey:"metalHUD") }
+    }
+    enum Running { case client, game }
+    /// What runs now, as Settings last checked; nil when neither Battle.net nor Overwatch does.
+    var running: Running?
     var firstMatchTipDismissed=UserDefaults.standard.bool(forKey:"firstMatchTipDismissed") {
         didSet { UserDefaults.standard.set(firstMatchTipDismissed,forKey:"firstMatchTipDismissed") }
     }
@@ -40,6 +49,8 @@ final class AppModel {
     var resolution=DisplayResolution.standard
     var report=""
     var notice=""
+    /// Settings › Remember a resolution for each display (the worker's display_memory).
+    var rememberEachDisplay=true
     /// Settings shows "Saved" once the chosen resolution is recorded.
     var displaySaved=false
     @ObservationIgnored private var displaySave:Task<Void,Never>?
@@ -48,6 +59,8 @@ final class AppModel {
     var clientInstalled=false
     var downloadedBytes: UInt64=0
     var lastEvents=[String]()
+    /// "Preparing graphics" for the launching screen's details; starts over with each launch.
+    var graphics=GraphicsProgress()
     var release: Release?
     var root: URL
     /// The installed Battle.net program; the worker launches the same file.
@@ -67,6 +80,10 @@ final class AppModel {
     /// Set by the launching screen's Cancel: also close the Battle.net this launch opened.
     private var closeOnStop=false
     var isPreview=false
+    /// This Mac's macOS ("15.6.1"); a private preview can stand in another with --preview-macos.
+    var macOS=UpdateCheck.system
+    /// Recall is built and tuned on macOS 26; on Sequoia, first setup asks players how it runs.
+    var onSequoia: Bool { (UpdateCheck.parts(macOS)?.first ?? 26) < 26 }
     private var started=false
     private var paused=false
     private let fm=FileManager.default
@@ -126,6 +143,8 @@ final class AppModel {
     }
     func receive(_ value: [String:Any]) {
         guard let name=value["stage"] as? String else { return }
+        if name == "graphics" { graphics.update(value);return }
+        if name == "pipeline_preparation_skipped" { graphics.skipped() }
         // Allowlisted stage names only; never retain arbitrary error detail/paths.
         let labels=["downloading":"Downloading Battle.net", "download_verified":"Download verified", "installing_runtime":"Installing game components", "runtime_ready":"Game components ready", "preparing_environment":"Preparing your game environment", "environment_ready":"Game environment ready", "installing_battlenet":"Opening the Battle.net installer", "preparing_pipelines":"Preparing graphics", "battlenet_started":"Opening Battle.net", "pipeline_preparation_skipped":"Opening Battle.net", "closing_client":"Closing Battle.net", "displays_changed":"Reopening Battle.net for your displays"]
         if let label=labels[name] { stage=label; lastEvents.append(name); lastEvents=Array(lastEvents.suffix(12)) }
@@ -141,9 +160,15 @@ final class AppModel {
         if let available=try? root.resourceValues(forKeys:[.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage,available>0 {
             freeBytes=max(freeBytes,UInt64(available))
         }
-        // Installations from before 1.0 saved only a height, 1920 pixels wide.
-        let saved=DisplayResolution(width:state["display_width"] as? Int ?? 1920,height:state["display_height"] as? Int ?? 1200)
-        resolution=saved.isSupported ? saved : .standard
+        // The resolution Overwatch opens at next: the last one chosen, here or in the game.
+        if let next=status["display_next"] as? [String:Any],let width=next["width"] as? Int,let height=next["height"] as? Int {
+            resolution=DisplayResolution(width:width,height:height)
+            rememberEachDisplay=next["per_display"] as? Bool ?? true
+        } else {
+            // Installations from before 1.0 saved only a height, 1920 pixels wide.
+            let saved=DisplayResolution(width:state["display_width"] as? Int ?? 1920,height:state["display_height"] as? Int ?? 1200)
+            resolution=saved.isSupported ? saved : .standard
+        }
     }
     func perform(_ action: @escaping @MainActor () async throws -> Void) {
         guard !isPreview else { return }
@@ -333,6 +358,7 @@ final class AppModel {
         case "client_close_failed": return "Battle.net couldn’t be closed. Quit it from the Dock, then try again."
         case "update_location_read_only": return "This copy of the app is in a folder you can’t change. Download the update from the release page instead."
         case "update_signature_invalid": return "The download couldn’t be verified as an official release, so nothing was changed."
+        case "update_needs_newer_macos": return "This update needs a newer version of macOS, so nothing was changed."
         case "update_hash_mismatch", "update_download_failed": return "The download didn’t complete correctly. Nothing was changed. Try again."
         default: return "The update couldn’t be installed. Nothing was changed. You can try again or download it from the release page."
         }
@@ -392,12 +418,38 @@ final class AppModel {
         state["onboarding_complete"]=value != .welcome && value != .readyToInstall && value != .installer
         if value == .moveApp { moveReplaces=["Overwatch 2 Mac"] }
         let args=CommandLine.arguments
+        if let i=args.firstIndex(of:"--preview-macos"),args.indices.contains(i+1) { macOS=args[i+1] }
+        // The launching screen's "Preparing graphics" details: preparing, done, first,
+        // or the warm-up after an update (warming, warmed).
+        if value == .launching,let i=args.firstIndex(of:"--preview-graphics"),args.indices.contains(i+1) { previewGraphics(args[i+1]) }
         if let i=args.firstIndex(of:"--preview-sheet"),args.indices.contains(i+1),let preview=Sheet(rawValue:args[i+1]) {
             if preview == .update {
                 update = .available(AvailableUpdate(version:"1.0.1",notes:["Fixes an issue that could stop Battle.net from opening after a Blizzard update.","Smoother first matches after installing."],page:Brand.releases,download:Brand.releases,size:242_000_000,sha256:"",checksum:nil))
             }
             DispatchQueue.main.async { self.sheet=preview }
         }
+    }
+    private func previewGraphics(_ kind:String) {
+        stage="Preparing graphics";graphics=GraphicsProgress()
+        if kind == "first" { graphics.update(["phase":"done","learned":0,"ready":0,"added":0]);return }
+        graphics.update(["phase":"learned","learned":8168,"ready":1154])
+        if kind == "warming" || kind == "warmed" {
+            var generator=SystemRandomNumberGenerator()
+            graphics.update(["phase":"warming","target":8168])
+            let items:[[Any]]=(0..<(kind == "warmed" ? 8168 : 3420)).map { _ in
+                [String(format:"%012llx",UInt64.random(in:0...0xffffffffffff,using:&generator)),Double.random(in:12...140),false]
+            }
+            graphics.update(["phase":"pipelines","items":items])
+            if kind == "warmed" { graphics.update(["phase":"done","ready":1154,"added":0,"warmed":8168]);stage="Opening Battle.net" }
+            return
+        }
+        graphics.update(["phase":"preparing","target":1192])
+        var generator=SystemRandomNumberGenerator()
+        let items:[[Any]]=(0..<(kind == "done" ? 1192 : 412)).map { i in
+            [String(format:"%012llx",UInt64.random(in:0...0xffffffffffff,using:&generator)),i < 1154 ? Double.random(in:0.4...3) : Double.random(in:18...140),i >= 1154]
+        }
+        graphics.update(["phase":"pipelines","items":items])
+        if kind == "done" { graphics.update(["phase":"done","ready":1192,"added":38]);stage="Opening Battle.net" }
     }
     func installRosetta() {
         guard !isPreview else { return }
@@ -431,7 +483,7 @@ final class AppModel {
         try await refresh()
         if state["display_height"] == nil {
             // A first installation starts in the main display's shape, at 1080p.
-            let initial=MainDisplay.current?.shape == .monitor ? DisplayResolution(shape:.monitor,size:.standard) : .standard
+            let initial=DisplayResolution.initial(for:MainDisplay.current)
             _ = try await service.run("display",["--width",String(initial.width),"--height",String(initial.height)])
         }
         if clientInstalled { screen = .ready;return }
@@ -488,13 +540,16 @@ final class AppModel {
         }
     }
     func openClient(play:Bool=false) async throws {
-        screen = .launching;stage="Checking your running session"
+        screen = .launching;stage="Checking your running session";graphics=GraphicsProgress()
         launchStarted=Date();stopLaunchWait=false;closeOnStop=false;canCancel=true
         // Cancelling here ends the worker, and with it the graphics preparation, before
         // Battle.net opens (the preparation keeps its finished work; the next launch resumes).
         let launchEvents:[[String:Any]]
         do {
-            launchEvents=try await service.run("launch",(play ? ["--play","1"] : [])+["--battlenet-scale",largeBattleNet ? "2" : "1"],event:receive)
+            // macOS Game Mode is on unless support turned it off for a player:
+            // defaults write org.overwatch2mac.launcher gameMode -bool false
+            let gameMode=UserDefaults.standard.object(forKey:"gameMode") as? Bool ?? true
+            launchEvents=try await service.run("launch",(play ? ["--play","1"] : [])+["--battlenet-scale",largeBattleNet ? "2" : "1","--metal-hud",metalHUD ? "1" : "0"]+(gameMode ? [] : ["--game-mode","0"]),event:receive)
         } catch {
             guard stopLaunchWait else { throw error }
             canCancel=false;screen = .ready;notice="Cancelled. Battle.net wasn’t opened."
@@ -505,7 +560,8 @@ final class AppModel {
         // The chosen resolution is larger than this main display allows (see MainDisplay.fits).
         if let fitted=launchEvents.last(where:{ $0["stage"] as? String == "display_fitted" }),
            let width=fitted["width"] as? Int,let height=fitted["height"] as? Int {
-            notice="Your main display is too small for \(resolution.label), so Overwatch uses \(width) × \(height) this time."
+            let chosen=(fitted["chosen_width"] as? Int).flatMap { w in (fitted["chosen_height"] as? Int).map { DisplayResolution(width:w,height:$0) } } ?? resolution
+            notice="Your main display is too small for \(chosen.label), so Overwatch uses \(width) × \(height) this time."
         }
         // Battle.net was open from before a display was connected, unplugged or rearranged.
         if launchEvents.contains(where:{ $0["stage"] as? String == "displays_changed" }) {
@@ -600,12 +656,46 @@ final class AppModel {
         existingName=processes.contains { $0["kind"] as? String == "game" } ? "Overwatch" : "Battle.net"
         screen = .running
     }
+    /// Settings: what runs now. The screen answers at once; a session check confirms it
+    /// unless another step is using the worker.
+    func checkRunning() {
+        running = screen == .running ? (existingName == "Overwatch" ? .game : .client) : (screen == .launching ? .client : nil)
+        guard !isPreview && clientInstalled && !busy else { return }
+        busy=true
+        Task {
+            defer { busy=false }
+            guard let processes=try? await service.run("session").last?["processes"] as? [[String:Any]] else { return }
+            running=processes.isEmpty ? nil : (processes.contains { $0["kind"] as? String == "game" } ? .game : .client)
+            if screen == .running || screen == .ready { showSession(processes) }
+            // The resolution may have changed in Overwatch since Recall last looked.
+            try? await refresh()
+        }
+    }
+    /// Settings: closes Battle.net so a setting it carries can change. The worker
+    /// refuses while Overwatch runs.
+    func closeBattleNet() {
+        guard !busy else { return }
+        guard !isPreview else { running=nil;return }
+        busy=true;notice=""
+        Task {
+            defer { busy=false }
+            do {
+                _ = try await service.run("close-client",event:receive)
+                running=nil
+                if screen == .running { screen = .ready }
+            } catch let error as SetupFailure where error.code == "close_game_before_update" {
+                running = .game
+            } catch {
+                notice="Battle.net couldn’t be closed. Quit it from the Dock, then try again."
+            }
+        }
+    }
     /// The launching screen's Cancel.
     func cancelLaunch() { guard canCancel && screen == .launching else { return };closeOnStop=true;cancel() }
     func cancel() { guard canCancel else { return };if screen == .launching { stopLaunchWait=true;canCancel=false;service.cancel();return };paused=true;canCancel=false;stage="Pausing safely";service.cancel() }
     /// Settings saves a resolution as soon as it is chosen. The worker records it and
-    /// writes it into the game's settings, and every launch writes it again, so a choice
-    /// made while Overwatch is open takes effect the next time it starts.
+    /// writes it into the game's settings, where a choice made in Overwatch's Video
+    /// settings goes too; the latest of the two is what the next launch uses.
     func chooseResolution(_ choice:DisplayResolution) {
         guard choice != resolution else { return }
         resolution=choice;displaySaved=false
@@ -620,6 +710,51 @@ final class AppModel {
             do {
                 _ = try await service.run("display",["--width",String(choice.width),"--height",String(choice.height)])
                 if resolution == choice { displaySaved=true }
+            } catch {
+                notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
+            }
+        }
+    }
+    /// The main display changed while Settings was open: show its own resolution.
+    func refreshDisplay() {
+        guard !isPreview && !busy else { return }
+        busy=true
+        Task { defer { busy=false };try? await refresh() }
+    }
+    /// Settings › Remember a resolution for each display. On, the MacBook's screen and each
+    /// monitor open at the resolution last chosen on them; off, one resolution everywhere.
+    func setRememberEachDisplay(_ on:Bool) {
+        guard on != rememberEachDisplay else { return }
+        rememberEachDisplay=on
+        guard !isPreview && clientInstalled else { return }
+        Task {
+            while busy { try? await Task.sleep(for:.milliseconds(200)) }
+            busy=true
+            defer { busy=false }
+            do {
+                _ = try await service.run("display-memory",["--enabled",on ? "1" : "0"])
+                try await refresh()
+            } catch {
+                rememberEachDisplay = !on
+                notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
+            }
+        }
+    }
+    /// Troubleshooting's way back from a resolution that shows a black or wrong-sized
+    /// picture: a new installation's resolution, with every other display setting
+    /// written again. Graphics quality and FPS are kept. Overwatch must be closed.
+    func resetDisplay() {
+        let initial=DisplayResolution.initial(for:MainDisplay.current)
+        guard !isPreview else { resolution=initial;notice="Display settings reset.";return }
+        displaySave?.cancel()
+        displaySave=Task {
+            while busy { try? await Task.sleep(for:.milliseconds(200)) }
+            busy=true
+            defer { busy=false }
+            do {
+                _ = try await service.run("display",["--width",String(initial.width),"--height",String(initial.height)])
+                resolution=initial;displaySaved=false
+                notice="Display settings reset. Overwatch opens at \(initial.label) next time."
             } catch {
                 notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
             }

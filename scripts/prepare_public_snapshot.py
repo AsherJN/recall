@@ -56,7 +56,7 @@ def plan(source, manifest, forbidden=(), allow_placeholders=False):
         if target.casefold() in {p.casefold() for p in outputs}:
             raise ValueError('Duplicate output: ' + target)
         outputs[target] = (data, entry.get('executable', False))
-    if not {'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'} <= outputs.keys():
+    if not {'README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md'} <= outputs.keys():
         raise ValueError('Required public documentation is missing')
     return outputs
 

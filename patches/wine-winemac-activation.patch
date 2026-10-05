@@ -160,7 +160,7 @@ index a58f2f9..bc67bcf 100644
 +void macdrv_v1_canvas_app_activated(void);
 +void macdrv_v1_canvas_deminiaturized(WineWindow *window);
 diff --git a/dlls/winemac.drv/cocoa_v1.m b/dlls/winemac.drv/cocoa_v1.m
-index 6e1afe0..9b0d507 100644
+index 6e1afe0..d1e7ad8 100644
 --- a/dlls/winemac.drv/cocoa_v1.m
 +++ b/dlls/winemac.drv/cocoa_v1.m
 @@ -29,6 +29,8 @@ @interface OWCanvas : NSObject {
@@ -234,21 +234,33 @@ index 6e1afe0..9b0d507 100644
      }
      record(window, entering ? "enter_fullscreen" : "exit_fullscreen");
  }
-@@ -425,6 +445,13 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+@@ -425,6 +445,25 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
      record(window, focused ? "focus_gained" : "focus_lost");
  }
  
-+/* Game resolutions the canvas shows, up to 3840x2400 (4K at 16:10). Each display's
-+ * mode list offers those that fit inside it (display.c), so the game can choose them
-+ * even where the monitor itself lacks the mode; the canvas never changes modes. */
++/* Game resolutions the canvas shows: up to 3840x2400 (4K at 16:10) on any display, and
++ * anything larger that fits inside a display as Wine sees it. Each display's mode list
++ * offers the six launcher sizes that fit inside it (display.c), so the game can choose
++ * them even where the monitor itself lacks the mode, and its own current mode, which is
++ * the size of its Wine rectangle (5120x2160 for a 21:9 5K2K monitor, 5120x2880 for a 5K
++ * one). That mode was refused at 3840 pixels wide: DXMT had already taken the new size,
++ * so the game drew a 21:9 picture into the 16:9 canvas, with bars on all four sides
++ * (a player's report, 2026-10-04). Wine keeps the pointer inside the display's rectangle,
++ * so larger sizes stay out. The canvas never changes modes. Main thread (NSScreen). */
 +static BOOL canvasSizeSupported(unsigned width, unsigned height) {
-+    return width >= 640 && width <= 3840 && height >= 480 && height <= 2400;
++    if (width < 640 || height < 480 || width > 16384 || height > 16384) return NO;
++    if (width <= 3840 && height <= 2400) return YES;
++    for (NSScreen *screen in NSScreen.screens) {
++        CGSize size = cgrect_win_from_mac(NSRectToCGRect(screen.frame)).size;
++        if (width <= size.width && height <= size.height) return YES;
++    }
++    return NO;
 +}
 +
  /* Explicit bridge registration is per-window and preserves the existing
   * macdrv_functions ABI. Older drivers report unavailable through dlsym. */
  __attribute__((visibility("default"))) unsigned
-@@ -433,8 +460,7 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+@@ -433,8 +472,7 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
      dispatch_block_t configure = ^{
          NSView *view = (NSView *)client_view;
          WineWindow *window = (WineWindow *)macdrv_v1_canvas_owner(view.window);
@@ -258,7 +270,7 @@ index 6e1afe0..9b0d507 100644
          OWCanvas *state = canvas(window);
          if (!state) {
              state = [[[OWCanvas alloc] init] autorelease];
-@@ -445,10 +471,15 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+@@ -445,10 +483,15 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
              [state->client release];
              state->client = [view retain];
          }
@@ -274,7 +286,7 @@ index 6e1afe0..9b0d507 100644
          record(window, "registered");
          result = 1;
      };
-@@ -457,6 +488,36 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+@@ -457,6 +500,36 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
      return result;
  }
  
@@ -311,7 +323,7 @@ index 6e1afe0..9b0d507 100644
  /* Called only through the explicit DXMT bridge. Never changes display modes.
   * Cocoa transitions are asynchronous; requests received during an animation
   * are reconciled by the did-enter/did-exit callbacks, without blocking Wine. */
-@@ -464,11 +525,58 @@ static void requestTransition(WineWindow *window, OWCanvas *state) {
+@@ -464,11 +537,58 @@ static void requestTransition(WineWindow *window, OWCanvas *state) {
      if (state->transitioning) return;
      BOOL actual = (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
      if (actual == state->requested) return;
@@ -370,15 +382,24 @@ index 6e1afe0..9b0d507 100644
  void macdrv_v1_canvas_settled(WineWindow *window) {
      OWCanvas *state = canvas(window);
      if (!state) return;
-@@ -496,11 +604,15 @@ void macdrv_v1_canvas_failed(WineWindow *window) {
+@@ -496,11 +616,23 @@ void macdrv_v1_canvas_failed(WineWindow *window) {
          NSView *view = (NSView *)client_view;
          WineWindow *window = (WineWindow *)macdrv_v1_canvas_owner(view.window);
          OWCanvas *state = [window isKindOfClass:WineWindow.class] ? canvas(window) : nil;
 -        if (!state || enable > 2 || width < 640 || width > 3840 || height < 480 || height > 2160) return;
-+        if (!state || enable > 2 || !canvasSizeSupported(width, height)) return;
++        if (!state || enable > 2) return;
++        // DXMT asks with the size it last took, which may be one the canvas refused:
++        // the answer must not depend on it, or DXMT concludes it left fullscreen.
          if (enable == 2) { result = state->requested || state->active; return; }
+-        state->pixels = NSMakeSize(width, height);
++        // Leaving fullscreen is always allowed; a refused size never reaches the canvas.
++        BOOL supported = canvasSizeSupported(width, height);
++        if (!supported && enable) {
++            record(window, "game_size_refused");
++            return;
++        }
 +        NSSize previous = state->pixels;
-         state->pixels = NSMakeSize(width, height);
++        if (supported) state->pixels = NSMakeSize(width, height);
          state->requested = enable != 0;
          if (state->active) macdrv_v1_canvas_layout(window);
 +        // A new resolution in fullscreen: Wine's rectangle follows the canvas.

@@ -16,6 +16,8 @@ import subprocess
 import tarfile
 from concurrent.futures import ThreadPoolExecutor
 
+import game_mode_app
+
 ROOT=Path(__file__).resolve().parents[1]
 APPLE_SHA='5131e631eee8b542eadf48f4df9fd662d9aeeb59139137e0e6e14047dc434995'
 MONO_SOURCE_SHA='128e335396689e466dff5e1aa0770a714dbe3d16397fc4ddbb8a80999c67323b'
@@ -74,9 +76,8 @@ def assemble(work,version,identity):
     for name in ['License.rtf','Read Me.rtf','Acknowledgements.rtf']:
         copy(original/name,dest/'licenses/apple'/name)
     copy(work/'sources/wine/sources/wine/COPYING.LIB',dest/'licenses/Wine-LGPL-2.1')
-    copy(ROOT/'licenses/PROJECT-MIT',dest/'licenses/PROJECT-MIT')
-    for p in (ROOT/'licenses').iterdir():
-        if p.is_file() and p.name!='PROJECT-MIT':copy(p,dest/'licenses'/p.name)
+    for p in (ROOT/'licenses').iterdir():  # PROJECT-APACHE-2.0 and PROJECT-NOTICE among them
+        if p.is_file():copy(p,dest/'licenses'/p.name)
     compiler=ROOT/'runtime/toolchains/llvm-mingw-20251216-ucrt-macos-universal'
     copy(compiler/'LICENSE.TXT',dest/'licenses/compiler-runtime/LLVM-MinGW-LICENSE.txt')
     for architecture in ('x86_64','i686'):
@@ -182,6 +183,8 @@ def assemble(work,version,identity):
         if index%10==0:print('Signed native components:',index+1,'of',len(native),flush=True)
     run('codesign','--verify','--strict','-R=anchor apple',dest/'lib/external/libd3dshared.dylib')
     if sha(dest/'lib/external/libd3dshared.dylib')!=APPLE_SHA:raise ValueError('Apple component must remain unmodified')
+    # 1.1: the game app for macOS Game Mode, a copy of the signed loader (scripts/game_mode_app.py).
+    game_mode_app.make(dest,'26.0',identity)
     files={}
     for p in sorted(dest.rglob('*')):
         if p.is_symlink():

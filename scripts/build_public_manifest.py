@@ -49,7 +49,8 @@ DOCS = {
     'docs/public-issue-idea.md': '.github/ISSUE_TEMPLATE/feature_request.yml',
     'docs/public-issue-config.md': '.github/ISSUE_TEMPLATE/config.yml',
     'docs/candidate-parity-contract.json': 'docs/candidate-parity-contract.json',
-    'licenses/PROJECT-MIT': 'LICENSE',
+    'licenses/PROJECT-APACHE-2.0': 'LICENSE',
+    'licenses/PROJECT-NOTICE': 'NOTICE',
     '.gitattributes': '.gitattributes',
 }
 EXECUTABLE_TARGETS = {'.githooks/pre-commit', '.githooks/pre-push'}
@@ -74,7 +75,8 @@ README_REPLACEMENTS = [
     ('(public-development.md)', '(docs/DEVELOPMENT.md)'),
     ('(public-building.md)', '(docs/BUILDING.md)'),
     ('(public-notices.md)', '(THIRD_PARTY_NOTICES.md)'),
-    ('(../licenses/PROJECT-MIT)', '(LICENSE)'),
+    ('(../licenses/PROJECT-APACHE-2.0)', '(LICENSE)'),
+    ('(../licenses/PROJECT-NOTICE)', '(NOTICE)'),
 ]
 
 
@@ -118,7 +120,9 @@ def main():
         entries[target] = entry
 
     for path, executable in tracked():
-        if path in EXCLUDE or path in DOCS:
+        # The project license and NOTICE also stay at their own paths, where the app and
+        # runtime builds read them; GitHub reads the root LICENSE and NOTICE.
+        if path in EXCLUDE or (path in DOCS and not path.startswith('licenses/')):
             continue
         add(path, path, executable)
     for source, target in DOCS.items():

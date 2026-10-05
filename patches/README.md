@@ -52,8 +52,12 @@ to a saved key (off unless set).
 
 `wine-ntdll-syscall-log.patch`: a DLL's Unix library is loaded without holding
 Wine's virtual-memory lock, which removes the 150–400 ms freezes that hit during
-matches. `WINE_SYSCALL_LOG` and `WINE_IO_ERROR_LOG` are developer diagnostics
-(off unless set).
+matches. From 1.1, the programs named in `WINE_GAME_MODE` (Recall sets
+`Overwatch.exe`) start from the engine's game app,
+`lib/wine/game-mode/Overwatch.app`: a copy of Wine's loader in a bundle that
+declares itself a game, which is what macOS needs to turn Game Mode on.
+`scripts/game_mode_app.py` makes it. `WINE_SYSCALL_LOG` and `WINE_IO_ERROR_LOG`
+are developer diagnostics (off unless set).
 
 `wine-win32u-display-log.patch`: `WINE_DISPLAY_LOG` records each forced
 display-device update with its reason and duration (off unless set).
@@ -72,6 +76,10 @@ patches above:
   3840 × 2400), and each display lists those of them that fit it, so the game
   can choose them on a monitor that lacks the mode; setting the display itself
   to one still fails, and the canvas never changes the display's mode;
+- it also takes any larger resolution that fits inside a display, such as an
+  ultrawide or 5K monitor's own size (5120 × 2160, 5120 × 2880), which the game
+  offers in its Video settings; the game had drawn those inside a 16:9 frame
+  with black bars on all four sides;
 - after you switch to another app from the game in fullscreen, the game stays
   minimized and out of fullscreen until you come back to it: on macOS its own
   requests to restore the window or re-enter fullscreen would bring it back to

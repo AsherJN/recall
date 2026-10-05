@@ -1,4 +1,4 @@
-/* Original project test: MIT. Read-only Windows/native ABI regression probe. */
+/* Original project test: Apache-2.0. Read-only Windows/native ABI regression probe. */
 #include <windows.h>
 #include <winternl.h>
 #include <stdio.h>

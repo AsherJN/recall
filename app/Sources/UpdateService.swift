@@ -17,27 +17,44 @@ struct AvailableUpdate: Equatable {
 }
 
 // One anonymous HTTPS request to GitHub's public API per check; nothing about
-// the player or the Mac is sent. Drafts and pre-releases are never offered.
+// the player or the Mac is sent. Drafts and pre-releases are never offered, and
+// neither is a release that needs a newer macOS than this Mac has.
 enum UpdateCheck {
     static let feed=Brand.releaseFeed
     static var installed: String { Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "0" }
     static var build: Int { Int(Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "") ?? 0 }
+    static var system: String {
+        let v=ProcessInfo.processInfo.operatingSystemVersion
+        return "\(v.majorVersion).\(v.minorVersion)"+(v.patchVersion>0 ? ".\(v.patchVersion)" : "")
+    }
 
+    /// The numbers of a dotted numeric version ("1.0.2"); nil for anything else.
+    static func parts(_ value:String) -> [Int]? {
+        let fields=value.split(separator:".",omittingEmptySubsequences:false)
+        guard (1...4).contains(fields.count) else { return nil }
+        var numbers=[Int]()
+        for field in fields { guard let number=Int(field),number>=0 else { return nil };numbers.append(number) }
+        return numbers
+    }
     /// Dotted numeric versions only; anything else never counts as newer.
     static func isNewer(_ candidate:String, than current:String) -> Bool {
-        func parts(_ value:String) -> [Int]? {
-            let fields=value.split(separator:".",omittingEmptySubsequences:false)
-            guard (1...4).contains(fields.count) else { return nil }
-            var numbers=[Int]()
-            for field in fields { guard let number=Int(field),number>=0 else { return nil };numbers.append(number) }
-            return numbers
-        }
         guard let a=parts(candidate),let b=parts(current) else { return false }
         for i in 0..<max(a.count,b.count) {
             let x=i<a.count ? a[i]:0, y=i<b.count ? b[i]:0
             if x != y { return x>y }
         }
         return false
+    }
+    /// The macOS a release needs, from the hidden line "<!-- minimum-macos: 15.0 -->" in its
+    /// notes. Releases without the line (1.0 and earlier) needed macOS 26.
+    static func minimumMacOS(_ body:String) -> String {
+        guard let line=body.range(of:#"<!--\s*minimum-macos:\s*[0-9]+(\.[0-9]+){0,2}\s*-->"#,options:.regularExpression),
+              let version=body[line].range(of:#"[0-9]+(\.[0-9]+){0,2}"#,options:.regularExpression) else { return "26.0" }
+        return String(body[line][version])
+    }
+    /// True when a Mac on `system` can open an app that needs `minimum`.
+    static func runs(_ minimum:String, on system:String) -> Bool {
+        parts(minimum) != nil && parts(system) != nil && !isNewer(minimum,than:system)
     }
     /// The bullets under the body's "What's new" heading, Markdown emphasis and links removed.
     static func notes(_ body:String) -> [String] {
@@ -62,14 +79,14 @@ enum UpdateCheck {
         }
         return value
     }
-    /// GitHub's latest-release JSON. Nil when the release is not newer.
-    static func parse(_ data:Data, current:String) throws -> AvailableUpdate? {
+    /// GitHub's latest-release JSON. Nil when the release is not newer or needs a newer macOS.
+    static func parse(_ data:Data, current:String, system:String=system) throws -> AvailableUpdate? {
         guard let release=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],let tag=release["tag_name"] as? String else {
             throw SetupFailure(code:"update_check_failed")
         }
         if release["draft"] as? Bool == true || release["prerelease"] as? Bool == true { return nil }
         let version=tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-        guard isNewer(version,than:current) else { return nil }
+        guard isNewer(version,than:current),runs(minimumMacOS(release["body"] as? String ?? ""),on:system) else { return nil }
         let assets=release["assets"] as? [[String:Any]] ?? []
         // This app's file name, or after a rename the one "<name>-<version>.dmg".
         let images=assets.filter { ($0["name"] as? String)?.hasSuffix("-\(version).dmg") == true }
@@ -113,7 +130,7 @@ enum UpdateInstaller {
               let values=information as? [String:Any] else { return nil }
         return values[kSecCodeInfoTeamIdentifier as String] as? String
     }
-    static func verify(_ app:URL, team:String, identifier:String, version:String?) throws {
+    static func verify(_ app:URL, team:String, identifier:String, version:String?, system:String=UpdateCheck.system) throws {
         var code:SecStaticCode?, requirement:SecRequirement?
         let text="anchor apple generic and identifier \"\(identifier)\" and certificate leaf[subject.OU] = \"\(team)\" and notarized"
         guard SecStaticCodeCreateWithPath(app as CFURL,[],&code) == errSecSuccess,let code,
@@ -128,6 +145,10 @@ enum UpdateInstaller {
         guard info?["CFBundleIdentifier"] as? String == identifier,
               version == nil || info?["CFBundleShortVersionString"] as? String == version else {
             throw SetupFailure(code:"update_signature_invalid")
+        }
+        // Belt and braces for the release-notes line: never put an app this Mac can't open in place of one it can.
+        if let minimum=info?["LSMinimumSystemVersion"] as? String,!UpdateCheck.runs(minimum,on:system) {
+            throw SetupFailure(code:"update_needs_newer_macos")
         }
     }
     static func sha256(of file:URL) throws -> String {

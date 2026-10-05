@@ -19,7 +19,7 @@ class PublicSnapshot(unittest.TestCase):
         self.source = self.root / 'source'
         self.source.mkdir()
         self.manifest = {'files': []}
-        for name in ('README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'):
+        for name in ('README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md'):
             data = ('Public source: ' + name + '\n').encode()
             (self.source / name).write_bytes(data)
             self.manifest['files'].append({'from': name, 'to': name,
@@ -29,7 +29,7 @@ class PublicSnapshot(unittest.TestCase):
         (self.source / 'account.json').write_text('never export')
         dest = self.root / 'export'
         snapshot.export(self.source, self.manifest, dest)
-        self.assertEqual({p.name for p in dest.iterdir()}, {'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'})
+        self.assertEqual({p.name for p in dest.iterdir()}, {'README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md'})
         with self.assertRaises(ValueError):
             snapshot.export(self.source, self.manifest, dest)
         self.assertTrue((dest / 'README.md').exists())

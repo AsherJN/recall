@@ -9,6 +9,8 @@ import urllib.request
 from candidate_contract import verify_generated
 
 ROOT = Path(__file__).resolve().parents[1]
+# The oldest macOS Recall opens on: the app, its helpers and this worker are built for it.
+MINIMUM_MACOS = '15.0'
 HEADERS = {'archive.h':'11c373fab05e8f017220aff1d89cec3cf32146b44d6cb56aeb12e968bc3b950b',
            'archive_entry.h':'510ae3e21a800403bb1c8d413d5ddabaee0b38facb8491b60bb6da55f84f4695'}
 
@@ -25,7 +27,7 @@ def build(output, headers):
         if hashlib.sha256(target.read_bytes()).hexdigest()!=expected:raise ValueError('Header hash mismatch')
     output.parent.mkdir(parents=True,exist_ok=True)
     subprocess.run(['/usr/bin/clang','-O2','-fobjc-arc','-Wall','-Wextra','-Werror',
-        '-Wno-deprecated-declarations','-ffile-prefix-map='+str(ROOT)+'=/ow2-source','-mmacosx-version-min=26.0','-I',str(headers),
+        '-Wno-deprecated-declarations','-ffile-prefix-map='+str(ROOT)+'=/ow2-source','-mmacosx-version-min='+MINIMUM_MACOS,'-I',str(headers),
         str(ROOT/'scripts/portable_setup.m'),'-framework','Foundation','-framework','AppKit','-larchive','-o',str(output)],check=True)
     output.with_suffix('.build.json').write_text(json.dumps({'headers':HEADERS,
         'sources':{name:hashlib.sha256((ROOT/'scripts'/name).read_bytes()).hexdigest() for name in ('portable_setup.m','portable_session.h','portable_preferences.h','portable_retina.h','portable_diagnostics.h','candidate_contract.generated.h')},

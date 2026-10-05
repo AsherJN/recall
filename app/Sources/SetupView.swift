@@ -21,6 +21,8 @@ struct SetupView: View {
                         details
                         VStack(spacing:12) { actions }
                         if !model.notice.isEmpty { LauncherNotice(text:model.notice) }
+                        // Below Cancel, above the support card: collapsed to one line by default.
+                        if model.screen == .launching && model.graphics.phase != nil { GraphicsDetails(progress:model.graphics) }
                     }.frame(maxWidth:LauncherStyle.contentWidth).padding(.top,model.screen == .welcome ? 28 : 34)
                     Spacer(minLength:28)
                     if let placement=supportPlacement {
@@ -85,7 +87,7 @@ struct SetupView: View {
                 VStack(alignment:.leading,spacing:12) {
                     Text("Requirements").font(LauncherStyle.font(14,.semibold))
                     VStack(alignment:.leading,spacing:8) {
-                        requirement("Mac", "Apple Silicon · macOS 26 or later")
+                        requirement("Mac", "Apple Silicon · macOS 15 or later")
                         requirement("Memory", "16 GB recommended")
                         requirement("Storage", "85–95 GB free, on this Mac or an external SSD")
                         requirement("Also", "Blizzard account, internet and Rosetta")
@@ -95,6 +97,10 @@ struct SetupView: View {
                         Text("Recommended · tested setup").font(LauncherStyle.font(13,.semibold))
                         Text("M1 Pro with 16 GB memory. Other Apple Silicon Macs may perform differently.")
                             .font(LauncherStyle.font(13)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    if model.onSequoia {
+                        Divider()
+                        Text(sequoiaNote).font(LauncherStyle.font(13)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                 }
             }
@@ -130,6 +136,8 @@ struct SetupView: View {
                         Text("Taking longer than usual. Check the Dock for a Battle.net window.")
                             .font(LauncherStyle.font(13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     }
+                    PerformanceTip()
+                    if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
                 }
             }
         case .readyToInstall:
@@ -150,10 +158,14 @@ struct SetupView: View {
         case .ready:
             VStack(spacing:16) {
                 if model.lowStorage { storageWarning }
-                if model.gameInstalled && !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
+                PerformanceTip()
+                if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
             }
         case .running:
-            if model.gameInstalled && !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
+            VStack(spacing:16) {
+                PerformanceTip()
+                if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
+            }
         case .driveMissing: EmptyView()
         }
     }
@@ -198,6 +210,12 @@ struct SetupView: View {
     }
     private var memoryWarning:some View {
         LauncherNotice(text:"Your Mac has \(model.memoryBytes>>30) GB of memory. We recommend 16 GB. You can continue, but Overwatch may load slowly or stutter. Quitting other apps before you play helps.",symbol:"exclamationmark.triangle")
+    }
+    /// One line on Sequoia; the link opens the "how it runs" form with the versions filled in.
+    private var sequoiaNote:AttributedString {
+        var link=AttributedString("Tell us how it runs")
+        link.link=Brand.howItRuns(macOS:"macOS Sequoia \(model.macOS)",version:"\(UpdateCheck.installed) (build \(UpdateCheck.build))")
+        return AttributedString("Recall is new to macOS Sequoia. ")+link+AttributedString(".")
     }
     private func requirement(_ title:String,_ value:String)->some View {
         HStack(alignment:.top,spacing:12) {
@@ -286,20 +304,46 @@ struct VersionStatus: View {
         }.font(LauncherStyle.font(12)).foregroundStyle(.secondary)
     }
 }
-// Shown until dismissed once Overwatch is installed: first matches compile the
-// game's shaders on this Mac.
+// Every launch: other apps compete with Overwatch for the GPU, CPU and memory; players
+// who kept theirs open reported stutters.
+struct PerformanceTip: View {
+    var body:some View {
+        Label("For the best performance, close other apps while you play.",systemImage:"bolt")
+            .font(LauncherStyle.font(13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            .fixedSize(horizontal:false,vertical:true)
+    }
+}
+// Shown until dismissed on the Play, opening and running screens, from the first
+// session (while Overwatch downloads): first matches compile the game's shaders on
+// this Mac.
 struct FirstMatchTip: View {
+    /// A community custom game that shows Overwatch's effects in a few minutes, so
+    /// the Mac builds their shaders before a real match.
+    static let workshopCode="929PJ"
     let dismiss:()->Void
+    @State private var copied=false
     var body:some View {
         HStack(alignment:.top,spacing:10) {
-            Label { Text("Your first matches can stutter briefly while your Mac prepares Overwatch’s graphics. It gets smoother the more you play.").lineSpacing(3).fixedSize(horizontal:false,vertical:true) }
-                icon: { Image(systemName:"sparkles") }
+            Label {
+                VStack(alignment:.leading,spacing:10) {
+                    Text("Your first matches can stutter briefly while your Mac prepares Overwatch’s graphics. To get ahead of it, play Workshop code \(Self.workshopCode) once from Custom Games before you queue.")
+                        .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+                    HStack(spacing:10) {
+                        Button(copied ? "Copied" : "Copy Code") {
+                            NSPasteboard.general.clearContents();NSPasteboard.general.setString(Self.workshopCode,forType:.string);copied=true
+                        }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                            .accessibilityLabel(copied ? "Copied" : "Copy Workshop code \(Self.workshopCode)")
+                        Text("Shader warm-up by u/Working_Dealer_5102").font(LauncherStyle.font(12)).foregroundStyle(.tertiary)
+                    }
+                }
+            } icon: { Image(systemName:"sparkles") }
             Spacer(minLength:0)
             Button(action:dismiss) { Image(systemName:"xmark").font(.system(size:11,weight:.bold)).frame(width:22,height:22).contentShape(Rectangle()) }
                 .buttonStyle(.borderless).foregroundStyle(.secondary).help("Dismiss this tip").accessibilityLabel("Dismiss tip")
         }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
             .padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
+            .task(id:copied) { if copied { try? await Task.sleep(for:.seconds(2));copied=false } }
     }
 }
 // The footer's three destinations, sized as buttons.

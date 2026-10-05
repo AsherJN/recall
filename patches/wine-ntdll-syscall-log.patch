@@ -78,7 +78,7 @@ index aff2ee6..f9e98bd 100644
      if (status == STATUS_SUCCESS || (status == STATUS_END_OF_FILE && (!async_read || type == FD_TYPE_FILE)))
      {
 diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
-index 494e056..d4bc966 100644
+index 494e056..37771dd 100644
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
 @@ -36,6 +36,7 @@
@@ -97,7 +97,53 @@ index 494e056..d4bc966 100644
  # include <mach-o/getsect.h>
  # include <crt_externs.h>
  # ifndef _POSIX_SPAWN_DISABLE_ASLR
-@@ -798,11 +800,329 @@ BOOLEAN KeAddSystemServiceTable( ULONG_PTR *funcs, ULONG_PTR *counters, ULONG li
+@@ -650,6 +652,36 @@ static void replace_wineloader_path_with_link(char **wineloader_path, const char
+ }
+ #endif
+ 
++#if defined(__APPLE__) && !defined(HAVE_WINE_PRELOADER)
++/* Recall: macOS turns Game Mode on only for a process whose executable is the main
++ * executable of an app bundle that declares itself a game. WINE_GAME_MODE lists, by file
++ * name and separated by commas, the programs that start from such a bundle: for
++ * Overwatch.exe, a copy of the loader at <dll_dir>/game-mode/Overwatch.app/Contents/MacOS/wine.
++ * argv[0] stays the usual loader's path; the copy finds ntdll.so through it (loader/main.c
++ * tries argv[0] after its own path). Any other program, or a missing bundle, starts as before. */
++static void game_mode_exec( char **argv, const char *image_path )
++{
++    const char *list = getenv( "WINE_GAME_MODE" ), *name = image_path, *p, *end;
++    size_t len;
++    char *path;
++
++    if (!list || !image_path || !dll_dir) return;
++    if ((p = strrchr( name, '\\' ))) name = p + 1;
++    if ((p = strrchr( name, '/' ))) name = p + 1;
++    len = strlen( name );
++    for (p = list; ; p = end + 1)
++    {
++        if (!(end = strchr( p, ',' ))) end = p + strlen( p );
++        if (end - p == len && len && !strncasecmp( p, name, len )) break;
++        if (!*end) return;
++    }
++    if (len > 4 && !strcasecmp( name + len - 4, ".exe" )) len -= 4;
++    if (asprintf( &path, "%s/game-mode/%.*s.app/Contents/MacOS/wine", dll_dir, (int)len, name ) < 0) return;
++    if (!access( path, X_OK )) execv( path, argv );
++    free( path );
++}
++#endif
++
+ 
+ static void preloader_exec( char **argv, const char *image_path )
+ {
+@@ -674,6 +706,8 @@ static void preloader_exec( char **argv, const char *image_path )
+ #endif
+ 
+ #if defined(__APPLE__) && !defined(HAVE_WINE_PRELOADER)
++    game_mode_exec( argv + 1, image_path );
++
+     /* CW HACK 22144: Create and exec a more descriptively-named link to the loader,
+      * which will show up as the icon name in the Dock.
+      * When the preloader is not being used, WINEDLLPATH needs to be set correctly for
+@@ -798,11 +832,329 @@ BOOLEAN KeAddSystemServiceTable( ULONG_PTR *funcs, ULONG_PTR *counters, ULONG li
      return TRUE;
  }
  
@@ -427,7 +473,7 @@ index 494e056..d4bc966 100644
      if (names && names[num])
          TRACE_(syscall)( "\1SysCall  %s(", names[num] );
      else
-@@ -822,6 +1142,18 @@ void trace_sysret( UINT id, ULONG_PTR retval )
+@@ -822,6 +1174,18 @@ void trace_sysret( UINT id, ULONG_PTR retval )
      UINT idx = (id >> 12) & 3, num = id & 0xfff;
      const char **names = syscall_names[idx];
  

@@ -5,11 +5,11 @@ import Foundation
 // replaced from the disk image at argument 2, which must hold a newer notarized
 // build of the same app (version in argument 3). Never point it at /Applications.
 @main struct UpdateServiceTests {
-    static func release(_ tag:String, assets:[[String:Any]], draft:Bool=false, prerelease:Bool=false) -> Data {
+    static let notes="## What's new\n\n- **Faster.** Frames take less work.\n- See [the notes](https://example.com).\n\n## Install\n\n- Drag the app.\n"
+    static func release(_ tag:String, assets:[[String:Any]], draft:Bool=false, prerelease:Bool=false, body:String=notes) -> Data {
         try! JSONSerialization.data(withJSONObject:["tag_name":tag,"draft":draft,"prerelease":prerelease,
             "html_url":"https://github.com/AsherJN/recall/releases/tag/\(tag)",
-            "body":"## What's new\n\n- **Faster.** Frames take less work.\n- See [the notes](https://example.com).\n\n## Install\n\n- Drag the app.\n",
-            "assets":assets])
+            "body":body,"assets":assets])
     }
     static func disk(_ version:String, digest:String?="sha256:"+String(repeating:"a",count:64), name:String="Recall") -> [String:Any] {
         var asset:[String:Any]=["name":"\(name)-\(version).dmg","size":242_000_000,
@@ -51,7 +51,22 @@ import Foundation
         precondition(renamedChecksum?.checksum?.absoluteString == "https://github.com/n.sha256")
         do { _ = try UpdateCheck.parse(Data("not json".utf8),current:"1.0.0");fatalError("Accepted invalid JSON") }
         catch let e as SetupFailure { precondition(e.code == "update_check_failed") }
-        print("PASS: version order, release parsing, drafts/pre-releases, unusable and insecure assets, renamed images, notes")
+        // A release states the macOS it needs in a hidden line; without one it needed macOS 26 (1.0).
+        precondition(UpdateCheck.minimumMacOS(notes) == "26.0")
+        precondition(UpdateCheck.minimumMacOS(notes+"\n<!-- minimum-macos: 15.0 -->\n") == "15.0")
+        precondition(UpdateCheck.minimumMacOS("<!--minimum-macos:15-->") == "15")
+        precondition(UpdateCheck.minimumMacOS("minimum-macos: 15.0") == "26.0")
+        precondition(UpdateCheck.runs("15.0",on:"15.6.1") && UpdateCheck.runs("26.0",on:"26.0.0") && UpdateCheck.runs("15",on:"26.1"))
+        precondition(!UpdateCheck.runs("26.0",on:"15.7.1") && !UpdateCheck.runs("15.4",on:"15.3") && !UpdateCheck.runs("latest",on:"26.0"))
+        let marked=notes+"\n<!-- minimum-macos: 15.0 -->\n", needsTahoe=notes+"\n<!-- minimum-macos: 26.0 -->\n"
+        let unmarkedOnSequoia=try UpdateCheck.parse(release("v1.1.0",assets:[disk("1.1.0")]),current:"1.0.0",system:"15.6.1")
+        let tahoeOnlyOnSequoia=try UpdateCheck.parse(release("v1.1.0",assets:[disk("1.1.0")],body:needsTahoe),current:"1.0.0",system:"15.6.1")
+        let markedOnSequoia=try UpdateCheck.parse(release("v1.1.0",assets:[disk("1.1.0")],body:marked),current:"1.0.0",system:"15.6.1")
+        let unmarkedOnTahoe=try UpdateCheck.parse(release("v1.1.0",assets:[disk("1.1.0")]),current:"1.0.0",system:"26.6.2")
+        let markedOnTahoe=try UpdateCheck.parse(release("v1.1.0",assets:[disk("1.1.0")],body:marked),current:"1.0.0",system:"26.6.2")
+        precondition(unmarkedOnSequoia == nil && tahoeOnlyOnSequoia == nil && markedOnSequoia?.version == "1.1.0")
+        precondition(unmarkedOnTahoe?.version == "1.1.0" && markedOnTahoe?.notes.count == 2)
+        print("PASS: version order, release parsing, drafts/pre-releases, unusable and insecure assets, renamed images, notes, minimum macOS")
 
         let args=CommandLine.arguments
         guard args.count == 4 else { return }
@@ -83,8 +98,13 @@ import Foundation
         let info=NSDictionary(contentsOf:installed.appendingPathComponent("Contents/Info.plist"))
         precondition(info?["CFBundleShortVersionString"] as? String == version)
         try UpdateInstaller.verify(installed,team:team,identifier:identifier,version:version)
+        // An app that needs a newer macOS than this Mac has is refused before anything is replaced.
+        if let minimum=info?["LSMinimumSystemVersion"] as? String,let major=UpdateCheck.parts(minimum)?.first,major>1 {
+            do { try UpdateInstaller.verify(installed,team:team,identifier:identifier,version:version,system:"\(major-1).0");fatalError("Accepted an app for a newer macOS") }
+            catch let e as SetupFailure { precondition(e.code == "update_needs_newer_macos") }
+        }
         let leftovers=try FileManager.default.contentsOfDirectory(atPath:installed.deletingLastPathComponent().path).filter { $0.hasPrefix(".") && $0 != ".DS_Store" }
         precondition(leftovers.isEmpty,"Left behind: \(leftovers)")
-        print("PASS: real install from a notarized image; bad checksum, wrong version and other teams change nothing; \(reports.count) progress reports")
+        print("PASS: real install from a notarized image; bad checksum, wrong version, other teams and newer macOS change nothing; \(reports.count) progress reports")
     }
 }

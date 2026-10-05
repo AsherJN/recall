@@ -27,6 +27,17 @@ after checking that each was built against the file the derivation chain started
 --repackage copies the base under a new version without replacing anything.
 Archives hold only runtime.json and the files it lists, so a folder that
 Finder or anything else added files to still packages exactly the manifest.
+
+--native ntdll --game-mode (1.1 and later) also adds the game app that lets macOS turn
+Game Mode on for Overwatch (scripts/game_mode_app.py), made from the base's loader.
+
+--minimum-macos 15.0 (1.1 and later) lowers the minimum macOS stamped in every
+Mach-O file that requires a newer one, re-signs it with its original identifier and
+entitlements, and checks that, unsigned, it differs from the base only in that
+field. The other modes stamp the files they replace with the base's minimum.
+
+--relicense (1.1) replaces the project's MIT license in licenses/ with the Apache 2.0
+license and NOTICE from this tree; text files only, so it needs no signing identity.
 """
 import argparse
 import hashlib
@@ -38,6 +49,9 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
+
+import game_mode_app
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / 'runtime/phase-2/artifacts'
@@ -53,6 +67,120 @@ def sha(path):
 
 def run(*args, **kwargs):
     return subprocess.run([str(a) for a in args], check=True, **kwargs)
+
+
+LC_VERSION_MIN_MACOSX, LC_BUILD_VERSION, PLATFORM_MACOS = 0x24, 0x32, 1
+
+
+def parse_macos(text):
+    """'15.0' -> the Mach-O encoding of a version (xxxx.yy.zz in nibbles)."""
+    if not re.fullmatch(r'\d{1,4}(\.\d{1,3}){0,2}', text):
+        raise ValueError('Invalid macOS version: ' + text)
+    major, minor, patch = ([int(p) for p in text.split('.')] + [0, 0])[:3]
+    if minor > 255 or patch > 255:
+        raise ValueError('Invalid macOS version: ' + text)
+    return major << 16 | minor << 8 | patch
+
+
+def format_macos(value):
+    text = f'{value >> 16}.{value >> 8 & 0xff}'
+    return text + (f'.{value & 0xff}' if value & 0xff else '')
+
+
+def minimum_field(read):
+    """(offset, version) of the minimum-macOS field of a 64-bit Mach-O, or None for any other
+    file. READ(n) returns the next n bytes of the file from its start."""
+    header = read(32)
+    if header[:4] == b'\xca\xfe\xba\xbe' and int.from_bytes(header[4:8], 'big') < 20:
+        raise ValueError('Universal Mach-O files are not supported')
+    if header[:4] in (b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xce', b'\xfe\xed\xfa\xcf'):
+        raise ValueError('Only 64-bit little-endian Mach-O files are supported')
+    if header[:4] != b'\xcf\xfa\xed\xfe':
+        return None
+    commands = header + read(int.from_bytes(header[20:24], 'little'))
+    offset = 32
+    for _ in range(int.from_bytes(header[16:20], 'little')):
+        cmd, size = (int.from_bytes(commands[offset + i:offset + i + 4], 'little') for i in (0, 4))
+        if cmd == LC_BUILD_VERSION:  # cmd, cmdsize, platform, minos, sdk, ntools
+            if int.from_bytes(commands[offset + 8:offset + 12], 'little') != PLATFORM_MACOS:
+                raise ValueError('Mach-O file built for another platform')
+            return offset + 12, int.from_bytes(commands[offset + 12:offset + 16], 'little')
+        if cmd == LC_VERSION_MIN_MACOSX:  # cmd, cmdsize, version, sdk
+            return offset + 8, int.from_bytes(commands[offset + 8:offset + 12], 'little')
+        offset += size
+    raise ValueError('Mach-O file without a minimum macOS')
+
+
+def file_minimum(path):
+    with Path(path).open('rb') as f:
+        return minimum_field(f.read)
+
+
+def restamp(path, minimum):
+    """Lower a Mach-O file's minimum macOS to MINIMUM in place (it must be re-signed);
+    return the version it required before, or None when nothing changed."""
+    field = file_minimum(path)
+    if not field or field[1] <= minimum:
+        return None
+    with Path(path).open('r+b') as f:
+        f.seek(field[0])
+        f.write(minimum.to_bytes(4, 'little'))
+    return field[1]
+
+
+def signing_of(path):
+    """Identifier and entitlements of a native file signed as the assembler signs them."""
+    info = subprocess.run(['codesign', '-dvv', str(path)], capture_output=True, text=True).stderr
+    identifier = re.search(r'^Identifier=(.+)$', info, re.M)
+    if not identifier or 'Authority=Developer ID Application' not in info or '(runtime)' not in info:
+        raise ValueError(f'{Path(path).name} is not signed with Developer ID and the hardened runtime')
+    xml = subprocess.run(['codesign', '-d', '--xml', '--entitlements', '-', str(path)], capture_output=True).stdout
+    return identifier.group(1), plistlib.loads(xml) if xml.strip() else None
+
+
+def sign_like(target, original, identity):
+    """Sign TARGET as ORIGINAL is signed: same identifier, entitlements and hardened runtime."""
+    identifier, entitlements = signing_of(original)
+    args = ['codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity, '--identifier', identifier]
+    with tempfile.TemporaryDirectory() as folder:
+        if entitlements is not None:
+            plist = Path(folder) / 'entitlements.plist'
+            plist.write_bytes(plistlib.dumps(entitlements))
+            args += ['--entitlements', plist]
+        run(*args, target, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    run('codesign', '--verify', '--strict', target)
+    if signing_of(target) != (identifier, entitlements):
+        raise ValueError(f'{Path(target).name} is signed differently from the base file')
+
+
+def same_apart_from_minimum(original, restamped):
+    """True when the two files, unsigned, differ only in the minimum-macOS field."""
+    with tempfile.TemporaryDirectory() as folder:
+        copies = [Path(folder) / 'a', Path(folder) / 'b']
+        for source, copy in zip((original, restamped), copies):
+            shutil.copy2(source, copy)
+            run('codesign', '--remove-signature', copy)
+        a, b = (c.read_bytes() for c in copies)
+    offset = file_minimum(original)[0]
+    return len(a) == len(b) and a[:offset] == b[:offset] and a[offset + 4:] == b[offset + 4:]
+
+
+def archive_minimum(archive):
+    """The newest minimum macOS any Mach-O file in a runtime archive requires, and the
+    minimum its manifest declares."""
+    newest, declared = 0, None
+    with tarfile.open(archive, 'r|gz') as tar:
+        for member in tar:
+            if not member.isfile():
+                continue
+            f = tar.extractfile(member)
+            if member.name == 'runtime.json':
+                declared = json.load(f).get('minimum_macos')
+                continue
+            field = minimum_field(f.read)
+            if field:
+                newest = max(newest, field[1])
+    return newest, declared
 
 
 def check_driver(path):
@@ -157,6 +285,7 @@ def derive(base_version, version, identity):
     target.unlink()
     shutil.copy2(driver, target)
     check_driver(target)
+    restamp(target, parse_macos(manifest.get('minimum_macos', '26.0')))
     run('codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity, target,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     run('codesign', '--verify', '--strict', target)
@@ -290,9 +419,12 @@ def derive_components(base_version, version, identity, dxmt_workspace):
     replace_files(base, dest, base_version, version, identity, manifest, sources, replaced)
 
 
-def replace_files(base, dest, base_version, version, identity, manifest, sources, replaced):
+def replace_files(base, dest, base_version, version, identity, manifest, sources, replaced, game_mode=False):
     """Clone the base, put each source at its relative path (native files signed as the
-    assembler signs them), record the replacements and archive; nothing else may differ."""
+    assembler signs them), add the game app if asked, record the changes and archive;
+    nothing else may differ."""
+    if game_mode and game_mode_app.BUNDLE in {str(Path(f).parent.parent.parent) for f in manifest['files']}:
+        raise ValueError(f'{base_version} already has the game app')
     run('/bin/cp', '-Rc', base, dest)  # APFS clone: only replaced files take space
     entitlements = dest.parent / f'{version}-entitlements.plist'
     entitlements.write_bytes(plistlib.dumps({name: True for name in ENTITLEMENTS}))
@@ -308,6 +440,7 @@ def replace_files(base, dest, base_version, version, identity, manifest, sources
                 continue
             check_native(target, base / relative)
             check_paths(target)
+            restamp(target, parse_macos(manifest.get('minimum_macos', '26.0')))
             args = ['codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity]
             if target.name in ('wine', 'wineserver'):
                 args += ['--entitlements', entitlements]
@@ -315,41 +448,186 @@ def replace_files(base, dest, base_version, version, identity, manifest, sources
             run('codesign', '--verify', '--strict', target)
     finally:
         entitlements.unlink(missing_ok=True)
+    # Made after the replacements, from the loader the runtime ships (signed as it is).
+    added = game_mode_app.make(dest, manifest.get('minimum_macos', '26.0'), identity) if game_mode else []
 
     manifest['version'] = version
-    for relative in sources:
+    for relative in [*sources, *added]:
         manifest['files'][relative] = {'sha256': sha(dest / relative), 'bytes': (dest / relative).stat().st_size}
     manifest['derived_from'] = {'version': base_version, 'archive_sha256': sha(str(base) + '.tar.gz'), 'replaced': replaced}
+    if added:
+        manifest['derived_from']['added'] = {relative: {'built_by': 'scripts/game_mode_app.py',
+                                                        'from': game_mode_app.LOADER} for relative in added}
     (dest / 'runtime.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
     before, after = tree(base), tree(dest)
     changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
-    if changed != sorted([*sources, 'runtime.json']):
+    if changed != sorted([*sources, *added, 'runtime.json']):
         raise ValueError('Unexpected differences from the base runtime: ' + ', '.join(changed))
 
     archive = write_archive(dest)
     base_proof = json.loads(Path(str(base) + '.tar.json').read_text())
+    base_proof.pop('restamped', None)  # the base's own record, not this derivation's
     result = dict(base_proof, version=version, archive_sha256=sha(archive), archive_bytes=archive.stat().st_size,
                   unpacked_file_bytes=sum(v.get('bytes', 0) for v in manifest['files'].values()),
                   files=len(manifest['files']), derived_from=base_version, replaced=sorted(sources))
+    if added:
+        result['added'] = added
     archive.with_suffix('.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))
 
 
-def chain_original(version, relative, patch):
-    """SHA-256 of a file in the newest runtime of the derivation chain whose copy is not a
-    build of this patch: the file that patch's builds start from."""
-    while True:
+OLD_PROJECT_LICENSE = 'licenses/PROJECT-MIT'
+PROJECT_LICENSES = ('licenses/PROJECT-APACHE-2.0', 'licenses/PROJECT-NOTICE')
+
+
+def relicense(base_version, version):
+    """1.1: the project's own license in licenses/ becomes Apache 2.0 with its NOTICE, taken
+    from this tree. Text files only, so nothing is signed; nothing else may differ."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
+        raise ValueError('Invalid runtime version')
+    base, dest = ARTIFACTS / base_version, ARTIFACTS / version
+    if dest.exists() or Path(str(dest) + '.tar.gz').exists():
+        raise ValueError('Use a new version; existing artifact is never overwritten')
+    manifest = json.loads((base / 'runtime.json').read_text())
+    if manifest['version'] != base_version:
+        raise ValueError('The base artifact names a different version')
+    if OLD_PROJECT_LICENSE not in manifest['files'] or any(f in manifest['files'] for f in PROJECT_LICENSES):
+        raise ValueError(f'{base_version} does not carry the MIT project license alone')
+
+    run('/bin/cp', '-Rc', base, dest)  # APFS clone: only the license files take space
+    (dest / OLD_PROJECT_LICENSE).unlink()
+    for relative in PROJECT_LICENSES:
+        shutil.copyfile(ROOT / relative, dest / relative)
+        (dest / relative).chmod(0o644)
+
+    manifest['version'] = version
+    removed = {OLD_PROJECT_LICENSE: manifest['files'].pop(OLD_PROJECT_LICENSE)}
+    for relative in PROJECT_LICENSES:
+        manifest['files'][relative] = {'sha256': sha(dest / relative), 'bytes': (dest / relative).stat().st_size}
+    manifest['derived_from'] = {'version': base_version, 'archive_sha256': sha(str(base) + '.tar.gz'),
+                                'removed': removed, 'added': {r: {'from': r} for r in PROJECT_LICENSES}}
+    (dest / 'runtime.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+    before, after = tree(base), tree(dest)
+    changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
+    if changed != sorted([OLD_PROJECT_LICENSE, *PROJECT_LICENSES, 'runtime.json']):
+        raise ValueError('Unexpected differences from the base runtime: ' + ', '.join(changed))
+
+    archive = write_archive(dest)
+    base_proof = json.loads(Path(str(base) + '.tar.json').read_text())
+    for key in ('replaced', 'added', 'restamped', 'repackaged_from'):
+        base_proof.pop(key, None)
+    result = dict(base_proof, version=version, archive_sha256=sha(archive), archive_bytes=archive.stat().st_size,
+                  unpacked_file_bytes=sum(v.get('bytes', 0) for v in manifest['files'].values()),
+                  files=len(manifest['files']), derived_from=base_version,
+                  removed=[OLD_PROJECT_LICENSE], added=list(PROJECT_LICENSES))
+    archive.with_suffix('.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(result, indent=2))
+
+
+def chain(version):
+    """The manifest of VERSION and of each runtime it was derived from, newest first."""
+    while version:
         manifest = json.loads((ARTIFACTS / version / 'runtime.json').read_text())
+        yield manifest
+        version = manifest.get('derived_from', {}).get('version')
+
+
+def chain_original(version, relative, patch):
+    """SHA-256 of the file that builds of this patch start from: RELATIVE in the newest runtime
+    of the derivation chain that did not get it from its base unchanged (derivations that left
+    it alone, and re-stamps, which change no code, are looked through) or from a build of PATCH."""
+    for manifest in chain(version):
         derived = manifest.get('derived_from', {})
-        if derived.get('replaced', {}).get(relative, {}).get('patch') != patch:
-            return manifest['files'][relative]['sha256']
-        version = derived['version']
+        replacement = derived.get('replaced', {}).get(relative)
+        if 'restamped' in derived or (derived and replacement is None) or (replacement or {}).get('patch') == patch:
+            continue
+        return manifest['files'][relative]['sha256']
+    raise ValueError(f'No original of {relative} in the chain of {version}')
 
 
-def derive_native(base_version, version, identity, components):
+def chain_replacement(version, relative):
+    """How the newest derivation in the chain that replaced RELATIVE did it ({} if none did)."""
+    for manifest in chain(version):
+        replacement = manifest.get('derived_from', {}).get('replaced', {}).get(relative)
+        if replacement is not None:
+            return replacement
+    return {}
+
+
+def restamp_runtime(base_version, version, identity, minimum_text):
+    """Lower the minimum macOS of every Mach-O file in the base that requires a newer one.
+    Each is re-signed as before and, unsigned, differs from the base only in that field."""
+    minimum = parse_macos(minimum_text)
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
+        raise ValueError('Invalid runtime version')
+    base, dest = ARTIFACTS / base_version, ARTIFACTS / version
+    if dest.exists() or Path(str(dest) + '.tar.gz').exists():
+        raise ValueError('Use a new version; existing artifact is never overwritten')
+    manifest = json.loads((base / 'runtime.json').read_text())
+    if manifest['version'] != base_version:
+        raise ValueError('The base artifact names a different version')
+
+    run('/bin/cp', '-Rc', base, dest)  # APFS clone: only re-stamped files take space
+    restamped = {}
+    game_app = [f for f in manifest['files'] if f.startswith(game_mode_app.BUNDLE + '/')]
+    for relative in sorted(manifest['files']):
+        target = dest / relative
+        if target.is_symlink() or not target.is_file() or relative in game_app:
+            continue
+        required = restamp(target, minimum)
+        if required is None:
+            continue
+        sign_like(target, base / relative, identity)
+        if not same_apart_from_minimum(base / relative, target):
+            raise ValueError(f'{relative} differs from the base beyond its minimum macOS')
+        restamped[relative] = {'base_sha256': manifest['files'][relative]['sha256'], 'minimum_macos': format_macos(required)}
+        manifest['files'][relative] = {'sha256': sha(target), 'bytes': target.stat().st_size}
+    if game_app:
+        # The game app is made again from the re-stamped loader: signing its executable
+        # alone would break the bundle's seal, and its Info.plist names the minimum too.
+        shutil.rmtree(dest / game_mode_app.BUNDLE)
+        if sorted(game_mode_app.make(dest, minimum_text, identity)) != sorted(game_app):
+            raise ValueError('The game app was made with other files than the base has')
+        for relative in game_app:
+            restamped[relative] = {'base_sha256': manifest['files'][relative]['sha256'], 'remade_by': 'scripts/game_mode_app.py'}
+            manifest['files'][relative] = {'sha256': sha(dest / relative), 'bytes': (dest / relative).stat().st_size}
+    if not restamped:
+        raise ValueError(f'Nothing in {base_version} requires a macOS newer than {minimum_text}')
+
+    manifest['version'] = version
+    manifest['minimum_macos'] = minimum_text
+    manifest['derived_from'] = {'version': base_version, 'archive_sha256': sha(str(base) + '.tar.gz'),
+                                'minimum_macos': minimum_text, 'restamped': restamped}
+    (dest / 'runtime.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+    before, after = tree(base), tree(dest)
+    changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
+    if changed != sorted([*restamped, 'runtime.json']):
+        raise ValueError('Unexpected differences from the base runtime: ' + ', '.join(changed))
+
+    archive = write_archive(dest)
+    newest, declared = archive_minimum(archive)
+    if newest > minimum or declared != minimum_text:
+        raise ValueError(f'{archive.name} still requires macOS {format_macos(newest)}')
+    base_proof = json.loads(Path(str(base) + '.tar.json').read_text())
+    for key in ('replaced', 'repackaged_from'):
+        base_proof.pop(key, None)
+    result = dict(base_proof, version=version, archive_sha256=sha(archive), archive_bytes=archive.stat().st_size,
+                  unpacked_file_bytes=sum(v.get('bytes', 0) for v in manifest['files'].values()),
+                  files=len(manifest['files']), derived_from=base_version, minimum_macos=minimum_text,
+                  restamped=sorted(restamped))
+    archive.with_suffix('.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(result, indent=2))
+
+
+def derive_native(base_version, version, identity, components, game_mode=False):
     """Replace only these build_wine_native.py components in a runtime that already ships
-    earlier builds of the same experiments (phase2-20260930.1 and later)."""
+    earlier builds of the same experiments (phase2-20260930.1 and later); with GAME_MODE,
+    also add the game app (needs ntdll's game_mode_exec, so ntdll must be among them)."""
+    if game_mode and 'ntdll' not in components:
+        raise ValueError('--game-mode needs --native ntdll: ntdll starts the game from the game app')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
         raise ValueError('Invalid runtime version')
     base, dest = ARTIFACTS / base_version, ARTIFACTS / version
@@ -367,7 +645,7 @@ def derive_native(base_version, version, identity, components):
         built = NATIVE / component / 'current' / Path(relative).name
         if build['sha256'] != sha(built) or build['patch_sha256'] != sha(ROOT / build['patch']):
             raise ValueError(f'Rebuild {component}: its build manifest does not match the file or the patch')
-        earlier = manifest.get('derived_from', {}).get('replaced', {}).get(relative, {})
+        earlier = chain_replacement(base_version, relative)
         if earlier.get('patch') != build['patch']:
             raise ValueError(f'{base_version} does not ship an earlier build of the {component} experiment')
         if build['base_sha256'] != chain_original(base_version, relative, build['patch']):
@@ -375,7 +653,7 @@ def derive_native(base_version, version, identity, components):
         sources[relative] = built
         replaced[relative] = {'build_sha256': build['sha256'], 'built_by': f'scripts/build_wine_native.py {component}',
                               'patch': build['patch'], 'patch_sha256': build['patch_sha256']}
-    replace_files(base, dest, base_version, version, identity, manifest, sources, replaced)
+    replace_files(base, dest, base_version, version, identity, manifest, sources, replaced, game_mode)
 
 
 if __name__ == '__main__':
@@ -387,16 +665,27 @@ if __name__ == '__main__':
     parser.add_argument('--native', metavar='COMPONENT[,COMPONENT]',
                         help='Replace only these build_wine_native.py components (wineserver, ntdll, win32u, '
                              'winemac) in a runtime that already ships earlier builds of them')
+    parser.add_argument('--game-mode', action='store_true',
+                        help='With --native ntdll: add the game app that lets macOS turn Game Mode on for Overwatch')
     parser.add_argument('--components', type=Path, metavar='DXMT_WORKSPACE',
                         help='Replace the Wine components from build_wine_native.py, the DXMT build in this '
                              'build_portable_dxmt.py workspace and the renderer profile')
+    parser.add_argument('--minimum-macos', metavar='VERSION',
+                        help='Lower the minimum macOS of every Mach-O file that requires a newer one '
+                             '(e.g. 15.0), re-signing each as before')
+    parser.add_argument('--relicense', action='store_true',
+                        help="Replace the project's MIT license file with the Apache 2.0 license and NOTICE")
     args = parser.parse_args()
     if args.repackage:
         repackage(args.base_version, args.version)
+    elif args.relicense:
+        relicense(args.base_version, args.version)
     elif not args.identity:
         parser.error('--identity is required to replace components')
+    elif args.minimum_macos:
+        restamp_runtime(args.base_version, args.version, args.identity, args.minimum_macos)
     elif args.native:
-        derive_native(args.base_version, args.version, args.identity, args.native.split(','))
+        derive_native(args.base_version, args.version, args.identity, args.native.split(','), args.game_mode)
     elif args.components:
         derive_components(args.base_version, args.version, args.identity, args.components.resolve())
     else:

@@ -11,15 +11,25 @@ cross-process app lock, plus the Help menu and the Dock menu (Force Quit).
 `SetupView.swift` composes the SwiftUI setup/status views, the support card,
 the version and update line, the first-match tip and the footer's Settings,
 Help & FAQ and About buttons, while `UtilitySheets.swift` owns Settings
-(updates, resolution, Force Quit, Repair, Uninstall), Help & FAQ, About,
-Uninstall, the update sheet and What's New (content in `WhatsNew.swift`,
+(updates, resolution, Force Quit, Repair, Reset Display Settings, Uninstall), Help & FAQ, About
+(with Licenses: the bundled NOTICE and Apache 2.0 text, and the third-party
+license files in Finder), Uninstall, the update sheet and What's New (content in `WhatsNew.swift`,
 bundled). `ProjectLinks.swift` holds the link buttons, the lockup, the author
 photo and the support card. `DisplayOptions.swift` lists the fullscreen
 resolutions (1080p, 1440p and 4K in 16:10 and 16:9, as in the launch contract)
 and reads the main display, which Settings names and uses to say how a choice
 looks there and whether it fits: Wine sees the main display at twice its size in
 points, and a larger game window would leave part of it out of the pointer's
-reach (the worker lowers such a choice at launch by the same rule). Uninstall
+reach (the worker lowers such a choice at launch by the same rule). Players
+usually set the resolution in Overwatch's Video settings; the worker keeps that
+choice (`nextResolution` in `portable_preferences.h`, reported by `status` as
+`display_next`), so Settings shows it in a folded row whose sizes write the same
+game setting from outside the game. Each main display (by make, model and serial
+number) keeps its own resolution unless Settings › Remember a resolution for each
+display is off (`display-memory`); a display seen for the first time starts at 1080p
+in its shape. Reset Display Settings writes the first-install
+resolution (1080p in the main display's shape) and the other display settings again,
+leaving quality and FPS alone. Uninstall
 asks the worker to move the owned data root to the Trash (refused while an owned
 Battle.net or Overwatch process runs), then the app removes its lock folder and
 defaults and moves its own bundle to the Trash. Nothing is deleted outright. `LauncherStyle.swift`
@@ -69,17 +79,17 @@ Swift suites (scratch data only; the optional arguments run real installs from
 a notarized Developer ID build and never touch /Applications):
 
 ```sh
-swiftc -O -target arm64-apple-macos26.0 -parse-as-library app/Sources/Brand.swift \
+swiftc -O -target arm64-apple-macos15.0 -parse-as-library app/Sources/Brand.swift \
   app/Sources/SetupService.swift app/Sources/UpdateService.swift tests/UpdateServiceTests.swift \
   -o runtime/phase-3/update-tests
 runtime/phase-3/update-tests [<scratch app copy> <newer notarized DMG> <its version>]
-swiftc -O -target arm64-apple-macos26.0 -parse-as-library app/Sources/Brand.swift \
+swiftc -O -target arm64-apple-macos15.0 -parse-as-library app/Sources/Brand.swift \
   app/Sources/SetupService.swift app/Sources/UpdateService.swift app/Sources/AppLocation.swift \
   tests/AppLocationTests.swift -o runtime/phase-3/location-tests
 runtime/phase-3/location-tests [<notarized app> <empty scratch folder>]
-swiftc -O -target arm64-apple-macos26.0 -parse-as-library app/Sources/InstallLocation.swift \
+swiftc -O -target arm64-apple-macos15.0 -parse-as-library app/Sources/InstallLocation.swift \
   tests/InstallLocationTests.swift -o runtime/phase-3/install-location-tests
-swiftc -O -target arm64-apple-macos26.0 -parse-as-library app/Sources/DisplayOptions.swift \
+swiftc -O -target arm64-apple-macos15.0 -parse-as-library app/Sources/DisplayOptions.swift \
   tests/DisplayOptionsTests.swift -o runtime/phase-3/display-options-tests
 runtime/phase-3/display-options-tests   # from the repository root
 ```
@@ -89,6 +99,20 @@ display helpers. The native pipeline coordinator invokes a separately compiled
 helper built from the exact accepted production cache/recipe implementation.
 It clones, prepares, verifies, and atomically publishes while preserving the
 prior cache. It never runs a player-side compiler or imports developer caches.
+The game names its cache folder with Metal's registry ID for the GPU, which
+macOS reassigns at each restart, so the coordinator first folds folders left by
+earlier restarts into the one the game opens now and removes them. Archives
+carry over only from the same macOS version; preparation rebuilds the rest.
+Its progress lines (each shader from the preparation tool's diagnostic log) reach
+the launching screen's "Preparing graphics" details as `graphics` events.
+With Game Mode the game runs as the engine's game app, and macOS keeps compiled
+shaders per app, so that app's cache starts empty after the update that brings it
+and after each macOS update. The worker passes the game app's path, and a second
+helper, `pipeline-warm`, compiles every learned pipeline into that app's cache
+(`MTLSetShaderCachePath`, 16 at a time in one process) once per app, macOS version
+and GPU (`cache/warmed.json`). A failed archive (too large, or not covering a key the
+last one listed) is tried again smaller instead of ending preparation, and an
+archive listing pipelines with no recipe left is rebuilt.
 
 Lifecycle follows AppKit's reopen callback and native window/menu behavior:
 [Apple app organization](https://developer.apple.com/documentation/swiftui/app-organization)

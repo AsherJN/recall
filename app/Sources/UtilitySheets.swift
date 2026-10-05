@@ -8,6 +8,10 @@ struct SettingsSheet:View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmForceQuit=false
     @State private var confirmRepair=false
+    @State private var confirmResetDisplay=false
+    /// Settings opens with the resolution sizes folded away.
+    @State private var displayExpanded=false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Follows System Settings: the main display can change while Settings is open.
     @State private var main=MainDisplay.current
     var body:some View {
@@ -18,6 +22,7 @@ struct SettingsSheet:View {
                     updates
                     display
                     battleNet
+                    metalHUD
                     troubleshooting
                 }
             }.scrollIndicators(.hidden)
@@ -36,7 +41,15 @@ struct SettingsSheet:View {
             .tint(.primary).background { LauncherBackground() }
             .onReceive(NotificationCenter.default.publisher(for:NSApplication.didChangeScreenParametersNotification)) { _ in
                 main=MainDisplay.current
+                model.refreshDisplay()
             }
+            // Battle.net or Overwatch may have opened or closed while the player was away.
+            .onAppear {
+                model.checkRunning()
+                // Private previews can open with the resolution sizes shown.
+                if model.isPreview && CommandLine.arguments.contains("--preview-resolution-open") { displayExpanded=true }
+            }
+            .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in model.checkRunning() }
             .alert("Force quit Overwatch and Battle.net?",isPresented:$confirmForceQuit) {
                 Button("Cancel",role:.cancel) {}
                 Button("Force Quit",role:.destructive,action:model.forceQuit)
@@ -45,6 +58,10 @@ struct SettingsSheet:View {
                 Button("Cancel",role:.cancel) {}
                 Button("Repair",action:model.repair)
             } message: { Text("Overwatch and Battle.net must be closed. This reinstalls the files this app adds and refreshes the Windows environment. Overwatch, its settings and your Battle.net sign-in are kept.") }
+            .alert("Reset display settings?",isPresented:$confirmResetDisplay) {
+                Button("Cancel",role:.cancel) {}
+                Button("Reset",action:model.resetDisplay)
+            } message: { Text("Overwatch will open full screen at \(DisplayResolution.initial(for:main).label)\(model.rememberEachDisplay ? " on this display" : "") the next time it starts. Your graphics quality and FPS settings stay as they are.") }
     }
     private var updates:some View {
         LauncherPanel(inset:16) {
@@ -76,48 +93,80 @@ struct SettingsSheet:View {
         default: return "Version \(UpdateCheck.installed)"
         }
     }
+    /// Overwatch's own Video settings are where players change resolution; Recall keeps
+    /// their choice. This row shows it, and opens Settings' sizes for players who want
+    /// to set it from here.
     private var display:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:12) {
-                Text("Fullscreen resolution").font(LauncherStyle.font(14,.semibold))
-                if let main { mainDisplay(main) }
-                Text("Overwatch opens on the main display, the one with the menu bar. To use another, choose Displays… and set it as the main display.")
-                    .font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                Grid(alignment:.leading,horizontalSpacing:12,verticalSpacing:10) {
-                    GridRow {
-                        Text("Shape").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
-                        HStack(spacing:8) {
-                            choice("16:10 · MacBook",selected:model.resolution.shape == .macBook) {
-                                model.chooseResolution(DisplayResolution(shape:.macBook,size:model.resolution.size))
-                            }
-                            choice("16:9 · Monitor & TV",selected:model.resolution.shape == .monitor) {
-                                model.chooseResolution(DisplayResolution(shape:.monitor,size:model.resolution.size))
-                            }
+                Button { withAnimation(reduceMotion ? nil : .easeOut(duration:0.15)) { displayExpanded.toggle() } } label: {
+                    HStack(spacing:10) {
+                        VStack(alignment:.leading,spacing:2) {
+                            Text("Fullscreen resolution").font(LauncherStyle.font(14,.semibold))
+                            Text("Set it in game under Options › Video, or here.")
+                                .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                         }
-                    }
-                    GridRow {
-                        Text("Size").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
-                        HStack(spacing:8) {
-                            ForEach(DisplayResolution.Size.allCases,id:\.self) { size in
-                                let option=DisplayResolution(shape:model.resolution.shape,size:size)
-                                choice(option.label,selected:model.resolution == option,dimmed:main.map { !$0.fits(option) } ?? false) {
-                                    model.chooseResolution(option)
-                                }.help(main.map { $0.fits(option) } ?? true ? "" : "Larger than your main display can show")
-                            }
+                        Spacer(minLength:8)
+                        Text(model.resolution.label).font(LauncherStyle.font(13,.medium)).monospacedDigit()
+                        Image(systemName:"chevron.down").font(.system(size:11,weight:.semibold)).foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(displayExpanded ? 180 : 0)).accessibilityHidden(true)
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel("Fullscreen resolution, \(model.resolution.label)")
+                    .accessibilityValue(displayExpanded ? "Expanded" : "Collapsed")
+                if displayExpanded { displayOptions }
+            }
+        }
+    }
+    private var displayOptions:some View {
+        // A size chosen in Overwatch that Settings doesn't list selects nothing here;
+        // the sizes shown are then those in the main display's shape.
+        let current=model.resolution
+        let shape=current.isSupported ? current.shape : DisplayResolution.initial(for:main).shape
+        return VStack(alignment:.leading,spacing:12) {
+            if let main { mainDisplay(main) }
+            Text("Overwatch opens on the main display, the one with the menu bar. To use another, choose Displays… and set it as the main display.")
+                .font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            VStack(alignment:.leading,spacing:4) {
+                Toggle(isOn:Binding(get:{ model.rememberEachDisplay },set:{ model.setRememberEachDisplay($0) })) {
+                    Text("Remember a resolution for each display").font(LauncherStyle.font(13,.medium))
+                }.toggleStyle(.switch).tint(LauncherStyle.accent).disabled(model.busy)
+                Text("Your MacBook screen and each monitor open at the resolution you last used on them.")
+                    .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            }
+            Grid(alignment:.leading,horizontalSpacing:12,verticalSpacing:10) {
+                GridRow {
+                    Text("Shape").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                    HStack(spacing:8) {
+                        choice("16:10 · MacBook",selected:current.isSupported && current.shape == .macBook) {
+                            model.chooseResolution(DisplayResolution(shape:.macBook,size:current.size))
+                        }
+                        choice("16:9 · Monitor & TV",selected:current.isSupported && current.shape == .monitor) {
+                            model.chooseResolution(DisplayResolution(shape:.monitor,size:current.size))
                         }
                     }
                 }
-                Text(caption).font(LauncherStyle.font(13)).lineSpacing(3).fixedSize(horizontal:false,vertical:true)
-                HStack(spacing:6) {
-                    if model.displaySaved {
-                        Image(systemName:"checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
-                        Text("Saved").font(LauncherStyle.font(12,.medium))
-                        Text("·").foregroundStyle(.secondary)
+                GridRow {
+                    Text("Size").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                    HStack(spacing:8) {
+                        ForEach(DisplayResolution.Size.allCases,id:\.self) { size in
+                            let option=DisplayResolution(shape:shape,size:size)
+                            choice(option.label,selected:current == option,dimmed:main.map { !$0.fits(option) } ?? false) {
+                                model.chooseResolution(option)
+                            }.help(main.map { $0.fits(option) } ?? true ? "" : "Larger than your main display can show")
+                        }
                     }
-                    Text("Changes save as you choose and apply the next time Overwatch starts.")
-                        .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                }.font(LauncherStyle.font(12)).animation(.easeOut(duration:0.15),value:model.displaySaved)
+                }
             }
+            Text(caption).font(LauncherStyle.font(13)).lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+            HStack(spacing:6) {
+                if model.displaySaved {
+                    Image(systemName:"checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
+                    Text("Saved").font(LauncherStyle.font(12,.medium))
+                    Text("·").foregroundStyle(.secondary)
+                }
+                Text(model.rememberEachDisplay ? "Changes save for this display and apply the next time Overwatch starts." : "Changes save as you choose and apply the next time Overwatch starts.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            }.font(LauncherStyle.font(12)).animation(.easeOut(duration:0.15),value:model.displaySaved)
         }
     }
     private func mainDisplay(_ main:MainDisplay) -> some View {
@@ -143,26 +192,12 @@ struct SettingsSheet:View {
                 .contentShape(Capsule())
         }.buttonStyle(.plain).disabled(model.busy).accessibilityAddTraits(selected ? .isSelected : [])
     }
-    /// What the player will see with the selected resolution on the main display.
+    /// What the player will see with the current resolution on the main display.
     private var caption:String {
         let choice=model.resolution
-        let sharper="Larger sizes look sharper and lower your frame rate."
-        guard let main else { return sharper }
-        if !main.fits(choice) {
-            return "Too large for this main display: Overwatch uses \(main.fitted(choice).label) until a larger display is your main display."
-        }
-        if choice.shape != main.shape {
-            return main.shape == .monitor
-                ? "Your main display is wider than 16:10, so the picture has black bars at the sides. \(sharper)"
-                : "Your main display is taller than 16:9, so the picture has black bars above and below. \(sharper)"
-        }
-        if CGFloat(choice.width) == main.pixels.width && CGFloat(choice.height) == main.pixels.height {
-            return "Matches your main display exactly: the sharpest picture. Smaller sizes run faster."
-        }
-        if CGFloat(choice.width) > main.pixels.width {
-            return "Larger than your main display: smoother edges, but a much lower frame rate."
-        }
-        return "Scaled up to fill your main display. \(sharper)"
+        let source=choice.isSupported ? "" : "\(choice.label) was chosen in Overwatch. "
+        guard let main else { return source+"Larger sizes look sharper and lower your frame rate." }
+        return source+main.caption(for:choice)
     }
     private var battleNet:some View {
         LauncherPanel(inset:16) {
@@ -181,12 +216,36 @@ struct SettingsSheet:View {
             }
         }
     }
+    /// Overwatch gets the HUD from Battle.net, which starts it; so the switch changes only
+    /// while Battle.net is closed, and Settings offers to close it.
+    private var metalHUD:some View {
+        LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:6) {
+                Toggle(isOn:$model.metalHUD) {
+                    Text("Metal Performance HUD").font(LauncherStyle.font(14,.semibold))
+                }.toggleStyle(.switch).tint(LauncherStyle.accent).disabled(model.running != nil)
+                Text("Shows Apple’s performance overlay in Overwatch: FPS, frame times, and when your Mac is compiling shaders, the cause of first-match stutters.")
+                    .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                if let running=model.running {
+                    HStack(spacing:12) {
+                        Text(running == .game ? "Quit Overwatch to change this." : "Close Battle.net to change this.")
+                            .font(LauncherStyle.font(12,.medium)).fixedSize(horizontal:false,vertical:true)
+                        Spacer(minLength:8)
+                        if running == .client {
+                            Button("Close Battle.net",action:model.closeBattleNet).buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(model.busy)
+                        }
+                    }.padding(.top,6)
+                }
+            }
+        }
+    }
     private var troubleshooting:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:10) {
                 Text("Troubleshooting").font(LauncherStyle.font(14,.semibold))
                 action("Force Quit Overwatch & Battle.net",detail:"If the game stops responding.",button:"Force Quit") { confirmForceQuit=true }
                 action("Repair Game Files…",detail:"If Overwatch won’t start. Takes a minute or two.",button:"Repair") { confirmRepair=true }
+                action("Reset Display Settings…",detail:"If Overwatch opens to a black screen or at the wrong size.",button:"Reset") { confirmResetDisplay=true }
 
             }
         }
@@ -212,14 +271,15 @@ struct HelpSheet:View {
     private let questions:[(question:String, answer:String)]=[
         ("What are the best Overwatch settings?","In Overwatch’s Video settings, set Render Scale to 100%, Dynamic Render Scale to Off and Frame Rate to Custom, then restart Overwatch. Overwatch resets these whenever you change the graphics quality preset, so check them again after a preset change."),
         ("Why do my first matches stutter?","Your Mac prepares each of Overwatch’s graphics effects the first time it appears. The stutters fade as you play, and the prepared graphics are kept for next time."),
-        ("How do I play on an external monitor?","Overwatch opens on your main display, the one with the menu bar. In System Settings › Displays, select the monitor and set Use as to Main display. Then, in \(Brand.name)’s Settings, choose 16:9 (most monitors and TVs) and your monitor’s resolution, for example 2560 × 1440 for a 1440p monitor. Your choice saves right away and applies the next time Overwatch starts."),
+        ("How do I play on an external monitor?","Overwatch opens on your main display, the one with the menu bar. In System Settings › Displays, select the monitor and set Use as to Main display. Then choose your monitor’s resolution in Overwatch under Options › Video, for example 2560 × 1440 for a 1440p monitor or 5120 × 2160 for a 5K2K ultrawide. \(Brand.name) remembers it for that monitor, and your MacBook screen keeps its own."),
         ("“No compatible graphics hardware was found”","This can follow connecting or unplugging a display while Battle.net was open. Open Battle.net from \(Brand.name) rather than from the Dock: \(Brand.name) reopens it for your current displays."),
-        ("Which resolution should I choose?","Your display’s own resolution gives the sharpest picture; a smaller one runs faster and is scaled up to fill the screen. MacBook screens are 16:10, most monitors and TVs 16:9. Settings shows your main display and what each choice looks like on it."),
+        ("Which resolution should I choose?","Your display’s own resolution gives the sharpest picture; a smaller one runs faster and is scaled up to fill the screen. Change it in Overwatch under Options › Video, or in Settings › Fullscreen resolution, which shows what each size looks like on your main display."),
+        ("The game is black or the wrong size","Quit Overwatch, choose Settings › Reset Display Settings, then play again. Overwatch opens at 1080p; your graphics and FPS settings stay as they are."),
         ("I can’t find the game window","Select Overwatch or Battle.net in the Dock. If it’s still hidden, check your other desktops."),
         ("Battle.net shows a blank window","Close Battle.net, then open it again from \(Brand.name)."),
         ("Battle.net looks too big or cut off","Turn off Settings › Mac-sized Battle.net window, then close Battle.net and open it again from \(Brand.name)."),
         ("The game stopped responding","Choose Settings › Force Quit, then open Overwatch again. If it still won’t start, choose Settings › Repair Game Files."),
-        ("Which Macs can play?","Macs with Apple silicon on macOS 26 or later, with Rosetta. 16 GB of memory is recommended, and a new installation needs about 85–95 GB of storage."),
+        ("Which Macs can play?","Macs with Apple silicon on macOS 15 or later, with Rosetta. 16 GB of memory is recommended, and a new installation needs about 85–95 GB of storage."),
         ("How do I uninstall?","Choose Settings › Uninstall \(Brand.name). \(Brand.name), Battle.net and Overwatch move to the Trash; your Blizzard account isn’t affected."),
         ("Found a bug?","Choose Report a Problem to open an issue on GitHub, and attach a support report (below): it lists your setup, never account details."),
     ]
@@ -302,6 +362,7 @@ struct AboutSheet:View {
     @Bindable var model:AppModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
+    @State private var licenses=false
     private var version:String {
         "Version \(UpdateCheck.installed) · Build \(UpdateCheck.build)" + (model.release?.distribution == "private-preview" ? " · Private alpha" : "")
     }
@@ -317,7 +378,11 @@ struct AboutSheet:View {
             }
             HStack(spacing:12) {
                 RepositoryLink(compact:true)
-                Text("Open source. Contributions welcome.").font(LauncherStyle.font(12)).foregroundStyle(.secondary)
+                VStack(alignment:.leading,spacing:3) {
+                    Text("Open source. Contributions welcome.").foregroundStyle(.secondary)
+                    Button("Licenses") { licenses=true }.buttonStyle(.plain).underline()
+                        .foregroundStyle(.secondary).help("Show \(Brand.name)’s license and notices")
+                }.font(LauncherStyle.font(12))
             }
             LauncherPanel {
                 VStack(alignment:.leading,spacing:18) {
@@ -356,6 +421,41 @@ struct AboutSheet:View {
             }
         }.padding(28).frame(width:520,height:880,alignment:.top).tint(.primary)
             .background(LauncherStyle.ground(scheme))
+            .sheet(isPresented:$licenses) { LicensesSheet() }
+    }
+}
+/// Recall's own NOTICE and Apache 2.0 license as bundled, and a way to the third-party ones.
+struct LicensesSheet:View {
+    @Environment(\.dismiss) private var dismiss
+    private static func bundled(_ name:String,_ type:String)->String {
+        Bundle.main.url(forResource:name,withExtension:type).flatMap { try? String(contentsOf:$0,encoding:.utf8) } ?? ""
+    }
+    private let text=[bundled("NOTICE","txt"),bundled("PROJECT-LICENSE","txt")]
+        .map { $0.trimmingCharacters(in:.newlines) }.filter { !$0.isEmpty }.joined(separator:"\n\n\n")
+    private var thirdParty:URL? { Bundle.main.url(forResource:"Licenses",withExtension:nil) }
+    var body:some View {
+        VStack(spacing:24) {
+            SheetHero(symbol:"doc.text",title:"Licenses",
+                      subtitle:"\(Brand.name) is open source under the Apache License 2.0. Wine, DXMT and the other components it includes keep their own licenses.")
+            LauncherPanel {
+                ScrollView {
+                    Text(text.isEmpty ? "The license files are missing from this copy of \(Brand.name)." : text)
+                        .font(.system(size:10.5,design:.monospaced)).lineSpacing(2).textSelection(.enabled)
+                        .frame(maxWidth:.infinity,alignment:.leading)
+                }.frame(height:340)
+            }
+            HStack(spacing:16) {
+                if let thirdParty {
+                    Button("Third-Party Licenses") { NSWorkspace.shared.activateFileViewerSelecting([thirdParty]) }
+                        .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large)
+                        .help("Show the bundled third-party license files in Finder")
+                }
+                Spacer()
+                Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                    .controlSize(.large).keyboardShortcut(.defaultAction)
+            }
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:660)
+            .tint(.primary).background { LauncherBackground() }
     }
 }
 struct UninstallSheet:View {
