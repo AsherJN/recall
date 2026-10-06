@@ -140,9 +140,17 @@ private struct LauncherActionStyle: ButtonStyle {
 struct LauncherNotice: View {
     let text:String
     var symbol="info.circle"
+    /// A button under the text that does what it asks.
+    var action:(title:String, run:()->Void)?=nil
     var body:some View {
-        Label { Text(text).lineSpacing(3).fixedSize(horizontal:false,vertical:true) }
-            icon: { Image(systemName:symbol) }
+        Label {
+            VStack(alignment:.leading,spacing:12) {
+                Text(text).lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+                if let action {
+                    Button(action.title,action:action.run).buttonStyle(.bordered).buttonBorderShape(.capsule).foregroundStyle(.primary)
+                }
+            }
+        } icon: { Image(systemName:symbol) }
             .font(LauncherStyle.font(13)).foregroundStyle(.secondary)
             .padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))

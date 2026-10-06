@@ -172,7 +172,10 @@ def build(work, tools, headers, jobs):
     builddir.mkdir(exist_ok=True)
     with (logdir / 'wine.log').open('w') as log:
         configuration = builddir / '.portable-configuration'
-        if not (builddir / 'Makefile').exists() or not configuration.exists():
+        # 1.2 adds SDL2 (controllers other than PlayStation ones); an older tree is
+        # configured again so config.h gains SONAME_LIBSDL2.
+        if (not (builddir / 'Makefile').exists() or not configuration.exists()
+                or configuration.read_text() != 'vulkan-sdl2-enabled-v1\n'):
             run(['/usr/bin/arch', '-x86_64', wine / 'configure', '--prefix=/usr/local',
                  '--enable-archs=i386,x86_64', '--without-x', '--disable-tests',
                  '--without-gstreamer', '--with-vulkan',
@@ -182,18 +185,22 @@ def build(work, tools, headers, jobs):
                  'GNUTLS_LIBS=-L' + str(deps / 'lib') + ' -lgnutls',
                  'INOTIFY_CFLAGS=-I' + str(soju / 'third_party/libinotify-kqueue'),
                  'INOTIFY_LIBS=-L' + str(deps / 'lib') + ' -linotify',
+                 'SDL2_CFLAGS=-I' + str(work / 'clean-deps/include/SDL2'),
+                 'SDL2_LIBS=-L' + str(work / 'clean-deps/lib') + ' -lSDL2',
                  'LDFLAGS=-Wl,-headerpad,0x1000 -L' + str(deps / 'lib'), 'CFLAGS=' + flags,
                  'CROSSCFLAGS=' + flags,
                  'CC=/usr/bin/clang -arch x86_64', 'CXX=/usr/bin/clang++ -arch x86_64'],
                 cwd=builddir, env=env, stdout=log, stderr=subprocess.STDOUT)
-            configuration.write_text('vulkan-enabled-v1\n')
+            configuration.write_text('vulkan-sdl2-enabled-v1\n')
         config = builddir / 'include/config.h'
         text = config.read_text()
-        for required in ('#define HAVE_SYS_INOTIFY_H 1', '#define SONAME_LIBGNUTLS ', '#define SONAME_LIBFREETYPE '):
+        for required in ('#define HAVE_SYS_INOTIFY_H 1', '#define SONAME_LIBGNUTLS ', '#define SONAME_LIBFREETYPE ',
+                         '#define SONAME_LIBSDL2 '):
             if required not in text:
                 raise RuntimeError('Wine lacks a required dependency: ' + required)
         for name, library in [('GNUTLS', 'libgnutls.30.dylib'), ('FREETYPE', 'libfreetype.6.dylib'),
-                              ('VULKAN', 'libMoltenVK.dylib'), ('MOLTENVK', 'libMoltenVK.dylib')]:
+                              ('VULKAN', 'libMoltenVK.dylib'), ('MOLTENVK', 'libMoltenVK.dylib'),
+                              ('SDL2', 'libSDL2-2.0.0.dylib')]:
             text = re.sub(r'#define SONAME_LIB' + name + r' .*',
                           '#define SONAME_LIB' + name + ' "@rpath/' + library + '"', text)
         if config.read_text() != text:config.write_text(text)
@@ -234,7 +241,7 @@ def build(work, tools, headers, jobs):
               'v1_patches': V1_PATCHES,
               'gnutls_header_sha256': sha(headers / 'gnutls/gnutls.h'),
               'minimum_macos': '26.0', 'runtime_scope': 'Wine + FreeType built from source; DXMT assembly is separate',
-              'without_vulkan': False, 'without_gstreamer': True,
+              'without_vulkan': False, 'without_gstreamer': True, 'with_sdl2': True,
               'native_linker_header_padding': '0x1000',
               'windows_compiler_paths_remapped': True,
               'driver_matches_accepted_patch': True}
@@ -267,4 +274,6 @@ if __name__ == '__main__':
         headers = (args.gnutls_headers or work / 'clean-deps/include').resolve()
         if not (headers / 'gnutls/gnutls.h').is_file():
             parser.error('Build the pinned native dependencies first, or supply --gnutls-headers')
+        if not (work / 'clean-deps/include/SDL2/SDL.h').is_file():
+            parser.error('Build the pinned native dependencies first: SDL2 is missing')
         build(work, args.toolchains.resolve(), headers, args.jobs)

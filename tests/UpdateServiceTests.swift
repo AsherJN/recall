@@ -66,6 +66,13 @@ import Foundation
         let markedOnTahoe=try UpdateCheck.parse(release("v1.1.0",assets:[disk("1.1.0")],body:marked),current:"1.0.0",system:"26.6.2")
         precondition(unmarkedOnSequoia == nil && tahoeOnlyOnSequoia == nil && markedOnSequoia?.version == "1.1.0")
         precondition(unmarkedOnTahoe?.version == "1.1.0" && markedOnTahoe?.notes.count == 2)
+        // From 1.2 a release needs macOS 26.5 (Overwatch hangs under older Rosetta): offered on 26.5 and later only.
+        let needs265=notes+"\n<!-- minimum-macos: 26.5 -->\n"
+        precondition(UpdateCheck.minimumMacOS(needs265) == "26.5")
+        for (system,offered) in [("15.8.1",false),("26.4.1",false),("26.5",true),("26.6.2",true),("27.0",true)] {
+            let update=try UpdateCheck.parse(release("v1.2.0",assets:[disk("1.2.0")],body:needs265),current:"1.1.0",system:system)
+            precondition((update?.version == "1.2.0") == offered,"1.2.0 on macOS \(system)")
+        }
         print("PASS: version order, release parsing, drafts/pre-releases, unusable and insecure assets, renamed images, notes, minimum macOS")
 
         let args=CommandLine.arguments

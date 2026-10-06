@@ -70,7 +70,55 @@ import Foundation
         // A 5K display at its default 2x: Overwatch lists 5120 x 2880.
         let fiveK=MainDisplay(name:"Studio Display",builtIn:false,points:CGSize(width:2560,height:1440),pixels:CGSize(width:5120,height:2880))
         precondition(fiveK.fits(r(5120,2880)) && fiveK.caption(for:r(5120,2880)).hasPrefix("Matches your main display exactly"))
-        if let main=MainDisplay.current { print("main display:",main.name,main.size,main.aspect) }
+
+        // Scaled modes (issue #9). The owner's LG ULTRAGEAR as macOS lists it: 2560 x 1440
+        // native up to 144 Hz, its sharp 1280 x 720 twin, 1920 x 1080 at 1x, and 1920 x 1080
+        // drawn at 3840 x 2160 at 50 Hz and below.
+        func m(_ w:Int,_ h:Int,_ pw:Int,_ ph:Int,_ hz:Double,native:Bool=false) -> DisplayMode {
+            DisplayMode(points:CGSize(width:w,height:h),pixels:CGSize(width:pw,height:ph),refresh:hz,native:native)
+        }
+        // The note keeps numbers and units on one line with no-break spaces.
+        func plain(_ note:String?) -> String? { note?.replacingOccurrences(of:"\u{00A0}",with:" ") }
+        let lgModes=[144.0,120,100,60].flatMap { [m(2560,1440,2560,1440,$0,native:true),m(1280,720,2560,1440,$0,native:true),m(1920,1080,1920,1080,$0)] } +
+            [50.0,30].map { m(1920,1080,3840,2160,$0) }
+        let lg=MainDisplay(name:"LG ULTRAGEAR",builtIn:false,points:CGSize(width:2560,height:1440),scale:1,refresh:144,modes:lgModes)
+        precondition(lg.native == CGSize(width:2560,height:1440) && lg.pixels == lg.native && lg.scalingNote == nil)
+        precondition(lg.caption(for:r(2560,1440)).hasPrefix("Matches your main display exactly"))
+        // The player's setup: "1920 x 1080" drawn at 3840 x 2160 and shrunk to the 1440p screen.
+        let scaled=MainDisplay(name:"LG ULTRAGEAR",builtIn:false,points:CGSize(width:1920,height:1080),scale:2,refresh:50,modes:lgModes)
+        precondition(scaled.drawn == CGSize(width:3840,height:2160) && scaled.pixels == CGSize(width:2560,height:1440) && scaled.size == "2560 × 1440")
+        precondition(plain(scaled.scalingNote) == "macOS is resizing everything on this monitor, so Overwatch looks softer than it should and runs at 50 Hz instead of 144 Hz. To fix it, close Overwatch and set this monitor to 2560 × 1440 at 144 Hz.")
+        precondition(scaled.scalingNote!.contains("2560\u{00A0}×\u{00A0}1440 at 144\u{00A0}Hz."))
+        // Settings no longer calls 3840 x 2160 an exact match there, and the fit rule is unchanged.
+        precondition(scaled.caption(for:r(2560,1440)).hasPrefix("Matches your main display exactly"))
+        precondition(scaled.caption(for:r(3840,2160)).hasPrefix("Larger than your main display"))
+        precondition(scaled.fits(r(3840,2160)) && !scaled.fits(r(3840,2400)))
+        // 1920 x 1080 at 1x on the same monitor: drawn smaller and stretched.
+        let low=MainDisplay(name:"LG ULTRAGEAR",builtIn:false,points:CGSize(width:1920,height:1080),scale:1,refresh:144,modes:lgModes)
+        precondition(plain(low.scalingNote) == "macOS is resizing everything on this monitor, so Overwatch looks softer than it should. To fix it, close Overwatch and set this monitor to 2560 × 1440.")
+        // The sharp 1280 x 720 twin is drawn at the screen's pixels: no note.
+        precondition(MainDisplay(name:"LG",builtIn:false,points:CGSize(width:1280,height:720),scale:2,refresh:144,modes:lgModes).scalingNote == nil)
+        // A 4K monitor at "2560 x 1440" (drawn at 5120 x 2880): its sharp choice is 1920 x 1080.
+        let uhdModes=[60.0].flatMap { [m(3840,2160,3840,2160,$0,native:true),m(1920,1080,3840,2160,$0,native:true),m(2560,1440,5120,2880,$0),m(1920,1080,1920,1080,$0)] }
+        let uhdScaled=MainDisplay(name:"4K",builtIn:false,points:CGSize(width:2560,height:1440),scale:2,refresh:60,modes:uhdModes)
+        precondition(plain(uhdScaled.scalingNote) == "macOS is resizing everything on this monitor, so Overwatch looks softer than it should. To fix it, close Overwatch and set this monitor to 1920 × 1080.")
+        precondition(MainDisplay(name:"4K",builtIn:false,points:CGSize(width:1920,height:1080),scale:2,refresh:60,modes:uhdModes).scalingNote == nil)
+        // A 4K TV at 1920 x 1080 1x: the sharp choice has the same name.
+        let tv=MainDisplay(name:"TV",builtIn:false,points:CGSize(width:1920,height:1080),scale:1,refresh:60,modes:uhdModes)
+        precondition(plain(tv.scalingNote)!.hasSuffix("set this monitor to 1920 × 1080, not the “low resolution” one."))
+        // A 13-inch MacBook Air at its default, drawn 2940 x 1912 for a 2560 x 1664 screen: no
+        // note, and the area below the camera is the screen's own 2560 x 1600.
+        let airModes=[m(1470,956,2940,1912,60),m(1280,832,2560,1664,60,native:true),m(2560,1664,2560,1664,60,native:true)]
+        let airDefault=MainDisplay(name:"Built-in",builtIn:true,points:CGSize(width:1470,height:956),scale:2,cameraInset:956.0*64/1664,refresh:60,modes:airModes)
+        precondition(airDefault.scalingNote == nil && airDefault.pixels == CGSize(width:2560,height:1600))
+        precondition(airDefault.caption(for:r(2560,1600)).hasPrefix("Matches your main display exactly"))
+        // No native mode reported (a virtual or unusual display): today's behaviour, no note.
+        let unknown=MainDisplay(name:"Virtual",builtIn:false,points:CGSize(width:1920,height:1080),scale:2,modes:[m(1920,1080,3840,2160,60)])
+        precondition(unknown.native == nil && unknown.pixels == CGSize(width:3840,height:2160) && unknown.scalingNote == nil)
+
+        if let main=MainDisplay.current {
+            print("main display:",main.name,main.size,main.aspect,"drawn",main.drawn,"native",main.native as Any,"note",main.scalingNote ?? "none")
+        }
         print("display options: all checks passed")
     }
 }

@@ -195,6 +195,84 @@ class DerivationChain(unittest.TestCase):
         self.assertEqual(derive_runtime.chain_replacement('a', 'lib/y.so'), {})
 
 
+class Controllers(unittest.TestCase):
+    """1.2: winebus built with SDL2 replaces the base's; the SDL2 library (packaged as the
+    assembler packages a dependency) and its license are added; nothing else changes."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ow2-controllers-')
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name)
+        for name, value in (('ARTIFACTS', folder / 'artifacts'), ('NATIVE', folder / 'native'),
+                            ('CLEAN_DEPS', folder / 'clean-deps')):
+            self.addCleanup(setattr, derive_runtime, name, getattr(derive_runtime, name))
+            setattr(derive_runtime, name, value)
+        source = folder / 'probe.c'
+        source.write_text('int probe(void) { return 1; }\n')
+
+        def library(path, install_name, *rpaths):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-mmacosx-version-min=26.0', '-dynamiclib', source,
+                            '-install_name', install_name, *[f'-Wl,-rpath,{r}' for r in rpaths], '-o', path], check=True)
+            return path
+        base = folder / 'artifacts/base'
+        winebus = library(base / derive_runtime.WINEBUS, '@rpath/winebus.so', '@loader_path', '@loader_path/../..')
+        (base / 'bin').mkdir(parents=True)
+        (base / 'bin/wine').write_text('wine')
+        files = {name: {'sha256': derive_runtime.sha(base / name)} for name in ('bin/wine', derive_runtime.WINEBUS)}
+        (base / 'runtime.json').write_text(json.dumps({'version': 'base', 'minimum_macos': '15.0', 'files': files}))
+        write_archive(base)
+        (folder / 'artifacts/base.tar.json').write_text(json.dumps(
+            {'version': 'base', 'signed_native_components': 1, 'dependency_names': ['libfreetype.6.dylib'],
+             'removed': ['licenses/PROJECT-MIT']}))
+        self.sdl2 = library(folder / 'clean-deps/lib/libSDL2-2.0.0.dylib',
+                            str(folder / 'clean-deps/lib/libSDL2-2.0.0.dylib'), str(folder / 'clean-deps/lib'))
+        (folder / 'clean-deps/licenses/sdl2').mkdir(parents=True)
+        (folder / 'clean-deps/licenses/sdl2/LICENSE.txt').write_text('zlib\n')
+        built = library(folder / 'native/winebus/current/winebus.so', '@rpath/winebus.so', '@loader_path', '@loader_path/../..')
+        subprocess.run(['/usr/bin/strip', '-x', built], check=True)  # differs from the base's file
+        (built.parent / 'manifest.json').write_text(json.dumps(
+            {'component': 'winebus', 'sha256': derive_runtime.sha(built), 'base_sha256': derive_runtime.sha(winebus),
+             'sdl2': {'version': '2.32.10', 'library_sha256': derive_runtime.sha(self.sdl2), 'config_sha256': 'c'}}))
+        self.artifacts = folder / 'artifacts'
+
+    def test_winebus_is_replaced_and_sdl2_added_as_a_runtime_library(self):
+        derive_runtime.derive_controllers('base', 'next', '-')
+        manifest = check_archive(self.artifacts / 'next.tar.gz')
+        self.assertEqual(sorted(manifest['files']), sorted(['bin/wine', derive_runtime.WINEBUS,
+                                                           derive_runtime.SDL2_LIBRARY, derive_runtime.SDL2_LICENSE]))
+        library = self.artifacts / 'next' / derive_runtime.SDL2_LIBRARY
+        self.assertEqual(subprocess.check_output(['otool', '-D', str(library)], text=True).splitlines()[1],
+                         '@rpath/libSDL2-2.0.0.dylib')
+        rpaths = subprocess.check_output(['otool', '-l', str(library)], text=True)
+        self.assertEqual(rpaths.count('cmd LC_RPATH'), 1)
+        self.assertIn('path @loader_path (offset', rpaths)
+        self.assertEqual(file_minimum(library)[1], parse_macos('15.0'))
+        derived = manifest['derived_from']
+        self.assertEqual(derived['replaced'][derive_runtime.WINEBUS]['sdl2']['version'], '2.32.10')
+        self.assertEqual(sorted(derived['added']), [derive_runtime.SDL2_LIBRARY, derive_runtime.SDL2_LICENSE])
+        proof = json.loads((self.artifacts / 'next.tar.json').read_text())
+        self.assertEqual((proof['dependency_names'], proof['signed_native_components'], 'removed' in proof),
+                         (['libSDL2-2.0.0.dylib', 'libfreetype.6.dylib'], 2, False))
+
+    def test_another_sdl2_build_or_a_runtime_that_has_one_is_refused(self):
+        derive_runtime.derive_controllers('base', 'next', '-')
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_controllers('next', 'again', '-')
+        subprocess.run(['/usr/bin/strip', '-x', self.sdl2], check=True)
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_controllers('base', 'other', '-')
+
+    def test_a_library_with_a_non_system_dependency_is_refused(self):
+        other = self.sdl2.parent / 'libother.dylib'
+        shutil.copy2(self.sdl2, other)
+        subprocess.run(['install_name_tool', '-id', str(other), other], check=True)
+        linked = self.sdl2.parent / 'linked.dylib'
+        subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-dynamiclib', str(other), '-x', 'c', '/dev/null',
+                        '-o', linked], check=True)
+        with self.assertRaises(ValueError):
+            derive_runtime.package_dependency(linked)
+
+
 class GameModeApp(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='ow2-game-mode-app-')

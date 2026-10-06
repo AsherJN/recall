@@ -196,7 +196,8 @@ static void preflight(void) {
     int silicon=0;size_t size=sizeof(silicon);
     sysctlbyname("hw.optional.arm64",&silicon,&size,NULL,0);
     if(!silicon)fail(@"apple_silicon_required");
-    if(NSProcessInfo.processInfo.operatingSystemVersion.majorVersion<15)fail(@"macos_15_required");
+    // Overwatch needs Rosetta's fixes in macOS 26.5; on older macOS it hangs before its window opens.
+    if(![NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){26,5,0}])fail(@"macos_26_5_required");
     if(waitTask(task(@"/usr/bin/arch",@[@"-x86_64",@"/usr/bin/true"],nil,@"rosetta-check.log"),10))fail(@"rosetta_required");
     event(@"preflight_ok",@{@"free_bytes":@(freeBytes()),@"runtime_headroom_bytes":@(6ULL<<30)});
 }

@@ -79,17 +79,17 @@ Swift suites (scratch data only; the optional arguments run real installs from
 a notarized Developer ID build and never touch /Applications):
 
 ```sh
-swiftc -O -target arm64-apple-macos15.0 -parse-as-library app/Sources/Brand.swift \
+swiftc -O -target arm64-apple-macos26.5 -parse-as-library app/Sources/Brand.swift \
   app/Sources/SetupService.swift app/Sources/UpdateService.swift tests/UpdateServiceTests.swift \
   -o runtime/phase-3/update-tests
 runtime/phase-3/update-tests [<scratch app copy> <newer notarized DMG> <its version>]
-swiftc -O -target arm64-apple-macos15.0 -parse-as-library app/Sources/Brand.swift \
+swiftc -O -target arm64-apple-macos26.5 -parse-as-library app/Sources/Brand.swift \
   app/Sources/SetupService.swift app/Sources/UpdateService.swift app/Sources/AppLocation.swift \
   tests/AppLocationTests.swift -o runtime/phase-3/location-tests
 runtime/phase-3/location-tests [<notarized app> <empty scratch folder>]
-swiftc -O -target arm64-apple-macos15.0 -parse-as-library app/Sources/InstallLocation.swift \
+swiftc -O -target arm64-apple-macos26.5 -parse-as-library app/Sources/InstallLocation.swift \
   tests/InstallLocationTests.swift -o runtime/phase-3/install-location-tests
-swiftc -O -target arm64-apple-macos15.0 -parse-as-library app/Sources/DisplayOptions.swift \
+swiftc -O -target arm64-apple-macos26.5 -parse-as-library app/Sources/DisplayOptions.swift \
   tests/DisplayOptionsTests.swift -o runtime/phase-3/display-options-tests
 runtime/phase-3/display-options-tests   # from the repository root
 ```

@@ -26,7 +26,7 @@ stutter. The mode was made by u/Working_Dealer_5102.
 | | |
 |---|---|
 | Mac | Apple Silicon (M1 or newer). Intel Macs won't work. |
-| macOS | macOS Sequoia (15) or later required. |
+| macOS | macOS Tahoe 26.5 or later required. |
 | Memory | 16 GB recommended. Macs with less can still install and try it. |
 | Storage | 85–95 GB free, on your Mac or an external SSD (APFS or Mac OS Extended) |
 | Also | A Blizzard account, an internet connection, and Rosetta |

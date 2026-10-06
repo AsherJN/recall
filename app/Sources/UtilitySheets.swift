@@ -123,7 +123,12 @@ struct SettingsSheet:View {
         let current=model.resolution
         let shape=current.isSupported ? current.shape : DisplayResolution.initial(for:main).shape
         return VStack(alignment:.leading,spacing:12) {
-            if let main { mainDisplay(main) }
+            if let main {
+                mainDisplay(main)
+                if let note=main.scalingNote {
+                    LauncherNotice(text:note,symbol:"exclamationmark.triangle",action:("Open Display Settings",Self.openDisplaySettings))
+                }
+            }
             Text("Overwatch opens on the main display, the one with the menu bar. To use another, choose Displays… and set it as the main display.")
                 .font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             VStack(alignment:.leading,spacing:4) {
@@ -177,11 +182,12 @@ struct SettingsSheet:View {
                 Text("Main display · \(main.size) · \(main.aspect)").font(LauncherStyle.font(12)).foregroundStyle(.secondary).monospacedDigit()
             }
             Spacer(minLength:8)
-            Button("Displays…") {
-                NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.Displays-Settings.extension")!)
-            }.buttonStyle(.bordered).buttonBorderShape(.capsule).help("Open System Settings › Displays")
+            Button("Displays…",action:Self.openDisplaySettings).buttonStyle(.bordered).buttonBorderShape(.capsule).help("Open System Settings › Displays")
         }.padding(12).background(.primary.opacity(0.04),in:RoundedRectangle(cornerRadius:14,style:.continuous))
             .accessibilityElement(children:.combine)
+    }
+    static func openDisplaySettings() {
+        NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.Displays-Settings.extension")!)
     }
     private func choice(_ title:String, selected:Bool, dimmed:Bool=false, _ action:@escaping ()->Void) -> some View {
         Button(action:action) {
@@ -279,7 +285,7 @@ struct HelpSheet:View {
         ("Battle.net shows a blank window","Close Battle.net, then open it again from \(Brand.name)."),
         ("Battle.net looks too big or cut off","Turn off Settings › Mac-sized Battle.net window, then close Battle.net and open it again from \(Brand.name)."),
         ("The game stopped responding","Choose Settings › Force Quit, then open Overwatch again. If it still won’t start, choose Settings › Repair Game Files."),
-        ("Which Macs can play?","Macs with Apple silicon on macOS 15 or later, with Rosetta. 16 GB of memory is recommended, and a new installation needs about 85–95 GB of storage."),
+        ("Which Macs can play?","Macs with Apple silicon on macOS 26.5 or later, with Rosetta. 16 GB of memory is recommended, and a new installation needs about 85–95 GB of storage."),
         ("How do I uninstall?","Choose Settings › Uninstall \(Brand.name). \(Brand.name), Battle.net and Overwatch move to the Trash; your Blizzard account isn’t affected."),
         ("Found a bug?","Choose Report a Problem to open an issue on GitHub, and attach a support report (below): it lists your setup, never account details."),
     ]

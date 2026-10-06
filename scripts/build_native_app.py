@@ -19,7 +19,7 @@ ROOT=Path(__file__).resolve().parents[1]
 # The bundle and executable name players see; Brand.swift holds the in-app
 # copy. The bundle identifier keeps its original value so updates carry over.
 APP_NAME='Recall'
-APP_BUILD='36'
+APP_BUILD='38'
 RESOURCES=('MosaicLogo.png','LinkedInMark.png','AuthorPhoto.jpg','Wordmark.png','WordmarkDark.png')
 def run(*args):subprocess.run([str(a) for a in args],check=True)
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -29,8 +29,9 @@ def build(output,workspace,runtime_archive,icon=None,identity=None):
     # The worker rejects any file its manifest does not list, so check before shipping.
     if check_archive(runtime_archive)['version']!=release['runtimeVersion']:raise ValueError('Runtime archive names a different version')
     # Every engine binary must open on the app's minimum macOS (derive_runtime.py --minimum-macos re-stamps them).
+    # An engine stamped older (1.1's 15.0) is fine: the app is what refuses older macOS.
     newest,declared=archive_minimum(runtime_archive)
-    if newest>parse_macos(MINIMUM_MACOS) or declared!=MINIMUM_MACOS:
+    if newest>parse_macos(MINIMUM_MACOS) or parse_macos(declared)>parse_macos(MINIMUM_MACOS):
         raise ValueError(f'The runtime needs macOS {format_macos(newest)} (manifest: {declared}); the app supports {MINIMUM_MACOS}')
     if output.exists():raise ValueError('Choose a new output bundle; previous candidates are retained')
     helpers=output/'Contents/Helpers';resources=output/'Contents/Resources';macos=output/'Contents/MacOS'

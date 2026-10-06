@@ -108,12 +108,13 @@ def assemble(work,version,identity):
     shutil.copytree(work/'clean-deps/licenses',dest/'licenses/native')
     for name in ['FTL.TXT','GPLv2.TXT']:
         copy(work/'sources/freetype/freetype-2.13.3/docs'/name,dest/'licenses/freetype'/name)
-    # Resolve only native libraries referenced by this runtime, plus three
-    # explicitly dlopened dependencies. No unused graphical backend is copied.
+    # Resolve only native libraries referenced by this runtime, plus four
+    # explicitly dlopened dependencies (SDL2 for winebus's controllers, 1.2).
+    # No unused graphical backend is copied.
     available={p.name:p for p in (work/'clean-deps/lib').glob('*.dylib')}
     available['libfreetype.6.dylib']=work/'deps/lib/libfreetype.6.dylib'
     native=[p for p in dest.rglob('*') if macho(p) and p!=dest/'lib/external/libd3dshared.dylib']
-    needed={'libgnutls.30.dylib','libfreetype.6.dylib','libMoltenVK.dylib'};chosen={}
+    needed={'libgnutls.30.dylib','libfreetype.6.dylib','libMoltenVK.dylib','libSDL2-2.0.0.dylib'};chosen={}
     for p in native:
         for dep in links(p):
             if Path(dep).name in available:needed.add(Path(dep).name)

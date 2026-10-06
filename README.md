@@ -10,7 +10,7 @@
   <a href="https://github.com/AsherJN/recall/releases/latest"><img src="https://img.shields.io/badge/Download_for_Mac_%C2%B7_Free-FFAA2E?style=for-the-badge" height="40" alt="Download Recall for Mac, free"></a>
 </p>
 
-<p align="center"><sub>M1 or newer · macOS Sequoia 15 or later · Notarized by Apple</sub></p>
+<p align="center"><sub>M1 or newer · macOS 26.5 or later · Notarized by Apple</sub></p>
 
 <p align="center"><sub>Made by Josh · <a href="#why-i-built-recall">Support the project</a></sub></p>
 
@@ -80,7 +80,7 @@ CrossOver is the right tool if you play many Windows games. If Overwatch is your
 | You need | |
 |---|---|
 | Mac | Apple Silicon: M1 or newer. Intel Macs aren't supported. |
-| macOS | macOS Sequoia 15 or later |
+| macOS | macOS Tahoe 26.5 or later |
 | Memory | 16 GB recommended |
 | Storage | 85–95 GB free, on your Mac or an external SSD |
 | Also | A free Blizzard account, an internet connection, and Rosetta (Recall checks for it during setup) |

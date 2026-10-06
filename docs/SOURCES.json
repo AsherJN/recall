@@ -66,6 +66,22 @@
    "version": "2.13.3",
    "url": "https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.gz"
   },
+  "sdl2": {
+   "version": "2.32.10",
+   "url": "https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz",
+   "sha256": "5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165",
+   "license": "Zlib",
+   "configure_options": [
+    "--disable-joystick-mfi",
+    "--disable-audio",
+    "--disable-video",
+    "--disable-render",
+    "--disable-sensor",
+    "--disable-power",
+    "--disable-hidapi-libusb"
+   ],
+   "purpose": "Wine's controller bus (winebus) reads every controller except PlayStation ones through SDL2"
+  },
   "wine_mono": {
    "version": "10.4.1",
    "url": "https://github.com/wine-mono/wine-mono/releases/download/wine-mono-10.4.1/wine-mono-10.4.1-x86.tar.xz",

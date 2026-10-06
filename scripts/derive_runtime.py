@@ -38,6 +38,10 @@ field. The other modes stamp the files they replace with the base's minimum.
 
 --relicense (1.1) replaces the project's MIT license in licenses/ with the Apache 2.0
 license and NOTICE from this tree; text files only, so it needs no signing identity.
+
+--controllers (1.2) replaces the controller bus with build_wine_native.py's winebus,
+built with SDL2, and adds that SDL2 library (build_portable_dependencies.py --only sdl2,
+packaged and signed as the assembler packages a dependency) and its license.
 """
 import argparse
 import hashlib
@@ -419,12 +423,35 @@ def derive_components(base_version, version, identity, dxmt_workspace):
     replace_files(base, dest, base_version, version, identity, manifest, sources, replaced)
 
 
-def replace_files(base, dest, base_version, version, identity, manifest, sources, replaced, game_mode=False):
+def package_dependency(path):
+    """assemble_portable_runtime.py's treatment of a native library it copies into lib/: symbols
+    stripped, identified as @rpath/<name>, rpath @loader_path, system dependencies only."""
+    run('/usr/bin/strip', '-S', '-x', path, stderr=subprocess.DEVNULL)
+    links = subprocess.check_output(['otool', '-L', str(path)], text=True).splitlines()[2:]  # [1] is its own id
+    for dep in (line.strip().split(' (')[0] for line in links):
+        if not dep.startswith(('/usr/lib/', '/System/Library/')):
+            raise ValueError(f'Unexpected dependency in {path.name}: {dep}')
+    run('install_name_tool', '-id', '@rpath/' + path.name, path, stderr=subprocess.DEVNULL)
+    old = re.findall(r'cmd LC_RPATH\n\s+cmdsize \d+\n\s+path (.*?) \(offset',
+                     subprocess.check_output(['otool', '-l', str(path)], text=True))
+    for entry in old:
+        if entry != '@loader_path':
+            run('install_name_tool', '-delete_rpath', entry, path, stderr=subprocess.DEVNULL)
+    if '@loader_path' not in old:
+        run('install_name_tool', '-add_rpath', '@loader_path', path, stderr=subprocess.DEVNULL)
+
+
+def replace_files(base, dest, base_version, version, identity, manifest, sources, replaced, game_mode=False,
+                  additions=None):
     """Clone the base, put each source at its relative path (native files signed as the
-    assembler signs them), add the game app if asked, record the changes and archive;
-    nothing else may differ."""
+    assembler signs them), add the game app if asked and each of ADDITIONS ({relative:
+    (source, record)}: a library packaged as the assembler packages a dependency, or a
+    text file), record the changes and archive; nothing else may differ."""
+    additions = additions or {}
     if game_mode and game_mode_app.BUNDLE in {str(Path(f).parent.parent.parent) for f in manifest['files']}:
         raise ValueError(f'{base_version} already has the game app')
+    if any(relative in manifest['files'] for relative in additions):
+        raise ValueError(f'{base_version} already has ' + ', '.join(r for r in additions if r in manifest['files']))
     run('/bin/cp', '-Rc', base, dest)  # APFS clone: only replaced files take space
     entitlements = dest.parent / f'{version}-entitlements.plist'
     entitlements.write_bytes(plistlib.dumps({name: True for name in ENTITLEMENTS}))
@@ -448,16 +475,33 @@ def replace_files(base, dest, base_version, version, identity, manifest, sources
             run('codesign', '--verify', '--strict', target)
     finally:
         entitlements.unlink(missing_ok=True)
+    for relative, (source, _) in additions.items():
+        target = dest / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        if target.suffix != '.dylib':
+            target.chmod(0o644)
+            continue
+        target.chmod(0o755)
+        package_dependency(target)
+        check_paths(target)
+        restamp(target, parse_macos(manifest.get('minimum_macos', '26.0')))
+        run('codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity, target,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run('codesign', '--verify', '--strict', target)
     # Made after the replacements, from the loader the runtime ships (signed as it is).
     added = game_mode_app.make(dest, manifest.get('minimum_macos', '26.0'), identity) if game_mode else []
 
     manifest['version'] = version
-    for relative in [*sources, *added]:
+    for relative in [*sources, *added, *additions]:
         manifest['files'][relative] = {'sha256': sha(dest / relative), 'bytes': (dest / relative).stat().st_size}
     manifest['derived_from'] = {'version': base_version, 'archive_sha256': sha(str(base) + '.tar.gz'), 'replaced': replaced}
     if added:
         manifest['derived_from']['added'] = {relative: {'built_by': 'scripts/game_mode_app.py',
                                                         'from': game_mode_app.LOADER} for relative in added}
+    if additions:
+        manifest['derived_from'].setdefault('added', {}).update({r: record for r, (_, record) in additions.items()})
+    added = [*added, *additions]
     (dest / 'runtime.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
     before, after = tree(base), tree(dest)
@@ -467,12 +511,17 @@ def replace_files(base, dest, base_version, version, identity, manifest, sources
 
     archive = write_archive(dest)
     base_proof = json.loads(Path(str(base) + '.tar.json').read_text())
-    base_proof.pop('restamped', None)  # the base's own record, not this derivation's
+    for key in ('restamped', 'removed', 'added', 'repackaged_from'):
+        base_proof.pop(key, None)  # the base's own records, not this derivation's
     result = dict(base_proof, version=version, archive_sha256=sha(archive), archive_bytes=archive.stat().st_size,
                   unpacked_file_bytes=sum(v.get('bytes', 0) for v in manifest['files'].values()),
                   files=len(manifest['files']), derived_from=base_version, replaced=sorted(sources))
     if added:
         result['added'] = added
+    libraries = [Path(r).name for r in additions if r.endswith('.dylib')]
+    if libraries and 'dependency_names' in result:
+        result['dependency_names'] = sorted({*result['dependency_names'], *libraries})
+        result['signed_native_components'] = result.get('signed_native_components', 0) + len(libraries)
     archive.with_suffix('.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))
 
@@ -656,6 +705,43 @@ def derive_native(base_version, version, identity, components, game_mode=False):
     replace_files(base, dest, base_version, version, identity, manifest, sources, replaced, game_mode)
 
 
+WINEBUS = 'lib/wine/x86_64-unix/winebus.so'
+SDL2_LIBRARY = 'lib/libSDL2-2.0.0.dylib'
+SDL2_LICENSE = 'licenses/native/sdl2/LICENSE.txt'
+CLEAN_DEPS = ROOT / 'runtime/phase-2/clean-deps'
+
+
+def derive_controllers(base_version, version, identity):
+    """1.2: winebus built with SDL2 replaces the base's, and that SDL2 library and its license
+    are added, so Wine reads Xbox (and every other non-PlayStation) controller."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
+        raise ValueError('Invalid runtime version')
+    base, dest = ARTIFACTS / base_version, ARTIFACTS / version
+    if dest.exists() or Path(str(dest) + '.tar.gz').exists():
+        raise ValueError('Use a new version; existing artifact is never overwritten')
+    manifest = json.loads((base / 'runtime.json').read_text())
+    if manifest['version'] != base_version:
+        raise ValueError('The base artifact names a different version')
+    build = json.loads((NATIVE / 'winebus/current/manifest.json').read_text())
+    built = NATIVE / 'winebus/current/winebus.so'
+    library, license_text = CLEAN_DEPS / 'lib/libSDL2-2.0.0.dylib', CLEAN_DEPS / 'licenses/sdl2/LICENSE.txt'
+    if build['sha256'] != sha(built) or 'sdl2' not in build:
+        raise ValueError('Rebuild winebus: its build manifest does not match the file or lacks SDL2')
+    if build['sdl2']['library_sha256'] != sha(library):
+        raise ValueError('winebus was built against another SDL2 build than ' + str(library))
+    # Builds without a patch start from the shipped file: the chain's original winebus.
+    if build['base_sha256'] != chain_original(base_version, WINEBUS, 'sdl2'):
+        raise ValueError('winebus was built against a different base runtime')
+    replaced = {WINEBUS: {'build_sha256': build['sha256'], 'built_by': 'scripts/build_wine_native.py winebus',
+                          'sdl2': build['sdl2']}}
+    additions = {SDL2_LIBRARY: (library, {'built_by': 'scripts/build_portable_dependencies.py --only sdl2',
+                                          'build_sha256': build['sdl2']['library_sha256'],
+                                          'version': build['sdl2']['version']}),
+                 SDL2_LICENSE: (license_text, {'from': 'SDL2-' + build['sdl2']['version'] + '/LICENSE.txt'})}
+    replace_files(base, dest, base_version, version, identity, manifest, {WINEBUS: built}, replaced,
+                  additions=additions)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--base-version', required=True)
@@ -675,6 +761,8 @@ if __name__ == '__main__':
                              '(e.g. 15.0), re-signing each as before')
     parser.add_argument('--relicense', action='store_true',
                         help="Replace the project's MIT license file with the Apache 2.0 license and NOTICE")
+    parser.add_argument('--controllers', action='store_true',
+                        help='Replace winebus with the SDL2 build and add the SDL2 library and its license')
     args = parser.parse_args()
     if args.repackage:
         repackage(args.base_version, args.version)
@@ -682,6 +770,8 @@ if __name__ == '__main__':
         relicense(args.base_version, args.version)
     elif not args.identity:
         parser.error('--identity is required to replace components')
+    elif args.controllers:
+        derive_controllers(args.base_version, args.version, args.identity)
     elif args.minimum_macos:
         restamp_runtime(args.base_version, args.version, args.identity, args.minimum_macos)
     elif args.native:

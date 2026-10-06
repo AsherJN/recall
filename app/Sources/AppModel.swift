@@ -82,8 +82,6 @@ final class AppModel {
     var isPreview=false
     /// This Mac's macOS ("15.6.1"); a private preview can stand in another with --preview-macos.
     var macOS=UpdateCheck.system
-    /// Recall is built and tuned on macOS 26; on Sequoia, first setup asks players how it runs.
-    var onSequoia: Bool { (UpdateCheck.parts(macOS)?.first ?? 26) < 26 }
     private var started=false
     private var paused=false
     private let fm=FileManager.default
@@ -797,7 +795,12 @@ final class AppModel {
     }
     func makeReport() {
         let allowedCodes:Set<String>=["cancelled","insufficient_disk_space","rosetta_required","download_hash_mismatch","download_interrupted_retry_to_resume","battlenet_not_installed","session_membership_unknown","invalid_game_settings","process_failed","runtime_missing","close_game_before_maintenance","close_game_before_setup","install_location_unavailable","app_move_failed","app_name_taken","unsupported_volume_format","case_sensitive_volume","read_only_volume"]
-        let data:[String:Any]=["schema":1,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.code.isEmpty ? "none" : (allowedCodes.contains(failure.code) ? failure.code:"other_setup_error")]
+        // The main display's mode, without its name: a scaled mode is drawn larger or
+        // smaller than the screen's own pixels (issue #9).
+        let size={ (size:CGSize) in "\(Int(size.width))x\(Int(size.height))" }
+        let display:Any=MainDisplay.current.map { ["type":$0.builtIn ? "built_in" : "external","points":size($0.points),"drawn":size($0.drawn),
+                                                    "native":$0.native.map(size) ?? "unknown","refresh_hz":Int($0.refresh.rounded())] } ?? "none"
+        let data:[String:Any]=["schema":1,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.code.isEmpty ? "none" : (allowedCodes.contains(failure.code) ? failure.code:"other_setup_error")]
         report=String(data:(try? JSONSerialization.data(withJSONObject:data,options:[.prettyPrinted,.sortedKeys])) ?? Data(),encoding:.utf8) ?? ""
     }
     func saveReport() {

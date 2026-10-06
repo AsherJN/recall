@@ -19,7 +19,14 @@ INPUTS = {
     'gnutls-3.8.13.tar.xz': ('https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz', 'ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e'),
     'libinotify-20240724.tar.gz': ('https://github.com/libinotify-kqueue/libinotify-kqueue/releases/download/20240724/libinotify-20240724.tar.gz', '5cc3fb7af407b17b7daa871cc98bb882716c4b5c296fadfb66bfe86c37cc599c'),
     'MoltenVK-macos.tar': ('https://github.com/KhronosGroup/MoltenVK/releases/download/v1.2.9/MoltenVK-macos.tar', '93369586b116bc027ef7121fd713ff32fcd856febcb4622b6ba527edcadd68ea'),
+    'SDL2-2.32.10.tar.gz': ('https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz', '5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165'),
 }
+# Wine's winebus reads every controller that is not a PlayStation one through SDL
+# (Xbox pads among them). Only the controller subsystems are built. Apple's
+# GameController (MFi) backend stays out: it claims Xbox pads and delivers their
+# input only to a foreground app, never to Wine's background device host.
+SDL2_OPTIONS = ['--disable-joystick-mfi', '--disable-audio', '--disable-video', '--disable-render',
+                '--disable-sensor', '--disable-power', '--disable-hidapi-libusb']
 WINE_SHA = 'ac99c8ca4b3848f3e81784135f023df266b61c2345726ea55a50b3e030dd6872'
 
 
@@ -27,13 +34,14 @@ def sha(p):
     with p.open('rb') as f: return hashlib.file_digest(f, 'sha256').hexdigest()
 
 
-def build(work, jobs):
+def build(work, jobs, only=None):
     if any(c.isspace() for c in str(work)):
         raise ValueError('Autoconf source workspace must not contain whitespace; installed runtime supports spaces')
     source = work / 'native-sources'; source.mkdir(parents=True, exist_ok=True)
     prefix = work / 'clean-deps'; prefix.mkdir(exist_ok=True)
     logs = work / 'build-logs'; logs.mkdir(exist_ok=True)
     for name, (url, expected) in INPUTS.items():
+        if only == 'sdl2' and not name.startswith('SDL2-'): continue
         archive = work / 'downloads' / name
         if not archive.exists():
             part = Path(str(archive) + '.part')
@@ -46,19 +54,25 @@ def build(work, jobs):
             with tarfile.open(archive) as t: t.extractall(source, filter='data')
             marker.write_text(expected)
     wine = work / 'downloads/wine.tar.gz'
-    if sha(wine) != WINE_SHA: raise ValueError('CodeWeavers source identity mismatch')
     gnu = work / 'gnu-source'
-    if not (gnu / '.extracted').exists():
+    if only is None and sha(wine) != WINE_SHA: raise ValueError('CodeWeavers source identity mismatch')
+    if only is None and not (gnu / '.extracted').exists():
         with tarfile.open(wine) as t:
             t.extractall(gnu, members=[m for m in t.getmembers() if m.name.startswith(('sources/gnutls/gmp/', 'sources/gnutls/nettle/'))], filter='data')
         (gnu / '.extracted').write_text(WINE_SHA)
     env = os.environ.copy(); env.pop('DESTDIR', None)
+    # The toolchain build_portable_runtime.py pins (and the one these libraries were
+    # first built with): Command Line Tools clang and the macOS 26.5 SDK, whatever
+    # xcode-select points at.
+    env.update(DEVELOPER_DIR='/Library/Developer/CommandLineTools',
+               SDKROOT='/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk')
     env.update(PATH=str(prefix / 'bin') + ':/usr/bin:/bin:/usr/sbin:/sbin',
                CC='/usr/bin/clang -arch x86_64', CXX='/usr/bin/clang++ -arch x86_64',
                CFLAGS='-O2 -g0 -ffile-prefix-map=' + str(work) + '=/build/overwatch-2-mac',
                LDFLAGS='-L' + str(prefix / 'lib'), CPPFLAGS='-I' + str(prefix / 'include'),
                PKG_CONFIG_LIBDIR=str(prefix / 'lib/pkgconfig'), PKG_CONFIG_PATH='',
                MACOSX_DEPLOYMENT_TARGET='26.0')
+    if only and (prefix / 'bin/pkgconf').exists(): env['PKG_CONFIG'] = str(prefix / 'bin/pkgconf')
     components = [
         ('pkgconf', source / 'pkgconf-2.5.1', []),
         ('gmp', gnu / 'sources/gnutls/gmp', ['--disable-cxx']),
@@ -67,10 +81,12 @@ def build(work, jobs):
         # New SDKs expose fdclosedir only from macOS 26.4; use the upstream
         # compatibility path to retain the runtime's 26.0 deployment target.
         ('inotify', source / 'libinotify-20240724', ['ac_cv_func_fdclosedir=no']),
+        ('sdl2', source / 'SDL2-2.32.10', SDL2_OPTIONS),
     ]
+    selected = [c for c in components if only in (None, c[0])]
     old_proof = work / 'native-build-proof.json'
     previous_options = json.loads(old_proof.read_text()).get('configure_options', {}) if old_proof.exists() else {}
-    for name, src, options in components:
+    for name, src, options in selected:
         directory = work / ('native-build-' + name); directory.mkdir(exist_ok=True)
         if name == 'inotify':
             # This release's export-list argument is relative to the build cwd.
@@ -90,14 +106,16 @@ def build(work, jobs):
             run(['make', 'install'])
         print('Built native dependency: ' + name, flush=True)
         if name == 'pkgconf': env['PKG_CONFIG'] = str(prefix / 'bin/pkgconf')
-    molten = source / 'MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib'
-    subprocess.run(['/usr/bin/lipo', str(molten), '-thin', 'x86_64', '-output', str(prefix / 'lib/libMoltenVK.dylib')], check=True)
+    if only is None:
+        molten = source / 'MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib'
+        subprocess.run(['/usr/bin/lipo', str(molten), '-thin', 'x86_64', '-output', str(prefix / 'lib/libMoltenVK.dylib')], check=True)
     licenses = prefix / 'licenses'; licenses.mkdir(exist_ok=True)
-    for name, src, _ in components:
+    for name, src, _ in selected:
         target = licenses / name; target.mkdir(exist_ok=True)
         for p in src.iterdir():
             if p.is_file() and p.name.startswith(('COPYING', 'LICENSE', 'AUTHORS', 'NOTICE')): shutil.copy2(p, target / p.name)
-    shutil.copy2(source / 'MoltenVK/LICENSE', licenses / 'MoltenVK-LICENSE')
+    if only is None:
+        shutil.copy2(source / 'MoltenVK/LICENSE', licenses / 'MoltenVK-LICENSE')
     record = {'inputs': {n: {'url': v[0], 'sha256': v[1]} for n, v in INPUTS.items()},
               'gmp_source': {'archive_sha256': WINE_SHA, 'path': 'sources/gnutls/gmp', 'version': '6.3.0'},
               'configure_options': {n: opts for n, _, opts in components},
@@ -109,4 +127,5 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--workspace', type=Path, required=True)
     p.add_argument('--jobs', type=int, choices=range(1, 5), default=2)
-    a = p.parse_args(); build(a.workspace.resolve(), a.jobs)
+    p.add_argument('--only', choices=['sdl2'], help='Build only this dependency (it needs none of the others)')
+    a = p.parse_args(); build(a.workspace.resolve(), a.jobs, a.only)

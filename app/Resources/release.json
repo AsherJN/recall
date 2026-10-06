@@ -1,8 +1,8 @@
 {
-  "appVersion": "1.1.0",
-  "runtimeVersion": "phase2-20261004.4",
+  "appVersion": "1.2.0",
+  "runtimeVersion": "phase2-20261005.1",
   "runtimeArchive": "runtime.tar.gz",
-  "runtimeSHA256": "a7e85b29d959d8432af32d4763a40eee869edf92f6e15323ecc5450edbdee8ac",
+  "runtimeSHA256": "36d9fc4f5c348cbbd72ae2aea023952dd25db0a59079342ba17890be963515e3",
   "installerURL": "https://downloader.battle.net/download/getInstaller?os=win&installer=Battle.net-Setup.exe",
   "installerSHA256": "de5d32d4ea5eed5a9e120027fb68b370976dbfecc8f2a8f91305977f0b87fcaf",
   "distribution": "public"

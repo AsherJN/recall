@@ -29,6 +29,14 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
   win32u      runtime/source/wine-win32u (the Phase 2 tree's dlls/win32u).
               WINE_DISPLAY_LOG=<file> logs every display-device update: forced or not,
               why, from where, and how long it took.
+  winebus     The Phase 2 tree's dlls/winebus.sys, unmodified, compiled with SDL2 (1.2).
+              Wine's configure did not find SDL2's headers, so the shipped controller bus
+              has no SDL support: winebus passes PlayStation pads through as raw HID and
+              leaves every other pad to SDL, so Xbox pads gave no input at all. bus_sdl.c
+              gets the defines configure would have written (HAVE_SDL_H, SONAME_LIBSDL2 as
+              @rpath/libSDL2-2.0.0.dylib) and the headers of the SDL2 that
+              build_portable_dependencies.py builds; the manifest records that SDL2
+              library, which the runtime must ship beside this file.
   winemac     runtime/source/wine-winemac (the shipped mouselook driver, i.e.
               runtime/source/wine-mouselook). macOS re-announces the game as active on
               every left click; the driver re-synchronised Wine's display list each
@@ -71,8 +79,23 @@ COMPONENTS = {
                     source=ROOT / 'runtime/source/wine-winemac', archived='lib/wine/x86_64-unix/winemac.so',
                     rpaths=['@loader_path', '@loader_path/../..'],
                     patch=ROOT / 'patches/wine-winemac-activation.patch'),
+    # No source change: the same files, built with SDL2 (see SDL2 below).
+    'winebus': dict(rule='dlls/winebus.sys/winebus.so', directory='dlls/winebus.sys', pristine=BASE,
+                    source=BASE, archived='lib/wine/x86_64-unix/winebus.so',
+                    rpaths=['@loader_path', '@loader_path/../..'], patch=None, sdl2=True),
 }
 OUT = ROOT / 'runtime/build/wine-native'
+SDL2 = {'version': '2.32.10', 'library': PHASE2 / 'clean-deps/lib/libSDL2-2.0.0.dylib',
+        'headers': PHASE2 / 'clean-deps/include/SDL2',
+        # What Wine's configure writes into config.h once it finds SDL2; the runtime's
+        # build rewrites every dlopened library's name to @rpath the same way.
+        'flags': ' -DHAVE_SDL_H=1 -DSONAME_LIBSDL2=\'"@rpath/libSDL2-2.0.0.dylib"\''}
+
+
+def sdl2_identity():
+    """The SDL2 build winebus is compiled against: its library and configuration header."""
+    return {'version': SDL2['version'], 'library_sha256': sha(SDL2['library']),
+            'config_sha256': sha(SDL2['headers'] / 'SDL_config.h')}
 
 
 def expand_braces(command, makefile):
@@ -110,7 +133,7 @@ def objects(makefile, rule):
     return re.findall(r'(\S+)\.o\b', deps)
 
 
-def compile_component(component, source, out):
+def compile_component(component, source, out, sdl2=False):
     makefile = (TREE / 'Makefile').read_text()
     directory = component['directory']
     objdir = out / 'obj'
@@ -125,6 +148,8 @@ def compile_component(component, source, out):
         command = expand_braces(expand(recipe(makefile, name + '.o'), target, makefile), makefile)
         command = command.replace(str(BASE / directory) + '/', str(source / directory) + '/')
         command = command.replace('-I' + str(BASE / directory) + ' ', '-I' + str(source / directory) + ' ')
+        if sdl2 and name == directory + '/bus_sdl':
+            command += SDL2['flags'] + ' -I' + str(SDL2['headers'])
         result = subprocess.run(command + prefix_map, shell=True, cwd=TREE, env=ENV, capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError(f'{name}.o failed to compile:\n' + result.stderr)
@@ -207,6 +232,11 @@ def main():
     source = component['source']
     if not (source / component['directory']).is_dir():
         parser.error('Experiment sources are missing: ' + str(source / component['directory']))
+    if component.get('sdl2'):
+        for required in (SDL2['library'], SDL2['headers'] / 'SDL.h'):
+            if not required.exists():
+                parser.error('Build SDL2 first (build_portable_dependencies.py --only sdl2): missing ' + str(required))
+        sdl2 = sdl2_identity()
 
     def snapshot():
         return {str(p): sha(p) for p in (source / component['directory']).rglob('*') if p.is_file()}
@@ -215,19 +245,23 @@ def main():
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
-    raw = compile_component(component, source, out)
+    raw = compile_component(component, source, out, sdl2=component.get('sdl2', False))
     final = package(component, raw, out / name)
     run('/usr/bin/codesign', '--force', '--sign', '-', final, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     run('/usr/bin/codesign', '--verify', '--strict', final)
     if before != snapshot():
         raise SystemExit('Sources changed during the build')
-    write_patch(component)
-    manifest = {'schema': 1, 'component': args.component, 'sha256': sha(final),
-                'patch': str(component['patch'].relative_to(ROOT)), 'patch_sha256': sha(component['patch']),
-                'base_sha256': sha(archived)}
+    manifest = {'schema': 1, 'component': args.component, 'sha256': sha(final), 'base_sha256': sha(archived)}
+    if component['patch']:
+        write_patch(component)
+        manifest.update(patch=str(component['patch'].relative_to(ROOT)), patch_sha256=sha(component['patch']))
+    if component.get('sdl2'):
+        if sdl2 != sdl2_identity():
+            raise SystemExit('SDL2 changed during the build')
+        manifest['sdl2'] = sdl2
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(json.dumps({args.component: str(final), 'sha256': manifest['sha256'],
-                      'patch': str(component['patch'])}, indent=2))
+                      'patch': manifest.get('patch'), 'sdl2': manifest.get('sdl2')}, indent=2))
 
 
 if __name__ == '__main__':

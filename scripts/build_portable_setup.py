@@ -10,7 +10,8 @@ from candidate_contract import verify_generated
 
 ROOT = Path(__file__).resolve().parents[1]
 # The oldest macOS Recall opens on: the app, its helpers and this worker are built for it.
-MINIMUM_MACOS = '15.0'
+# Overwatch needs Rosetta's fixes in macOS 26.5 (FB15880492); 15.0-26.4 hang before its window.
+MINIMUM_MACOS = '26.5'
 HEADERS = {'archive.h':'11c373fab05e8f017220aff1d89cec3cf32146b44d6cb56aeb12e968bc3b950b',
            'archive_entry.h':'510ae3e21a800403bb1c8d413d5ddabaee0b38facb8491b60bb6da55f84f4695'}
 

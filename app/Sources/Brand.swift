@@ -17,13 +17,6 @@ enum Brand {
     /// "<anything>-<version>.dmg", so a later rename cannot strand an install.
     static let releaseFeed=URL(string:"https://api.github.com/repos/\(repositoryPath)/releases/latest")!
     static func diskImage(_ version:String)->String { "\(name)-\(version).dmg" }
-    /// The "Share how it runs on your Mac" issue form with the macOS and app versions filled in.
-    static func howItRuns(macOS:String, version:String)->URL {
-        var link=URLComponents(string:"https://github.com/\(repositoryPath)/issues/new")!
-        link.queryItems=[URLQueryItem(name:"template",value:"performance_report.yml"),URLQueryItem(name:"title",value:"How it runs: \(macOS)"),
-                         URLQueryItem(name:"macos",value:macOS),URLQueryItem(name:"version",value:version)]
-        return link.url!
-    }
     static let trademarks="Not affiliated with or endorsed by Blizzard Entertainment or Apple. Overwatch is a trademark of Blizzard Entertainment, Inc. Mac is a trademark of Apple Inc."
 
     // The author's links. Mosaic News links say where in the app they were

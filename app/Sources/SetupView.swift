@@ -87,7 +87,7 @@ struct SetupView: View {
                 VStack(alignment:.leading,spacing:12) {
                     Text("Requirements").font(LauncherStyle.font(14,.semibold))
                     VStack(alignment:.leading,spacing:8) {
-                        requirement("Mac", "Apple Silicon · macOS 15 or later")
+                        requirement("Mac", "Apple Silicon · macOS 26.5 or later")
                         requirement("Memory", "16 GB recommended")
                         requirement("Storage", "85–95 GB free, on this Mac or an external SSD")
                         requirement("Also", "Blizzard account, internet and Rosetta")
@@ -97,10 +97,6 @@ struct SetupView: View {
                         Text("Recommended · tested setup").font(LauncherStyle.font(13,.semibold))
                         Text("M1 Pro with 16 GB memory. Other Apple Silicon Macs may perform differently.")
                             .font(LauncherStyle.font(13)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                    }
-                    if model.onSequoia {
-                        Divider()
-                        Text(sequoiaNote).font(LauncherStyle.font(13)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                 }
             }
@@ -210,12 +206,6 @@ struct SetupView: View {
     }
     private var memoryWarning:some View {
         LauncherNotice(text:"Your Mac has \(model.memoryBytes>>30) GB of memory. We recommend 16 GB. You can continue, but Overwatch may load slowly or stutter. Quitting other apps before you play helps.",symbol:"exclamationmark.triangle")
-    }
-    /// One line on Sequoia; the link opens the "how it runs" form with the versions filled in.
-    private var sequoiaNote:AttributedString {
-        var link=AttributedString("Tell us how it runs")
-        link.link=Brand.howItRuns(macOS:"macOS Sequoia \(model.macOS)",version:"\(UpdateCheck.installed) (build \(UpdateCheck.build))")
-        return AttributedString("Recall is new to macOS Sequoia. ")+link+AttributedString(".")
     }
     private func requirement(_ title:String,_ value:String)->some View {
         HStack(alignment:.top,spacing:12) {

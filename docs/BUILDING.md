@@ -121,6 +121,12 @@ The DMG opens as a fixed Finder window with the app, an Applications shortcut
 and a background drawn by `scripts/dmg_background.swift`. dmgbuild writes that
 layout without scripting Finder; `--plain` skips it.
 
+Runtime `phase2-20261005.1` is `phase2-20261004.4` with Wine's controller bus
+rebuilt with SDL2 2.32.10 and that SDL2 library added, so Xbox and other
+non-PlayStation controllers reach the game: `scripts/build_portable_dependencies.py
+--only sdl2`, `scripts/build_wine_native.py winebus`, then `scripts/derive_runtime.py
+--controllers`. A full build configures Wine with the same SDL2 and ships it.
+
 Runtime `phase2-20261004.4`, shipped with app 1.1.0, is `phase2-20261004.3` with
 the project's license in `licenses/` changed from MIT to the Apache License 2.0 and
 its NOTICE (`scripts/derive_runtime.py --relicense`); every other file is
