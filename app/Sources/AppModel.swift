@@ -17,8 +17,9 @@ final class AppModel {
         didSet { UserDefaults.standard.set(automaticUpdates,forKey:"automaticUpdateChecks") }
     }
     /// Battle.net drawn at twice Windows' size, the size it has on a Mac (worker: launch
-    /// --battlenet-scale). Off keeps Windows' size, in case a Battle.net update breaks it.
-    var largeBattleNet=UserDefaults.standard.object(forKey:"largeBattleNet") as? Bool ?? true {
+    /// --battlenet-scale). Off by default from 1.3: at that size Battle.net's sign-in window
+    /// shows its fields only in part. Off keeps Windows' size.
+    var largeBattleNet=UserDefaults.standard.object(forKey:"largeBattleNet") as? Bool ?? false {
         didSet { UserDefaults.standard.set(largeBattleNet,forKey:"largeBattleNet") }
     }
     /// Opening the app opens Battle.net too. Off, the player starts it with Open Battle.net.
@@ -31,11 +32,41 @@ final class AppModel {
     var metalHUD=UserDefaults.standard.bool(forKey:"metalHUD") {
         didSet { UserDefaults.standard.set(metalHUD,forKey:"metalHUD") }
     }
+    /// MetalFX upscaling (worker: launch --metalfx, portable_metalfx.h): Overwatch offers NVIDIA
+    /// DLSS in its Video settings, and Recall runs it on Apple's MetalFX. Off by default. Like the
+    /// HUD, Battle.net carries it from when it opens.
+    var metalFXUpscaling=UserDefaults.standard.bool(forKey:"metalFXUpscaling") {
+        didSet { UserDefaults.standard.set(metalFXUpscaling,forKey:"metalFXUpscaling") }
+    }
+    /// Sharpening after MetalFX (worker: launch --sharpening; the amounts are the contract's).
+    /// Off by default; it applies only with upscaling on, and is kept while upscaling is off.
+    enum Sharpening:String, CaseIterable { case off, low, high }
+    var metalFXSharpening=Sharpening(rawValue:UserDefaults.standard.string(forKey:"metalFXSharpening") ?? "") ?? .off {
+        didSet { UserDefaults.standard.set(metalFXSharpening.rawValue,forKey:"metalFXSharpening") }
+    }
     enum Running { case client, game }
     /// What runs now, as Settings last checked; nil when neither Battle.net nor Overwatch does.
     var running: Running?
     var firstMatchTipDismissed=UserDefaults.standard.bool(forKey:"firstMatchTipDismissed") {
         didSet { UserDefaults.standard.set(firstMatchTipDismissed,forKey:"firstMatchTipDismissed") }
+    }
+    /// The Korean build of Overwatch is installed: its folder holds Nexon's anti-cheat (worker
+    /// status). The Play screens then suggest Korean account support until dismissed.
+    var nexonBuild=false
+    var koreanTipDismissed=UserDefaults.standard.bool(forKey:"koreanTipDismissed") {
+        didSet { UserDefaults.standard.set(koreanTipDismissed,forKey:"koreanTipDismissed") }
+    }
+    var showKoreanTip:Bool { nexonBuild && !koreanSupport && !koreanTipDismissed }
+    /// Settings › Advanced, kept by the worker (state.json): automatic proxy detection, off
+    /// unless turned on, and Korean account support, experimental.
+    enum AdvancedSetting: String { case proxyAutoDetect="proxy_auto_detect", koreanSupport="korean_support" }
+    var proxyAutoDetect:Bool { state[AdvancedSetting.proxyAutoDetect.rawValue] as? Bool == true }
+    var koreanSupport:Bool { state[AdvancedSetting.koreanSupport.rawValue] as? Bool == true }
+    /// The worker keeps these once setup has installed the game components.
+    var canChangeAdvanced:Bool { isPreview || state["active_runtime"] != nil }
+    /// The Settings tab shown; Settings reopens on it, as a Mac app's Settings window does.
+    var settingsTab=SettingsTab(rawValue:UserDefaults.standard.string(forKey:"settingsTab") ?? "") ?? .general {
+        didSet { UserDefaults.standard.set(settingsTab.rawValue,forKey:"settingsTab") }
     }
     var updatingComponents=false
     private var updateCheck: Task<AvailableUpdate?,Error>?
@@ -153,6 +184,7 @@ final class AppModel {
         state=status["state"] as? [String:Any] ?? [:]
         clientInstalled=status["battlenet_installed"] as? Bool ?? false
         gameInstalled=status["game_installed"] as? Bool ?? false
+        nexonBuild=status["nexon_build"] as? Bool ?? false
         freeBytes=(status["free_bytes"] as? NSNumber)?.uint64Value ?? 0
         // Match Finder's "available" figure, which includes purgeable storage.
         if let available=try? root.resourceValues(forKeys:[.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage,available>0 {
@@ -223,9 +255,9 @@ final class AppModel {
     }
     /// True when nothing is running, so quitting needs no confirmation.
     var quitsNow:Bool { isPreview || !busy }
-    /// Quits the app. AppKit ignores a quit while a sheet is attached to the
-    /// window, so when nothing is running, close the sheet first and quit once
-    /// it has gone.
+    /// Quits the app, from the menu or from outside (AppDelegate.quitEvent). AppKit
+    /// ignores a quit while a sheet is attached to the window, so when nothing is
+    /// running, close the sheet first and quit once it has gone.
     func quit() {
         guard sheet != nil,quitsNow else { NSApp.terminate(nil);return }
         sheet=nil
@@ -431,6 +463,7 @@ final class AppModel {
         if value == .moveApp { moveReplaces=["Overwatch 2 Mac"] }
         let args=CommandLine.arguments
         if let i=args.firstIndex(of:"--preview-macos"),args.indices.contains(i+1) { macOS=args[i+1] }
+        if args.contains("--preview-korean") { nexonBuild=true;state["korean_support"]=false }
         // The launching screen's "Preparing graphics" details: preparing, done, first,
         // or the warm-up after an update (warming, warmed).
         if value == .launching,let i=args.firstIndex(of:"--preview-graphics"),args.indices.contains(i+1) { previewGraphics(args[i+1]) }
@@ -552,7 +585,10 @@ final class AppModel {
         }
     }
     func openClient(play:Bool=false) async throws {
-        screen = .launching;stage="Checking your running session";graphics=GraphicsProgress()
+        screen = .launching
+        // Once, before Battle.net opens: Overwatch's voice chat uses this app's permission.
+        if Microphone.undecided { stage="Asking to use your microphone for voice chat";await Microphone.ask() }
+        stage="Checking your running session";graphics=GraphicsProgress()
         launchStarted=Date();stopLaunchWait=false;closeOnStop=false;canCancel=true
         // Cancelling here ends the worker, and with it the graphics preparation, before
         // Battle.net opens (the preparation keeps its finished work; the next launch resumes).
@@ -561,7 +597,8 @@ final class AppModel {
             // macOS Game Mode is on unless support turned it off for a player:
             // defaults write org.overwatch2mac.launcher gameMode -bool false
             let gameMode=UserDefaults.standard.object(forKey:"gameMode") as? Bool ?? true
-            launchEvents=try await service.run("launch",(play ? ["--play","1"] : [])+["--battlenet-scale",largeBattleNet ? "2" : "1","--metal-hud",metalHUD ? "1" : "0"]+(gameMode ? [] : ["--game-mode","0"]),event:receive)
+            launchEvents=try await service.run("launch",(play ? ["--play","1"] : [])+["--battlenet-scale",largeBattleNet ? "2" : "1","--metal-hud",metalHUD ? "1" : "0",
+                "--metalfx",metalFXUpscaling ? "1" : "0","--sharpening",metalFXSharpening.rawValue]+(gameMode ? [] : ["--game-mode","0"]),event:receive)
         } catch {
             guard stopLaunchWait else { throw error }
             canCancel=false;screen = .ready;notice="Cancelled. Battle.net wasn’t opened."
@@ -658,6 +695,8 @@ final class AppModel {
             do {
                 let sessions=try await service.run("session")
                 showSession(sessions.last?["processes"] as? [[String:Any]] ?? [])
+                // Battle.net may have installed the game meanwhile (the Korean card needs to know).
+                if !nexonBuild { try? await refresh() }
             } catch let error as SetupFailure where error.code == "install_location_unavailable" {
                 failure=error;screen = .driveMissing
             } catch {}
@@ -752,6 +791,30 @@ final class AppModel {
             }
         }
     }
+    /// Settings › Advanced. Battle.net carries both settings from when it opens, so Settings
+    /// offers them only while it and Overwatch are closed (see running); the worker refuses
+    /// otherwise. Before setup has made the Windows environment the worker only keeps the
+    /// choice, and setup applies it.
+    func setAdvanced(_ setting:AdvancedSetting, _ on:Bool) {
+        guard (state[setting.rawValue] as? Bool == true) != on else { return }
+        state[setting.rawValue]=on
+        guard !isPreview else { return }
+        Task {
+            while busy { try? await Task.sleep(for:.milliseconds(200)) }
+            busy=true;notice=""
+            defer { busy=false }
+            do {
+                _ = try await service.run(setting == .proxyAutoDetect ? "network" : "korean-support",
+                                          [setting == .proxyAutoDetect ? "--proxy-detect" : "--enabled",on ? "1" : "0"])
+                try await refresh()
+            } catch {
+                state[setting.rawValue] = !on
+                notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
+            }
+        }
+    }
+    /// The Korean card's Open Settings: Settings on its Advanced tab.
+    func openAdvancedSettings() { settingsTab = .advanced;sheet = .settings }
     /// Troubleshooting's way back from a resolution that shows a black or wrong-sized
     /// picture: a new installation's resolution, with every other display setting
     /// written again. Graphics quality and FPS are kept. Overwatch must be closed.
@@ -794,13 +857,12 @@ final class AppModel {
         }
     }
     func makeReport() {
-        let allowedCodes:Set<String>=["cancelled","insufficient_disk_space","rosetta_required","download_hash_mismatch","download_interrupted_retry_to_resume","battlenet_not_installed","session_membership_unknown","invalid_game_settings","process_failed","runtime_missing","close_game_before_maintenance","close_game_before_setup","install_location_unavailable","app_move_failed","app_name_taken","unsupported_volume_format","case_sensitive_volume","read_only_volume"]
         // The main display's mode, without its name: a scaled mode is drawn larger or
         // smaller than the screen's own pixels (issue #9).
         let size={ (size:CGSize) in "\(Int(size.width))x\(Int(size.height))" }
         let display:Any=MainDisplay.current.map { ["type":$0.builtIn ? "built_in" : "external","points":size($0.points),"drawn":size($0.drawn),
                                                     "native":$0.native.map(size) ?? "unknown","refresh_hz":Int($0.refresh.rounded())] } ?? "none"
-        let data:[String:Any]=["schema":1,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.code.isEmpty ? "none" : (allowedCodes.contains(failure.code) ? failure.code:"other_setup_error")]
+        let data:[String:Any]=["schema":1,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? metalFXSharpening.rawValue : "off","install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode]
         report=String(data:(try? JSONSerialization.data(withJSONObject:data,options:[.prettyPrinted,.sortedKeys])) ?? Data(),encoding:.utf8) ?? ""
     }
     func saveReport() {

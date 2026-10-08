@@ -5,7 +5,9 @@ file in an artifact folder (Finder writes .DS_Store) must never be archived.
 From 1.1 the engine's Mach-O files are re-stamped to require macOS 15; a
 re-stamp changes only that field. 1.1 also adds the game app for macOS Game Mode,
 a copy of the loader that differs from it only in its UUID. Its project license
-becomes Apache 2.0 with a NOTICE, and nothing else changes.
+becomes Apache 2.0 with a NOTICE, and nothing else changes. 1.3 re-signs Wine's
+loader and server with the microphone entitlement; nothing else changes. 1.3 also replaces
+DXMT with its MetalFX upscaling build and adds the DLSS and NVAPI stand-ins.
 """
 import json
 from pathlib import Path
@@ -223,7 +225,7 @@ class Controllers(unittest.TestCase):
         write_archive(base)
         (folder / 'artifacts/base.tar.json').write_text(json.dumps(
             {'version': 'base', 'signed_native_components': 1, 'dependency_names': ['libfreetype.6.dylib'],
-             'removed': ['licenses/PROJECT-MIT']}))
+             'removed': ['licenses/PROJECT-MIT'], 'resigned': ['bin/wine'], 'entitlement_added': 'microphone'}))
         self.sdl2 = library(folder / 'clean-deps/lib/libSDL2-2.0.0.dylib',
                             str(folder / 'clean-deps/lib/libSDL2-2.0.0.dylib'), str(folder / 'clean-deps/lib'))
         (folder / 'clean-deps/licenses/sdl2').mkdir(parents=True)
@@ -253,6 +255,8 @@ class Controllers(unittest.TestCase):
         proof = json.loads((self.artifacts / 'next.tar.json').read_text())
         self.assertEqual((proof['dependency_names'], proof['signed_native_components'], 'removed' in proof),
                          (['libSDL2-2.0.0.dylib', 'libfreetype.6.dylib'], 2, False))
+        # The base's own records (here a microphone derivation's) are not this derivation's.
+        self.assertEqual(('resigned' in proof, 'entitlement_added' in proof), (False, False))
 
     def test_another_sdl2_build_or_a_runtime_that_has_one_is_refused(self):
         derive_runtime.derive_controllers('base', 'next', '-')
@@ -271,6 +275,155 @@ class Controllers(unittest.TestCase):
                         '-o', linked], check=True)
         with self.assertRaises(ValueError):
             derive_runtime.package_dependency(linked)
+
+
+class Microphone(unittest.TestCase):
+    """1.3: the Wine loader and server gain the microphone entitlement, keeping their other
+    entitlements and identifiers; the game app is made again from the loader and carries it too.
+    Unsigned, nothing differs from the base."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ow2-microphone-')
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name)
+        self.addCleanup(setattr, derive_runtime, 'ARTIFACTS', derive_runtime.ARTIFACTS)
+        derive_runtime.ARTIFACTS = self.artifacts = folder / 'artifacts'
+        base = self.artifacts / 'base'
+        (folder / 'info.plist').write_bytes(plistlib.dumps({
+            'CFBundleIdentifier': 'com.codeweavers.CrossOver.wineloader', 'CFBundleExecutable': 'wineloader'}))
+        (folder / 'main.c').write_text('int main(void) { return 0; }\n')
+        (folder / 'entitlements.plist').write_bytes(plistlib.dumps({'com.apple.security.cs.allow-jit': True}))
+        for relative, identifier, plist in (('bin/wine', 'wine', False), ('bin/wineserver', 'wineserver', False),
+                                            (game_mode_app.LOADER, 'com.codeweavers.CrossOver.wineloader', True),
+                                            ('lib/wine/x86_64-unix/other', 'other', False)):
+            path = base / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-mmacosx-version-min=15.0', folder / 'main.c',
+                            *(['-Wl,-sectcreate,__TEXT,__info_plist,' + str(folder / 'info.plist')] if plist else []),
+                            '-o', path], check=True)
+            entitled = [] if relative.endswith('other') else ['--entitlements', folder / 'entitlements.plist']
+            subprocess.run(['codesign', '--sign', '-', '--options', 'runtime', '--identifier', identifier, *entitled,
+                            path], check=True, capture_output=True)
+        game_mode_app.make(base, '15.0')
+        files = {str(p.relative_to(base)): {'sha256': derive_runtime.sha(p)} for p in base.rglob('*') if p.is_file()}
+        (base / 'runtime.json').write_text(json.dumps({'version': 'base', 'minimum_macos': '15.0', 'files': files}))
+        write_archive(base)
+        (self.artifacts / 'base.tar.json').write_text(json.dumps({'version': 'base', 'replaced': ['x']}))
+
+    def test_the_loader_server_and_game_app_gain_only_the_microphone_entitlement(self):
+        derive_runtime.derive_microphone('base', 'next', '-')
+        manifest = check_archive(self.artifacts / 'next.tar.gz')
+        base, next_ = self.artifacts / 'base', self.artifacts / 'next'
+        wanted = {'com.apple.security.cs.allow-jit': True, derive_runtime.MICROPHONE: True}
+        for relative, identifier in (('bin/wine', 'wine'), ('bin/wineserver', 'wineserver'),
+                                     (game_mode_app.LOADER, 'com.codeweavers.CrossOver.wineloader'),
+                                     (game_mode_app.EXECUTABLE, 'org.overwatch2mac.overwatch')):
+            self.assertEqual(derive_runtime.signature_of(next_ / relative), (identifier, wanted), relative)
+            self.assertTrue(derive_runtime.unsigned_identical(base / relative, next_ / relative), relative)
+        game_mode_app.check(next_)
+        other = 'lib/wine/x86_64-unix/other'
+        self.assertEqual(manifest['files'][other]['sha256'], derive_runtime.sha(base / other))
+        self.assertEqual(manifest['derived_from']['entitlement_added'], derive_runtime.MICROPHONE)
+        self.assertEqual(sorted(k for k, v in manifest['derived_from']['resigned'].items() if 'entitlement_added' in v),
+                         ['bin/wine', 'bin/wineserver', game_mode_app.LOADER])
+        proof = json.loads((self.artifacts / 'next.tar.json').read_text())
+        self.assertEqual((proof['derived_from'], 'replaced' in proof), ('base', False))
+
+    def test_a_runtime_that_already_has_it_is_refused(self):
+        derive_runtime.derive_microphone('base', 'next', '-')
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_microphone('next', 'again', '-')
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_microphone('base', 'next', '-')
+
+
+class MetalFX(unittest.TestCase):
+    """1.3: the DXMT build with the MetalFX patch replaces the base's DXMT and Wine's d3d12.dll; the
+    signed DLSS stand-in (byte for byte), the NVAPI stand-in and NVAPI's license are added; nothing
+    else changes. DLL stripping and the Authenticode check are stubbed: they need LLVM-MinGW and
+    Recall's certificate, which a fresh checkout lacks."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ow2-metalfx-')
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name)
+        self.addCleanup(setattr, derive_runtime, 'ARTIFACTS', derive_runtime.ARTIFACTS)
+        derive_runtime.ARTIFACTS = self.artifacts = folder / 'artifacts'
+        real_package = derive_runtime.package_like_assembler
+        for name, value in (('package_like_assembler', lambda path: None if path.suffix == '.dll' else real_package(path)),):
+            self.addCleanup(setattr, derive_runtime, name, getattr(derive_runtime, name))
+            setattr(derive_runtime, name, value)
+        self.addCleanup(setattr, derive_runtime.sign_pe, 'check', derive_runtime.sign_pe.check)
+        derive_runtime.sign_pe.check = lambda path, *rest: Path(path).read_bytes().endswith(b'SIGNED')
+        (folder / 'probe.c').write_text('int probe(void) { return 1; }\n')
+
+        def winemetal(path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-mmacosx-version-min=26.0', '-dynamiclib',
+                            folder / 'probe.c', '-install_name', '@rpath/winemetal.so', '-Wl,-rpath,@loader_path',
+                            '-Wl,-rpath,@loader_path/../..', '-o', path],
+                           check=True)
+        base = self.artifacts / 'base'
+        windows = sorted({*derive_runtime.METALFX_REPLACED} - {'lib/wine/x86_64-unix/winemetal.so'})
+        for relative in [*windows, 'bin/wine']:
+            (base / relative).parent.mkdir(parents=True, exist_ok=True)
+            (base / relative).write_bytes(b'base ' + relative.encode())
+        winemetal(base / 'lib/wine/x86_64-unix/winemetal.so')
+        files = {str(p.relative_to(base)): {'sha256': derive_runtime.sha(p)} for p in base.rglob('*') if p.is_file()}
+        (base / 'runtime.json').write_text(json.dumps({'version': 'base', 'minimum_macos': '15.0', 'files': files}))
+        write_archive(base)
+        (self.artifacts / 'base.tar.json').write_text(json.dumps({'version': 'base', 'resigned': ['bin/wine']}))
+        self.workspace = folder / 'dxmt'
+        install = self.workspace / 'dxmt-install'
+        for built in [*derive_runtime.METALFX_REPLACED.values(), *derive_runtime.METALFX_ADDED.values()]:
+            (install / built).parent.mkdir(parents=True, exist_ok=True)
+            (install / built).write_bytes(b'built ' + built.encode() + (b' SIGNED' if built.endswith('nvngx.dll') else b''))
+        winemetal(install / 'x86_64-unix/winemetal.so')
+        subprocess.run(['/usr/bin/strip', '-x', install / 'x86_64-unix/winemetal.so'], check=True)
+        nvapi = self.workspace / 'dxmt-source/external/nvapi'
+        nvapi.mkdir(parents=True)
+        (nvapi / 'License.txt').write_text('SPDX-License-Identifier: MIT\n')
+        self.proof = {'files': {str(p.relative_to(install)): derive_runtime.sha(p) for p in install.rglob('*') if p.is_file()},
+                      'nvapi': 'd08488f', **{key: derive_runtime.sha(derive_runtime.ROOT / patch)
+                                             for patch, key in derive_runtime.DXMT_PATCHES.items()}}
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+
+    def test_dxmt_is_replaced_and_the_stand_ins_added(self):
+        derive_runtime.derive_metalfx('base', 'next', '-', self.workspace)
+        manifest = check_archive(self.artifacts / 'next.tar.gz')
+        base, next_ = self.artifacts / 'base', self.artifacts / 'next'
+        added = sorted([*derive_runtime.METALFX_ADDED, derive_runtime.NVAPI_LICENSE])
+        self.assertEqual(sorted(manifest['files']), sorted([*json.loads((base / 'runtime.json').read_text())['files'], *added]))
+        self.assertEqual(sorted(manifest['derived_from']['replaced']), sorted(derive_runtime.METALFX_REPLACED))
+        self.assertEqual(sorted(manifest['derived_from']['added']), added)
+        # The DLSS stand-in is the signed build, byte for byte.
+        self.assertEqual((next_ / derive_runtime.METALFX_NVNGX).read_bytes(),
+                         (self.workspace / 'dxmt-install/x86_64-windows/nvngx.dll').read_bytes())
+        self.assertEqual((next_ / 'lib/wine/x86_64-windows/d3d12.dll').read_bytes(), b'built x86_64-windows/d3d12.dll')
+        self.assertEqual((next_ / 'bin/wine').read_bytes(), (base / 'bin/wine').read_bytes())
+        self.assertEqual(file_minimum(next_ / 'lib/wine/x86_64-unix/winemetal.so')[1], parse_macos('15.0'))
+        patches = manifest['derived_from']['replaced']['lib/wine/x86_64-windows/d3d12.dll']['patches']
+        self.assertEqual(sorted(patches), sorted(derive_runtime.DXMT_PATCHES))
+        proof = json.loads((self.artifacts / 'next.tar.json').read_text())
+        self.assertEqual(sorted(proof['added']), added)
+        self.assertNotIn('resigned', proof)
+
+    def test_an_unsigned_stand_in_another_patch_or_a_runtime_that_has_it_is_refused(self):
+        stand_in = self.workspace / 'dxmt-install/x86_64-windows/nvngx.dll'
+        stand_in.write_bytes(b'unsigned')
+        self.proof['files']['x86_64-windows/nvngx.dll'] = derive_runtime.sha(stand_in)
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_metalfx('base', 'next', '-', self.workspace)
+        stand_in.write_bytes(b'built SIGNED')
+        self.proof['files']['x86_64-windows/nvngx.dll'] = derive_runtime.sha(stand_in)
+        self.proof['metalfx_patch_sha256'] = '0' * 64
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_metalfx('base', 'next', '-', self.workspace)
+        self.proof['metalfx_patch_sha256'] = derive_runtime.sha(derive_runtime.ROOT / 'patches/dxmt-metalfx-upscaling.patch')
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+        derive_runtime.derive_metalfx('base', 'next', '-', self.workspace)
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_metalfx('next', 'again', '-', self.workspace)
 
 
 class GameModeApp(unittest.TestCase):

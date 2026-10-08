@@ -12,6 +12,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import tempfile
 from build_portable_setup import MINIMUM_MACOS, build as build_setup
 from derive_runtime import archive_minimum, check_archive, format_macos, parse_macos
 
@@ -19,7 +20,11 @@ ROOT=Path(__file__).resolve().parents[1]
 # The bundle and executable name players see; Brand.swift holds the in-app
 # copy. The bundle identifier keeps its original value so updates carry over.
 APP_NAME='Recall'
-APP_BUILD='38'
+APP_BUILD='47'
+# Overwatch's voice chat runs under this app's microphone permission (Microphone.swift); the
+# hardened runtime gives an app signed without the entitlement silence, with no prompt.
+ENTITLEMENTS={'com.apple.security.device.audio-input':True}
+MICROPHONE_USAGE='Voice chat in Overwatch uses your microphone.'
 RESOURCES=('MosaicLogo.png','LinkedInMark.png','AuthorPhoto.jpg','Wordmark.png','WordmarkDark.png')
 def run(*args):subprocess.run([str(a) for a in args],check=True)
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -71,13 +76,15 @@ def build(output,workspace,runtime_archive,icon=None,identity=None):
         iconset=output.parent/'AppIcon.iconset'
         run('/usr/bin/swift',ROOT/'scripts/app_icon.swift',ROOT/'app/Resources/AppIcon.png',iconset)
         run('/usr/bin/iconutil','-c','icns',iconset,'-o',resources/'AppIcon.icns')
-    (output/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'org.overwatch2mac.launcher','CFBundleExecutable':APP_NAME,'CFBundleName':APP_NAME,'CFBundleDisplayName':APP_NAME,'CFBundlePackageType':'APPL','CFBundleShortVersionString':release['appVersion'],'CFBundleVersion':APP_BUILD,'CFBundleIconFile':'AppIcon','LSMinimumSystemVersion':MINIMUM_MACOS,'NSHighResolutionCapable':True,'LSMultipleInstancesProhibited':True,'NSPrincipalClass':'NSApplication','NSHumanReadableCopyright':'Independent community project. Not affiliated with or endorsed by Blizzard Entertainment or Apple.'}))
+    (output/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'org.overwatch2mac.launcher','CFBundleExecutable':APP_NAME,'CFBundleName':APP_NAME,'CFBundleDisplayName':APP_NAME,'CFBundlePackageType':'APPL','CFBundleShortVersionString':release['appVersion'],'CFBundleVersion':APP_BUILD,'CFBundleIconFile':'AppIcon','LSMinimumSystemVersion':MINIMUM_MACOS,'NSHighResolutionCapable':True,'LSMultipleInstancesProhibited':True,'NSPrincipalClass':'NSApplication','NSMicrophoneUsageDescription':MICROPHONE_USAGE,'NSHumanReadableCopyright':'Independent community project. Not affiliated with or endorsed by Blizzard Entertainment or Apple.'}))
     for binary in (helpers/'libpipeline_prepare.dylib',helpers/'pipeline-prepare',helpers/'pipeline-warm'):
         run('/usr/bin/strip','-S','-x',binary)
     if identity:
         for binary in (helpers/'ow2-setup',helpers/'ow2-pipeline',helpers/'libpipeline_prepare.dylib',helpers/'pipeline-prepare',helpers/'pipeline-warm',rosetta.parent):
             run('/usr/bin/codesign','--force','--options','runtime','--timestamp','--sign',identity,binary)
-        run('/usr/bin/codesign','--force','--options','runtime','--timestamp','--sign',identity,output)
+        with tempfile.TemporaryDirectory() as folder:
+            entitlements=Path(folder)/'app.entitlements';entitlements.write_bytes(plistlib.dumps(ENTITLEMENTS))
+            run('/usr/bin/codesign','--force','--options','runtime','--timestamp','--entitlements',entitlements,'--sign',identity,output)
         run('/usr/bin/codesign','--verify','--deep','--strict',output)
     proof={'app_version':release['appVersion'],'app_build':APP_BUILD,'candidate_contract_sha256':sha(resources/'candidate-parity-contract.json'),'runtime_sha256':sha(resources/release['runtimeArchive']),'pipeline_sources':{name:sha(native/name) for name in sources},'source_files':{str(p.relative_to(ROOT)):sha(p) for p in sorted((ROOT/'app').rglob('*')) if p.is_file()},'signed':bool(identity),'files':{str(p.relative_to(output)):sha(p) for p in output.rglob('*') if p.is_file()}}
     output.with_suffix('.build.json').write_text(json.dumps(proof,indent=2)+'\n')

@@ -48,7 +48,7 @@
     "WINE_SIMULATE_WRITECOPY": "1",
     "CX_ACTIVE_GRAPHICS_BACKEND": "dxmt",
     "CX_GRAPHICS_BACKEND": "dxmt",
-    "WINEDLLOVERRIDES": "d3d11,dxgi,d3d10core,winemetal=b;d3d12=",
+    "WINEDLLOVERRIDES": "d3d11,dxgi,d3d10core,winemetal=b;d3d12,nvapi64,nvngx=",
     "DXMT_CANVAS_DRAWABLES": "3",
     "DXMT_CANVAS_OVERLAY": "0",
     "DXMT_USE_DEFAULT_METAL_CACHE": "1",
@@ -59,6 +59,14 @@
     "WINEMAC_MOUSELOOK": "Overwatch.exe",
     "WINE_GAME_MODE": "Overwatch.exe",
     "DXMT_PREPARE_SHADERS": "1"
+  },
+  "metalfx_environment": {
+    "DXMT_ENABLE_NVEXT": "1",
+    "WINEDLLOVERRIDES": "d3d11,dxgi,d3d10core,winemetal,d3d12,nvapi64,nvngx=b"
+  },
+  "metalfx_sharpening": {
+    "low": "0.4",
+    "high": "0.8"
   },
   "renderer_profile": "config/dxmt-source60-1200.conf",
   "renderer_profile_sha256": "908714b7136bd21711681713fbab945ad195a6bacb8775b6c45de63d570fa9f7",

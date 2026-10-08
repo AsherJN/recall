@@ -10,11 +10,16 @@ values so installations and updates carry over.
 cross-process app lock, plus the Help menu and the Dock menu (Force Quit).
 `SetupView.swift` composes the SwiftUI setup/status views, the support card,
 the version and update line, the first-match tip and the footer's Settings,
-Help & FAQ and About buttons, while `UtilitySheets.swift` owns Settings
-(updates, resolution, Force Quit, Repair, Reset Display Settings, Uninstall), Help & FAQ, About
+Help & FAQ and About buttons, while `UtilitySheets.swift` owns Settings, Help & FAQ, About
 (with Licenses: the bundled NOTICE and Apache 2.0 text, and the third-party
 license files in Finder), Uninstall, the update sheet and What's New (content in `WhatsNew.swift`,
-bundled). `ProjectLinks.swift` holds the link buttons, the lockup, the author
+bundled). Settings is in tabs (`SettingsTab`), and reopens on the last one shown:
+General (updates, opening Battle.net with the app, Mac-sized Battle.net window, off by
+default from 1.3 because its sign-in window doesn't fit at that size), Display (fullscreen
+resolution, Reset Display Settings), Graphics (MetalFX upscaling and Sharpening, with an
+info button explaining them; the Metal HUD), Audio (microphone; how Bluetooth headphones
+and the sound output are handled) and Advanced (Force Quit, Repair, proxy detection,
+Korean account support). Uninstall stays at the foot of every tab. `ProjectLinks.swift` holds the link buttons, the lockup, the author
 photo and the support card. `DisplayOptions.swift` lists the fullscreen
 resolutions (1080p, 1440p and 4K in 16:10 and 16:9, as in the launch contract)
 and reads the main display, which Settings names and uses to say how a choice
@@ -23,10 +28,10 @@ points, and a larger game window would leave part of it out of the pointer's
 reach (the worker lowers such a choice at launch by the same rule). Players
 usually set the resolution in Overwatch's Video settings; the worker keeps that
 choice (`nextResolution` in `portable_preferences.h`, reported by `status` as
-`display_next`), so Settings shows it in a folded row whose sizes write the same
+`display_next`), so Settings › Display shows it, with sizes that write the same
 game setting from outside the game. Each main display (by make, model and serial
-number) keeps its own resolution unless Settings › Remember a resolution for each
-display is off (`display-memory`); a display seen for the first time starts at 1080p
+number) keeps its own resolution unless Settings › Display › Remember a resolution for
+each display is off (`display-memory`); a display seen for the first time starts at 1080p
 in its shape. Reset Display Settings writes the first-install
 resolution (1080p in the main display's shape) and the other display settings again,
 leaving quality and FPS alone. Uninstall
@@ -41,6 +46,46 @@ choice before setup starts (APFS/Mac OS Extended, not case-sensitive, not
 read-only, network or cloud-synced) and disconnected-drive detection. The worker
 enforces the same drive rules for any new data folder and never creates a
 missing parent, so an unplugged drive cannot become a stray internal folder.
+
+Overwatch's voice chat uses the app's microphone permission: to macOS the game runs
+as part of the app, and the app and Wine are signed with the microphone entitlement.
+`Microphone.swift` asks before Battle.net first opens (left to the game, Wine would
+ask from inside a match), and Settings › Audio shows whether it is on, with a button to the
+switch in System Settings, the only place it changes. A Bluetooth headset whose
+microphone is in use drops to low-quality hands-free sound, so when the default
+microphone is a Bluetooth headset and the Mac's built-in microphone can hear (lid
+open), the worker makes the built-in one Wine's default microphone at launch
+(`portable_voice.h`, reported as `voice_microphone`); a microphone chosen in
+Overwatch still wins. Quits from outside the app (the Dock, logging out, System
+Settings after a permission change) go to `AppModel.quit`, which closes an open sheet
+first: AppKit drops them while one is attached.
+
+Battle.net, Overwatch and Wine are Intel programs, so every launch and the Battle.net
+installer first check Rosetta (`rosetta_required`, the same screen as first setup; an
+upgrade to macOS 27 can remove it). Settings › Advanced holds two choices
+the worker keeps in `state.json` and in Wine's registry (`portable_network.h`,
+`portable_korea.h`): automatic proxy detection, off by default because some internet
+providers answer the lookup it makes with an address that never responds and the
+Battle.net installer then stalls (`network`); and Korean account support, experimental,
+which adds a DigiCert certificate the Korean build checks and has Wine's Mac driver
+answer screen reads with a black image (`korean-support`, `WINEMAC_SCREEN_READBACK`).
+Setup applies both before Battle.net's installer runs; a launch puts back any that
+went missing. Both change only while Battle.net and Overwatch are closed, and turning
+Korean support on asks first, in English and Korean. The Play screens suggest it when
+the game folder holds Nexon's anti-cheat (`nexon_build`). Support reports name the
+failure code itself; anything that isn't a plain code stays `other_setup_error`.
+
+Settings › Graphics › MetalFX upscaling, off by default, makes Overwatch offer NVIDIA DLSS in its
+own Video settings; DXMT runs it on Apple's MetalFX. The app passes it, with Sharpening
+(off, low, high), as `launch --metalfx --sharpening`. With it on, the worker
+(`portable_metalfx.h`) starts Battle.net with the contract's MetalFX environment (an
+NVIDIA identity and the engine's d3d12, DLSS and NVAPI stand-ins, which the contract
+otherwise disables), puts the engine's signed DLSS stand-in in `system32` (NVIDIA's
+loader in the game checks that file's signature), writes the card the game is about to
+see into the game's own record of it so it keeps the player's video settings, and adds
+the sharpening amount to the launch's `dxmt.conf`. With it off, it undoes each of those
+and clears a choice of DLSS. Like the Metal HUD, both settings change only while
+Battle.net is closed.
 
 The app has no network account, telemetry, player-side Python or runtime build
 step. Authentication and game downloads remain inside official Battle.net.

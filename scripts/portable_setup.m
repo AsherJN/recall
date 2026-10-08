@@ -5,6 +5,9 @@
  */
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
+#import <CoreAudio/CoreAudio.h>
+#import <IOKit/IOKitLib.h>
+#import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <archive.h>
 #include <archive_entry.h>
@@ -191,14 +194,27 @@ static BOOL busy(NSString *engine) {
 #include "portable_session.h"
 #include "portable_preferences.h"
 #include "portable_retina.h"
+#include "portable_voice.h"
+#include "portable_network.h"
+#include "portable_korea.h"
+#include "portable_metalfx.h"
 #include "portable_diagnostics.h"
+// Tests build the worker with a probe that fails, as on a Mac without Rosetta.
+#ifndef ROSETTA_PROBE
+#define ROSETTA_PROBE @"/usr/bin/arch"
+#endif
+// Battle.net, Overwatch and Wine are Intel programs. Upgrading to macOS 27 doesn't keep
+// Rosetta (issue #15), so launches check too, before anything starts Wine.
+static void requireRosetta(void) {
+    if(waitTask(task(ROSETTA_PROBE,@[@"-x86_64",@"/usr/bin/true"],nil,@"rosetta-check.log"),10))fail(@"rosetta_required");
+}
 static void preflight(void) {
     int silicon=0;size_t size=sizeof(silicon);
     sysctlbyname("hw.optional.arm64",&silicon,&size,NULL,0);
     if(!silicon)fail(@"apple_silicon_required");
     // Overwatch needs Rosetta's fixes in macOS 26.5; on older macOS it hangs before its window opens.
     if(![NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){26,5,0}])fail(@"macos_26_5_required");
-    if(waitTask(task(@"/usr/bin/arch",@[@"-x86_64",@"/usr/bin/true"],nil,@"rosetta-check.log"),10))fail(@"rosetta_required");
+    requireRosetta();
     event(@"preflight_ok",@{@"free_bytes":@(freeBytes()),@"runtime_headroom_bytes":@(6ULL<<30)});
 }
 static NSString *download(NSString *url, NSString *expected) {
@@ -362,6 +378,11 @@ static void prepare(void) {
     if(waitTask(task(join(engine,@"bin/wineserver"),@[@"-w"],wineEnv(engine),@"wineboot-wait.log"),60))fail(@"environment_initialization_busy");
     if(![fm fileExistsAtPath:join(prefix,@"system.reg")])fail(@"environment_registry_missing");
     configureRetina();
+    // The player's network and Korean account choices (portable_network.h, portable_korea.h),
+    // before Battle.net's installer first goes online. Neither stops setup; launches retry.
+    configureProxy(engine,proxyDetectionChosen());
+    if(koreanSupportChosen())configureKoreanCertificate(engine,YES,YES);
+    if(!registrySaved(engine,60))fail(@"environment_initialization_busy");
     // An update keeps a resolution chosen in the game since the last launch.
     NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,YES);configureDisplay(width,height);
     NSMutableDictionary *s=state();s[@"prepared_runtime"]=s[@"active_runtime"];writeJSON(s,join(root,@"state.json"));
@@ -371,9 +392,12 @@ static void prepare(void) {
 // Invoke the same executable as the accepted v6 launcher.
 static NSString *clientPath(void) {return join(root,@"environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe");}
 static void installClient(NSString *installer, NSString *expected) {
+    requireRosetta();
     NSString *engine=runtime();if(busy(engine))fail(@"close_game_before_setup");
     if(![fm fileExistsAtPath:join(root,@"environment/system.reg")])fail(@"prepare_environment_first");
     if(!matches(expected,@"^[a-f0-9]{64}$") || ![hashFile(installer) isEqual:expected])fail(@"client_installer_hash_mismatch");
+    // The installer's update Agent is what stalled at 45% (portable_network.h).
+    configureProxy(engine,proxyDetectionChosen());
     saveStage(@"installing_battlenet");
     NSTask *p=task(join(engine,@"bin/wine"),@[installer,@"--lang=enUS"],wineEnv(engine),@"battlenet-installer.log");
     event(@"battlenet_installer_open",@{@"pid":@(p.processIdentifier)});
@@ -399,9 +423,16 @@ static void endSession(NSString *engine) {
  * draws on the CPU (SwiftShader), so it has no Metal layer for the HUD.
  * macOS Game Mode: the contract's WINE_GAME_MODE makes Wine start Overwatch from the
  * engine's game app (lib/wine/game-mode/Overwatch.app). launch --game-mode 0 leaves it out,
- * so the game starts as before; the app passes it only for a hidden "gameMode" default. */
-static NSMutableDictionary *clientEnvironment(NSMutableDictionary *env, BOOL large, BOOL hud, BOOL gameMode) {
+ * so the game starts as before; the app passes it only for a hidden "gameMode" default.
+ * Korean account support (Settings › Advanced, portable_korea.h) reaches the game the same
+ * way: WINEMAC_SCREEN_READBACK=1 has Wine's Mac driver answer screen reads with a black
+ * image, so the anti-cheat's screenshots no longer crash the game.
+ * So does MetalFX upscaling (Settings, launch --metalfx 1; portable_metalfx.h): the contract's
+ * MetalFX environment. */
+static NSMutableDictionary *clientEnvironment(NSMutableDictionary *env, BOOL large, BOOL hud, BOOL gameMode, BOOL metalfx) {
     if(large)env[@"QT_SCALE_FACTOR"]=@"2";
+    if(metalfx)[env addEntriesFromDictionary:candidateMetalFXEnvironment()];
+    if(koreanSupportChosen())env[@"WINEMAC_SCREEN_READBACK"]=@"1";
     if(!gameMode)[env removeObjectForKey:@"WINE_GAME_MODE"];
     if(hud)[env addEntriesFromDictionary:@{@"MTL_HUD_ENABLED":@"1",@"MTL_HUD_DISABLE_MENU_BAR":@"1",
         @"MTL_HUD_ELEMENTS":@"device,rosetta,layersize,memory,gamemode,fps,gputime,frameinterval,frameintervalgraph,shaders"}];
@@ -449,7 +480,8 @@ static void (^graphicsFeed(NSString *log))(void) {
         }
     };
 }
-static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL gameMode) {
+static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL gameMode, BOOL metalfx, NSString *sharpening) {
+    requireRosetta();
     NSString *engine=runtime();if(![fm fileExistsAtPath:clientPath()])fail(@"battlenet_not_installed");
     NSArray *existing=sessionProcesses();
     if(diagnostic && existing.count)fail(@"close_game_before_maintenance");
@@ -468,7 +500,10 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL 
         event(@"displays_changed",nil);closeClient(@"close_game_before_maintenance");existing=@[];
     }
     if(focusSession(existing)) {
-        if(play && !game)task(join(engine,@"bin/wine"),client,clientEnvironment(wineEnv(engine),large,hud,gameMode),@"battlenet-play.log");
+        // Overwatch reads its default microphone when it starts; one already running keeps its own.
+        if(!game)configureVoiceMicrophone(engine,nil,YES,NO);
+        // Battle.net already open carries its own environment; this hands over the command only.
+        if(play && !game)task(join(engine,@"bin/wine"),client,clientEnvironment(wineEnv(engine),large,hud,gameMode,NO),@"battlenet-play.log");
         if(!game)task(NSProcessInfo.processInfo.arguments[0],@[@"watch",@"--root",root],nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
         return;
     }
@@ -483,11 +518,13 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL 
     else if([source isEqual:@"game_reset"])event(@"display_restored",@{@"width":@(width),@"height":@(height)});
     NSInteger gameWidth=width,gameHeight=height;fittedResolution(&gameWidth,&gameHeight);
     configurePreferences(width,height,gameWidth,gameHeight,NO);
+    // After the resolution: a card switch must not read as the game resetting it (gameChoice).
+    NSString *sharpness=nil;metalfx=configureMetalFX(engine,metalfx,sharpening,YES,&sharpness);
     if(gameWidth!=width || gameHeight!=height)
         event(@"display_fitted",@{@"width":@(gameWidth),@"height":@(gameHeight),@"chosen_width":@(width),@"chosen_height":@(height)});
     NSString *config=[NSString stringWithContentsOfFile:join(engine,@"config/dxmt.conf") encoding:NSUTF8StringEncoding error:nil];
     if(!config)fail(@"runtime_missing");
-    config=canvasProfile(config,gameWidth,gameHeight);
+    config=sharpeningProfile(canvasProfile(config,gameWidth,gameHeight),sharpness);
     if(![config writeToFile:join(root,@"dxmt.conf") atomically:YES encoding:NSUTF8StringEncoding error:nil])fail(@"settings_write_failed");
     NSString *pipeline=helperPath(@"ow2-pipeline");
     if([fm isExecutableFileAtPath:pipeline]) {
@@ -501,13 +538,37 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL 
         if(code)event(@"pipeline_preparation_skipped",nil);
     }
     if(focusSession(sessionProcesses()))return;
+    // Setup applies these; a launch puts back any that went missing (the registry tool runs
+    // only then). The voice step below waits for Wine's server, as Battle.net needs.
+    configureProxy(engine,proxyDetectionChosen());
+    if(koreanSupportChosen())configureKoreanCertificate(engine,YES,YES);
+    configureVoiceMicrophone(engine,nil,YES,YES);
     if(displays) {NSMutableDictionary *s=state();s[@"session_displays"]=displays;writeJSON(s,join(root,@"state.json"));}
-    NSDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),large,hud,gameMode);
+    NSDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),large,hud,gameMode,metalfx);
     NSTask *p=task(join(engine,@"bin/wine"),client,env,@"battlenet.log");
     saveStage(@"battlenet_started");event(@"battlenet_open",@{@"pid":@(p.processIdentifier)});
     task(NSProcessInfo.processInfo.arguments[0],@[@"watch",@"--root",root],nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
 }
 
+/* Settings › Advanced. Battle.net and Overwatch carry both settings from when they start,
+ * so both must be closed. The registry changes first; then the choice is saved for setup
+ * and launches to keep. Without APPLY nothing changes: what would is reported. */
+static void advancedSetting(NSString *name, BOOL on, BOOL apply) {
+    BOOL korean=[name isEqual:@"korean_support"];
+    if(!apply) {
+        if(korean)configureKoreanCertificate(nil,on,NO);else configureProxy(nil,on);
+        return;
+    }
+    // Before setup has made the Windows environment, the choice waits for prepare.
+    if([fm fileExistsAtPath:join(root,@"environment/system.reg")]) {
+        NSString *engine=runtime();
+        if(sessionProcesses().count)fail(@"close_game_before_maintenance");
+        if(!(korean ? configureKoreanCertificate(engine,on,NO) : configureProxy(engine,on)))fail(@"setting_change_failed");
+        registrySaved(engine,6);
+    }
+    NSMutableDictionary *s=state();s[name]=@(on);writeJSON(s,join(root,@"state.json"));
+    event(@"setting_saved",@{@"name":name,@"enabled":@(on)});
+}
 // Refuses while Overwatch itself runs (failing with gameRunning). An owned
 // Battle.net client is closed the way the launch monitor closes it (SIGTERM,
 // then wineserver -k).
@@ -567,7 +628,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
             NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,NO);
             NSMutableDictionary *next=[@{@"width":@(width),@"height":@(height),@"from_game":@([source isEqual:@"game"]),@"per_display":@(displayMemory(state()))} mutableCopy];
             if(mainScreen())next[@"screen"]=mainScreen();
-            event(@"status",@{@"state":state(),@"display_next":next,@"battlenet_installed":@([fm fileExistsAtPath:clientPath()]),@"game_installed":@([fm fileExistsAtPath:join(root,@"environment/drive_c/Program Files (x86)/Overwatch/_retail_/Overwatch.exe")]),@"free_bytes":@(freeBytes())});
+            event(@"status",@{@"state":state(),@"display_next":next,@"battlenet_installed":@([fm fileExistsAtPath:clientPath()]),@"game_installed":@([fm fileExistsAtPath:join(root,@"environment/drive_c/Program Files (x86)/Overwatch/_retail_/Overwatch.exe")]),@"nexon_build":@(nexonBuild()),@"free_bytes":@(freeBytes())});
         }
         else if([command isEqual:@"onboarded"]) { NSMutableDictionary *s=state();s[@"onboarding_complete"]=@YES;writeJSON(s,join(root,@"state.json"));event(@"onboarding_complete",nil); }
         else if([command isEqual:@"session"])event(@"session",@{@"processes":sessionProcesses()});
@@ -587,6 +648,20 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
             event(@"display_memory",@{@"enabled":@([enabled isEqual:@"1"])});
         }
         else if([command isEqual:@"repair-retina"])configureRetina();
+        // Support and tests: the microphone launch points Wine at (portable_voice.h). --uid names one
+        // instead of asking Core Audio ("none": macOS's default); --apply 0 only reports.
+        else if([command isEqual:@"voice-microphone"]) {
+            BOOL apply=![options[@"apply"] isEqual:@"0"];
+            configureVoiceMicrophone(apply ? runtime() : nil,options[@"uid"],apply,NO);
+        }
+        // Settings › Advanced: --proxy-detect 0|1 (automatic proxy detection) and --enabled 0|1
+        // (Korean account support). --apply 0 only reports what would change (support and tests).
+        else if([command isEqual:@"network"] || [command isEqual:@"korean-support"]) {
+            BOOL korean=[command isEqual:@"korean-support"];
+            NSString *value=options[korean ? @"enabled" : @"proxy-detect"];
+            if(![value isEqual:@"0"] && ![value isEqual:@"1"])fail(@"invalid_arguments");
+            advancedSetting(korean ? @"korean_support" : @"proxy_auto_detect",[value isEqual:@"1"],![options[@"apply"] isEqual:@"0"]);
+        }
         else if([command isEqual:@"restore-candidate"]) {
             configureRetina();
             // The qualified baseline's resolution unless the player has chosen one.
@@ -602,8 +677,17 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         // --battlenet-scale 1 keeps Battle.net at Windows' size (Settings); 2 is the default.
         // --metal-hud 1 shows Apple's Metal Performance HUD over Overwatch (Settings); off by default.
         // --game-mode 0 starts Overwatch without macOS Game Mode (hidden app default); on by default.
-        else if([command isEqual:@"launch"])launchClient(NO,[options[@"play"] isEqual:@"1"],![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"]);
-        else if([command isEqual:@"diagnostic-launch"])launchClient(YES,NO,![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"]);
+        // --metalfx 1 offers DLSS on MetalFX, with --sharpening off|low|high (Settings); off by default.
+        else if([command isEqual:@"launch"])launchClient(NO,[options[@"play"] isEqual:@"1"],![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off");
+        else if([command isEqual:@"diagnostic-launch"])launchClient(YES,NO,![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off");
+        // Support and tests: what a launch with --enabled 0|1 (and --sharpening) sets up for MetalFX
+        // upscaling (portable_metalfx.h); --apply 0 only reports.
+        else if([command isEqual:@"metalfx"]) {
+            BOOL apply=![options[@"apply"] isEqual:@"0"];
+            if(![options[@"enabled"] isEqual:@"0"] && ![options[@"enabled"] isEqual:@"1"])fail(@"invalid_arguments");
+            if(apply && sessionProcesses().count)fail(@"close_game_before_maintenance");
+            NSString *amount=nil;configureMetalFX(runtime(),[options[@"enabled"] isEqual:@"1"],options[@"sharpening"] ?: @"off",apply,&amount);
+        }
         else if([command isEqual:@"close-client"]) {closeClient(@"close_game_before_update");event(@"client_closed",nil);}
         else if([command isEqual:@"parity-report"])event(@"parity_report",parityReport(runtime(),wineEnv(runtime())));
         else if([command isEqual:@"uninstall"])uninstall();

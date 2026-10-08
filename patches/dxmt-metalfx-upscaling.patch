@@ -1,0 +1,1413 @@
+diff --git a/src/d3d11/d3d11_context_impl.cpp b/src/d3d11/d3d11_context_impl.cpp
+index e1161cb..b39df41 100644
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -40,6 +40,7 @@
+ #include "d3d11_resource.hpp"
+ #include "dxmt_texture.hpp"
+ #include "util_flags.hpp"
++#include "config/config.hpp"
+ #include "util_math.hpp"
+ #include "util_win32_compat.h"
+ 
+@@ -5229,6 +5230,10 @@ class MTLD3D11ContextExt : public IMTLD3D11ContextExt1 {
+     uint32_t output_height;
+     Rc<TemporalScaler> scaler;
+     Rc<Texture> mv_downscaled;
++    bool mv_offset;
++    Rc<Texture> mv_offset_texture;
++    bool sharpen;
++    Rc<Texture> sharpen_texture;
+   };
+ public:
+   MTLD3D11ContextExt(MTLD3D11DeviceContextImplBase<ContextInternalState> *context) : ctx_(context){};
+@@ -5285,8 +5290,40 @@ public:
+       return;
+     }
+ 
++    // MetalFX writes the output (it needs ShaderRead, ShaderWrite and RenderTarget usage). A render
++    // target the game also allows UAVs on starts without ShaderWrite (Texture::deferShaderWrite) and
++    // gets it at the game's first UAV use, which never comes for a DLSS output: written while still
++    // compressed, it showed in Overwatch as flat 16x16-pixel blocks.
++    bool output_deferred = output->shaderWriteDeferred();
++    ctx_->EnsureShaderWrite(output);
++
++    // A content size of 0 means the whole input texture (MTL_TEMPORAL_UPSCALE_D3D11_DESC); MetalFX
++    // needs the real size, and never more than the texture holds.
++    uint32_t content_width = pDesc->InputContentWidth ? std::min(pDesc->InputContentWidth, input->width()) : input->width();
++    uint32_t content_height =
++        pDesc->InputContentHeight ? std::min(pDesc->InputContentHeight, input->height()) : input->height();
++
++    // Jittered motion vectors go through a pass that takes the jitter change out
++    // (MTL_TEMPORAL_UPSCALE_D3D11_DESC::MotionVectorOffsetEnabled); MetalFX then reads its RG32Float
++    // result.
++    bool mv_offset = pDesc->MotionVectorOffsetEnabled && !pDesc->MotionVectorInDisplayRes;
++    WMTPixelFormat scaler_motion_format = mv_offset ? WMTPixelFormatRG32Float : motion_vector_format;
++
++    // Sharpening (d3d11.metalfxSharpness, 0 to 1; Recall's Sharpening setting): MetalFX writes an
++    // intermediate texture and a contrast-adaptive pass writes the output from it
++    // (MTLFXMVScaleContext::dispatchSharpen). Only for output formats a compute pass can write.
++    static const float sharpness =
++        std::clamp(Config::getInstance().getOption<float>("d3d11.metalfxSharpness", 0.0f), 0.0f, 1.0f);
++    WMTPixelFormat output_format = output->pixelFormat();
++    bool sharpen = sharpness > 0.0f &&
++                   (output_format == WMTPixelFormatRGBA16Float || output_format == WMTPixelFormatRGBA32Float ||
++                    output_format == WMTPixelFormatRG11B10Float || output_format == WMTPixelFormatRGB10A2Unorm ||
++                    output_format == WMTPixelFormatRGBA8Unorm || output_format == WMTPixelFormatBGRA8Unorm);
++
+     Rc<TemporalScaler> scaler;
+     Rc<Texture> mv_downscaled;
++    Rc<Texture> mv_offset_texture;
++    Rc<Texture> sharpen_texture;
+ 
+     for(CachedTemporalScaler& entry: scaler_cache_) {
+       if(pDesc->AutoExposure != entry.auto_exposure) continue;
+@@ -5297,10 +5334,14 @@ public:
+       if(input->pixelFormat() != entry.color_pixel_format) continue;
+       if(output->pixelFormat() != entry.output_pixel_format) continue;
+       if(depth->pixelFormat() != entry.depth_pixel_format) continue;
+-      if(motion_vector_format != entry.motion_vector_pixel_format) continue;
++      if(scaler_motion_format != entry.motion_vector_pixel_format) continue;
++      if(mv_offset != entry.mv_offset) continue;
++      if(sharpen != entry.sharpen) continue;
+ 
+       scaler = entry.scaler;
+       mv_downscaled = entry.mv_downscaled;
++      mv_offset_texture = entry.mv_offset_texture;
++      sharpen_texture = entry.sharpen_texture;
+       break;
+     }
+ 
+@@ -5309,12 +5350,14 @@ public:
+       scaler_entry.color_pixel_format = input->pixelFormat();
+       scaler_entry.output_pixel_format = output->pixelFormat();
+       scaler_entry.depth_pixel_format = depth->pixelFormat();
+-      scaler_entry.motion_vector_pixel_format = motion_vector_format;
++      scaler_entry.motion_vector_pixel_format = scaler_motion_format;
++      scaler_entry.mv_offset = mv_offset;
++      scaler_entry.sharpen = sharpen;
+       WMTFXTemporalScalerInfo info;
+       info.color_format = scaler_entry.color_pixel_format;
+       info.output_format = scaler_entry.output_pixel_format;
+       info.depth_format = scaler_entry.depth_pixel_format;
+-      info.motion_format = motion_vector_format;
++      info.motion_format = scaler_motion_format;
+       scaler_entry.auto_exposure = pDesc->AutoExposure;
+       scaler_entry.input_width = input->width();
+       scaler_entry.input_height = input->height();
+@@ -5330,6 +5373,54 @@ public:
+       info.input_content_max_scale =  3.0f;
+       info.requires_synchronous_initialization = true;
+       scaler_entry.scaler = new TemporalScaler(ctx_->device->GetMTLDevice(), info);
++      WARN("TemporalUpscale: MetalFX scaler ", info.input_width, "x", info.input_height, " -> ", info.output_width, "x",
++           info.output_height, scaler_entry.scaler->scaler() ? "" : " (MetalFX refused it)", "; color format ",
++           info.color_format, " mips ", input->miplevelCount(), " samples ", input->sampleCount(), "; depth ",
++           depth->width(), "x", depth->height(), " format ", info.depth_format, " mips ", depth->miplevelCount(),
++           " samples ", depth->sampleCount(), "; motion ", motion_vector->width(), "x", motion_vector->height(),
++           " format ", motion_vector->pixelFormat(), " read as ", motion_vector_format, "; output format ",
++           info.output_format, " mips ", output->miplevelCount(), output_deferred ? " (made shader-writable)" : "",
++           "; content ", content_width, "x", content_height,
++           " (asked ", pDesc->InputContentWidth, "x", pDesc->InputContentHeight, "); auto exposure ",
++           info.auto_exposure, ", exposure texture ", exposure ? "yes" : "no", ", motion in display size ",
++           pDesc->MotionVectorInDisplayRes, ", jitter taken out of motion ", mv_offset, ", sharpening ",
++           sharpen ? sharpness : 0.0f);
++      if (sharpen) {
++        WMTTextureInfo tex_info;
++        tex_info.width = scaler_entry.output_width;
++        tex_info.height = scaler_entry.output_height;
++        tex_info.depth = 1;
++        tex_info.array_length = 1;
++        tex_info.mipmap_level_count = 1;
++        tex_info.pixel_format = output_format;
++        tex_info.sample_count = 1;
++        tex_info.type = WMTTextureType2D;
++        tex_info.usage = WMTTextureUsageShaderRead | WMTTextureUsageShaderWrite | WMTTextureUsageRenderTarget;
++        tex_info.options = WMTResourceStorageModePrivate;
++        scaler_entry.sharpen_texture = new Texture(tex_info, this->ctx_->device->GetMTLDevice());
++        sharpen_texture = scaler_entry.sharpen_texture;
++        Flags<TextureAllocationFlag> flags;
++        flags.set(TextureAllocationFlag::GpuPrivate);
++        sharpen_texture->rename(sharpen_texture->allocate(flags));
++      }
++      if (mv_offset) {
++        WMTTextureInfo tex_info;
++        tex_info.width = scaler_entry.input_width;
++        tex_info.height = scaler_entry.input_height;
++        tex_info.depth = 1;
++        tex_info.array_length = 1;
++        tex_info.mipmap_level_count = 1;
++        tex_info.pixel_format = WMTPixelFormatRG32Float;
++        tex_info.sample_count = 1;
++        tex_info.type = WMTTextureType2D;
++        tex_info.usage = WMTTextureUsageShaderRead | WMTTextureUsageShaderWrite;
++        tex_info.options = WMTResourceStorageModePrivate;
++        scaler_entry.mv_offset_texture = new Texture(tex_info, this->ctx_->device->GetMTLDevice());
++        mv_offset_texture = scaler_entry.mv_offset_texture;
++        Flags<TextureAllocationFlag> flags;
++        flags.set(TextureAllocationFlag::GpuPrivate);
++        mv_offset_texture->rename(mv_offset_texture->allocate(flags));
++      }
+       if (pDesc->MotionVectorInDisplayRes) {
+         WMTTextureInfo tex_info;
+         tex_info.width = scaler_entry.input_width;
+@@ -5361,8 +5452,8 @@ public:
+                   exposure = std::move(exposure), scaler = std::move(scaler),
+                   props =
+                       WMTFXTemporalScalerProps{
+-                          pDesc->InputContentWidth,
+-                          pDesc->InputContentHeight,
++                          content_width,
++                          content_height,
+                           (bool)pDesc->InReset,
+                           (bool)pDesc->DepthReversed,
+                           pDesc->MotionVectorScaleX,
+@@ -5371,8 +5462,13 @@ public:
+                           pDesc->JitterOffsetY,
+                           pDesc->PreExposure,
+                       },
+-                  motion_vector_format, mv_downscaled = std::move(mv_downscaled)
++                  motion_vector_format, mv_downscaled = std::move(mv_downscaled),
++                  mv_offset_texture = std::move(mv_offset_texture), mv_offset_x = pDesc->MotionVectorOffsetX,
++                  mv_offset_y = pDesc->MotionVectorOffsetY, sharpen_texture = std::move(sharpen_texture)
+                 ](ArgumentEncodingContext &enc) mutable {
++      // MetalFX writes the sharpening pass's input, or the output itself without sharpening.
++      bool sharpen_now = sharpen_texture && enc.mv_scale_cmd.sharpenAvailable();
++      Rc<Texture> &target = sharpen_now ? sharpen_texture : output;
+       auto mv_view = motion_vector->createView(
+           {.format = motion_vector_format,
+            .type = WMTTextureType2D,
+@@ -5397,10 +5493,21 @@ public:
+         WMTFXTemporalScalerProps new_props = props;
+         new_props.motion_vector_scale_x = 1.0;
+         new_props.motion_vector_scale_y = 1.0;
+-        enc.upscaleTemporal(input, output, depth, mv_downscaled, 0, exposure, scaler, new_props);
++        enc.upscaleTemporal(input, target, depth, mv_downscaled, 0, exposure, scaler, new_props);
++      } else if (mv_offset_texture && enc.mv_scale_cmd.dispatchOffset(
++                                          motion_vector, mv_view, mv_offset_texture, props.motion_vector_scale_x,
++                                          props.motion_vector_scale_y, mv_offset_x, mv_offset_y,
++                                          props.input_content_width, props.input_content_height
++                                      )) {
++        WMTFXTemporalScalerProps new_props = props;
++        new_props.motion_vector_scale_x = 1.0;
++        new_props.motion_vector_scale_y = 1.0;
++        enc.upscaleTemporal(input, target, depth, mv_offset_texture, 0, exposure, scaler, new_props);
+       } else {
+-        enc.upscaleTemporal(input, output, depth, motion_vector, mv_view, exposure, scaler, props);
++        enc.upscaleTemporal(input, target, depth, motion_vector, mv_view, exposure, scaler, props);
+       }
++      if (sharpen_now)
++        enc.mv_scale_cmd.dispatchSharpen(sharpen_texture, output, sharpness, output->width(), output->height());
+     });
+   }
+ 
+diff --git a/src/d3d11/d3d11_interfaces.hpp b/src/d3d11/d3d11_interfaces.hpp
+index 6975736..160bb0f 100644
+--- a/src/d3d11/d3d11_interfaces.hpp
++++ b/src/d3d11/d3d11_interfaces.hpp
+@@ -19,6 +19,12 @@ struct MTL_TEMPORAL_UPSCALE_D3D11_DESC {
+   ID3D11Resource *ExposureTexture;
+   FLOAT JitterOffsetX;
+   FLOAT JitterOffsetY;
++  // Jittered motion vectors (DLSS's MVJittered flag) also hold the change in jitter since the last
++  // frame; MetalFX expects motion without it. When enabled, this offset (input pixels, added after
++  // MotionVectorScale) is applied first.
++  BOOL MotionVectorOffsetEnabled;
++  FLOAT MotionVectorOffsetX;
++  FLOAT MotionVectorOffsetY;
+ };
+ 
+ DEFINE_COM_INTERFACE("43ace3ce-1956-448b-a4eb-aee68bdeb283",
+diff --git a/src/d3d12stub/d3d12.cpp b/src/d3d12stub/d3d12.cpp
+index a900e8f..1f81a70 100644
+--- a/src/d3d12stub/d3d12.cpp
++++ b/src/d3d12stub/d3d12.cpp
+@@ -1,14 +1,423 @@
+-// A d3d12.dll that loads but offers no Direct3D 12 device.
++// A d3d12.dll for DLSS sessions: it loads and offers only a "null" Direct3D 12 device.
+ //
+ // NVIDIA Streamline's sl.common.dll imports d3d12.dll even when the game renders with
+-// Direct3D 11, so without any d3d12.dll Streamline (and with it DLSS) cannot load. The
+-// runtime's own d3d12.dll is Apple's D3DMetal shim, which crashes next to DXMT's DXGI, so
+-// launches disable it. This stand-in satisfies the import and fails every call the way a
+-// system without Direct3D 12 would, so nothing can pick a D3D12 path.
++// Direct3D 11. It also builds a "DX11 on DX12" helper device and initialises NGX's Direct3D 12
++// side with it, and NGX then asks that device for its adapter (ID3D12Device::GetAdapterLuid):
++// without a device it reads through a null pointer. The runtime's own d3d12.dll is Apple's
++// D3DMetal shim, which crashes next to DXMT's DXGI, so launches without DLSS disable d3d12.
++//
++// The null device answers identity and capability questions (one node, the DXGI adapter's
++// LUID, no optional features) and refuses to create anything, so nothing can render through
++// it. It is never offered at feature level 12_2, which Overwatch's own Direct3D 12 mode needs.
++// Every call is logged to d3d12.log.
+ 
+ #include <windows.h>
++#include <dxgi.h>
++
++#include <cstring>
++#include <utility>
++
++#include "com/com_guid.hpp"
++#include "log/log.hpp"
++
++namespace dxmt {
++Logger Logger::s_instance("d3d12.log");
++
++namespace {
++
++constexpr HRESULT D3D12_UNAVAILABLE = (HRESULT)0x887A0004L; // DXGI_ERROR_UNSUPPORTED
++constexpr UINT HIGHEST_FEATURE_LEVEL = 0xc100;               // 12_1
++
++const GUID IID_ID3D12Object_ = {0xc4fec28f, 0x7966, 0x4e95, {0x9f, 0x94, 0xf4, 0x31, 0xcb, 0x56, 0xc3, 0xb8}};
++const GUID IID_ID3D12Device_ = {0x189819f1, 0x1db6, 0x4b57, {0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7}};
++
++struct NullDevice {
++  const void *const *vtbl;
++  LONG ref;
++  LUID luid;
++};
++
++HRESULT
++refuse(const char *method, void **out) {
++  WARN("d3d12: ", method, " refused (null device)");
++  if (out)
++    *out = nullptr;
++  return E_NOTIMPL;
++}
++
++// IUnknown and ID3D12Object
++
++HRESULT STDMETHODCALLTYPE
++QueryInterface(NullDevice *self, REFIID iid, void **out) {
++  if (!out)
++    return E_POINTER;
++  if (IsEqualGUID(iid, __uuidof(IUnknown)) || IsEqualGUID(iid, IID_ID3D12Object_) ||
++      IsEqualGUID(iid, IID_ID3D12Device_)) {
++    InterlockedIncrement(&self->ref);
++    *out = self;
++    return S_OK;
++  }
++  WARN("d3d12: QueryInterface ", iid, " -> E_NOINTERFACE");
++  *out = nullptr;
++  return E_NOINTERFACE;
++}
++
++ULONG STDMETHODCALLTYPE
++AddRef(NullDevice *self) {
++  return InterlockedIncrement(&self->ref);
++}
++
++ULONG STDMETHODCALLTYPE
++Release(NullDevice *self) {
++  ULONG ref = InterlockedDecrement(&self->ref);
++  if (!ref) {
++    WARN("d3d12: null device released");
++    HeapFree(GetProcessHeap(), 0, self);
++  }
++  return ref;
++}
++
++HRESULT STDMETHODCALLTYPE
++GetPrivateData(NullDevice *, REFGUID, UINT *size, void *) {
++  if (size)
++    *size = 0;
++  return DXGI_ERROR_NOT_FOUND;
++}
++
++HRESULT STDMETHODCALLTYPE
++SetPrivateData(NullDevice *, REFGUID, UINT, const void *) {
++  return S_OK;
++}
++
++HRESULT STDMETHODCALLTYPE
++SetPrivateDataInterface(NullDevice *, REFGUID, const IUnknown *) {
++  return S_OK;
++}
+ 
+-#define D3D12_UNAVAILABLE ((HRESULT)0x887A0004L) // DXGI_ERROR_UNSUPPORTED
++HRESULT STDMETHODCALLTYPE
++SetName(NullDevice *, LPCWSTR) {
++  return S_OK;
++}
++
++// ID3D12Device, in vtable order
++
++UINT STDMETHODCALLTYPE
++GetNodeCount(NullDevice *) {
++  WARN("d3d12: GetNodeCount -> 1");
++  return 1;
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateCommandQueue(NullDevice *, const void *, REFIID, void **out) {
++  return refuse("CreateCommandQueue", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateCommandAllocator(NullDevice *, UINT, REFIID, void **out) {
++  return refuse("CreateCommandAllocator", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateGraphicsPipelineState(NullDevice *, const void *, REFIID, void **out) {
++  return refuse("CreateGraphicsPipelineState", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateComputePipelineState(NullDevice *, const void *, REFIID, void **out) {
++  return refuse("CreateComputePipelineState", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateCommandList(NullDevice *, UINT, UINT, void *, void *, REFIID, void **out) {
++  return refuse("CreateCommandList", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++CheckFeatureSupport(NullDevice *, UINT feature, void *data, UINT size) {
++  WARN("d3d12: CheckFeatureSupport ", feature, ", ", size, " bytes");
++  if (!data)
++    return E_INVALIDARG;
++  switch (feature) {
++  case 1:    // D3D12_FEATURE_ARCHITECTURE
++  case 16: { // D3D12_FEATURE_ARCHITECTURE1: one node, unified memory
++    if (size < 16)
++      return E_INVALIDARG;
++    auto fields = static_cast<UINT *>(data);
++    UINT node = fields[0];
++    std::memset(data, 0, size);
++    fields[0] = node;
++    fields[2] = TRUE; // UMA
++    fields[3] = TRUE; // CacheCoherentUMA
++    break;
++  }
++  case 2: { // D3D12_FEATURE_FEATURE_LEVELS: the highest requested level up to 12_1
++    struct FeatureLevels {
++      UINT count;
++      const UINT *requested;
++      UINT max_supported;
++    };
++    if (size != sizeof(FeatureLevels))
++      return E_INVALIDARG;
++    auto levels = static_cast<FeatureLevels *>(data);
++    UINT best = 0;
++    for (UINT i = 0; levels->requested && i < levels->count; i++)
++      if (levels->requested[i] <= HIGHEST_FEATURE_LEVEL && levels->requested[i] > best)
++        best = levels->requested[i];
++    if (!best)
++      return D3D12_UNAVAILABLE;
++    levels->max_supported = best;
++    break;
++  }
++  case 4: // D3D12_FEATURE_FORMAT_SUPPORT: keep the format, support nothing
++  case 6: // D3D12_FEATURE_FORMAT_INFO
++    if (size < 4)
++      return E_INVALIDARG;
++    std::memset(static_cast<char *>(data) + 4, 0, size - 4);
++    break;
++  case 5: // D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS: keep format, count and flags
++    if (size < 12)
++      return E_INVALIDARG;
++    std::memset(static_cast<char *>(data) + 12, 0, size - 12);
++    break;
++  case 7: // D3D12_FEATURE_SHADER_MODEL: 5.1, Direct3D 12's minimum
++    if (size < 4)
++      return E_INVALIDARG;
++    *static_cast<UINT *>(data) = 0x51;
++    break;
++  case 12: // D3D12_FEATURE_ROOT_SIGNATURE: version 1.0
++    if (size < 4)
++      return E_INVALIDARG;
++    *static_cast<UINT *>(data) = 1;
++    break;
++  default: // every optional feature unsupported
++    std::memset(data, 0, size);
++    break;
++  }
++  return S_OK;
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateDescriptorHeap(NullDevice *, const void *, REFIID, void **out) {
++  return refuse("CreateDescriptorHeap", out);
++}
++
++UINT STDMETHODCALLTYPE
++GetDescriptorHandleIncrementSize(NullDevice *, UINT type) {
++  WARN("d3d12: GetDescriptorHandleIncrementSize ", type, " -> 32");
++  return 32;
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateRootSignature(NullDevice *, UINT, const void *, SIZE_T, REFIID, void **out) {
++  return refuse("CreateRootSignature", out);
++}
++
++// CreateConstantBufferView ... CreateSampler, CopyDescriptors, CopyDescriptorsSimple: no heap
++// can exist, so there is nothing to write.
++void STDMETHODCALLTYPE
++IgnoreDescriptorWrite(NullDevice *) {
++  static bool logged = false;
++  if (!std::exchange(logged, true))
++    WARN("d3d12: descriptor writes ignored (null device)");
++}
++
++struct AllocationInfo {
++  UINT64 size;
++  UINT64 alignment;
++};
++
++AllocationInfo *STDMETHODCALLTYPE
++GetResourceAllocationInfo(NullDevice *, AllocationInfo *ret, UINT, UINT, const void *) {
++  WARN("d3d12: GetResourceAllocationInfo refused (null device)");
++  ret->size = ~0ull; // what Direct3D 12 reports for a description it cannot place
++  ret->alignment = 0;
++  return ret;
++}
++
++struct HeapProperties {
++  UINT type, cpu_page_property, memory_pool_preference, creation_node_mask, visible_node_mask;
++};
++
++HeapProperties *STDMETHODCALLTYPE
++GetCustomHeapProperties(NullDevice *, HeapProperties *ret, UINT, UINT) {
++  std::memset(ret, 0, sizeof(*ret));
++  return ret;
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateCommittedResource(NullDevice *, const void *, UINT, const void *, UINT, const void *, REFIID, void **out) {
++  return refuse("CreateCommittedResource", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateHeap(NullDevice *, const void *, REFIID, void **out) {
++  return refuse("CreateHeap", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreatePlacedResource(NullDevice *, void *, UINT64, const void *, UINT, const void *, REFIID, void **out) {
++  return refuse("CreatePlacedResource", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateReservedResource(NullDevice *, const void *, UINT, const void *, REFIID, void **out) {
++  return refuse("CreateReservedResource", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateSharedHandle(NullDevice *, void *, const SECURITY_ATTRIBUTES *, DWORD, LPCWSTR, HANDLE *out) {
++  return refuse("CreateSharedHandle", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++OpenSharedHandle(NullDevice *, HANDLE, REFIID, void **out) {
++  return refuse("OpenSharedHandle", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++OpenSharedHandleByName(NullDevice *, LPCWSTR, DWORD, HANDLE *out) {
++  return refuse("OpenSharedHandleByName", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++MakeResident(NullDevice *, UINT, void *const *) {
++  return refuse("MakeResident", nullptr);
++}
++
++HRESULT STDMETHODCALLTYPE
++Evict(NullDevice *, UINT, void *const *) {
++  return refuse("Evict", nullptr);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateFence(NullDevice *, UINT64, UINT, REFIID, void **out) {
++  return refuse("CreateFence", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++GetDeviceRemovedReason(NullDevice *) {
++  return S_OK;
++}
++
++struct PlacedFootprint {
++  UINT64 offset;
++  UINT format, width, height, depth, row_pitch;
++};
++
++void STDMETHODCALLTYPE
++GetCopyableFootprints(
++    NullDevice *, const void *, UINT, UINT count, UINT64, PlacedFootprint *layouts, UINT *rows, UINT64 *row_sizes,
++    UINT64 *total_bytes
++) {
++  WARN("d3d12: GetCopyableFootprints refused (null device)");
++  if (layouts)
++    std::memset(layouts, 0, count * sizeof(*layouts));
++  if (rows)
++    std::memset(rows, 0, count * sizeof(*rows));
++  if (row_sizes)
++    std::memset(row_sizes, 0, count * sizeof(*row_sizes));
++  if (total_bytes)
++    *total_bytes = ~0ull; // what Direct3D 12 reports for a description it cannot place
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateQueryHeap(NullDevice *, const void *, REFIID, void **out) {
++  return refuse("CreateQueryHeap", out);
++}
++
++HRESULT STDMETHODCALLTYPE
++SetStablePowerState(NullDevice *, BOOL) {
++  return refuse("SetStablePowerState", nullptr);
++}
++
++HRESULT STDMETHODCALLTYPE
++CreateCommandSignature(NullDevice *, const void *, void *, REFIID, void **out) {
++  return refuse("CreateCommandSignature", out);
++}
++
++void STDMETHODCALLTYPE
++GetResourceTiling(NullDevice *, void *, UINT *tiles, void *packed_mips, UINT *tile_shape, UINT *subresources, UINT, void *) {
++  WARN("d3d12: GetResourceTiling refused (null device)");
++  if (tiles)
++    *tiles = 0;
++  if (packed_mips)
++    std::memset(packed_mips, 0, 12); // D3D12_PACKED_MIP_INFO
++  if (tile_shape)
++    std::memset(tile_shape, 0, 3 * sizeof(UINT)); // D3D12_TILE_SHAPE
++  if (subresources)
++    *subresources = 0;
++}
++
++// Returns its LUID through a hidden pointer, like every struct-returning COM method.
++LUID *STDMETHODCALLTYPE
++GetAdapterLuid(NullDevice *self, LUID *ret) {
++  WARN("d3d12: GetAdapterLuid -> ", std::hex, self->luid.HighPart, ":", self->luid.LowPart);
++  *ret = self->luid;
++  return ret;
++}
++
++#define METHOD(f) reinterpret_cast<const void *>(&f)
++
++const void *const device_vtbl[] = {
++    METHOD(QueryInterface),           METHOD(AddRef),
++    METHOD(Release),                  METHOD(GetPrivateData),
++    METHOD(SetPrivateData),           METHOD(SetPrivateDataInterface),
++    METHOD(SetName),                  METHOD(GetNodeCount),
++    METHOD(CreateCommandQueue),       METHOD(CreateCommandAllocator),
++    METHOD(CreateGraphicsPipelineState), METHOD(CreateComputePipelineState),
++    METHOD(CreateCommandList),        METHOD(CheckFeatureSupport),
++    METHOD(CreateDescriptorHeap),     METHOD(GetDescriptorHandleIncrementSize),
++    METHOD(CreateRootSignature),      METHOD(IgnoreDescriptorWrite), // CreateConstantBufferView
++    METHOD(IgnoreDescriptorWrite),    // CreateShaderResourceView
++    METHOD(IgnoreDescriptorWrite),    // CreateUnorderedAccessView
++    METHOD(IgnoreDescriptorWrite),    // CreateRenderTargetView
++    METHOD(IgnoreDescriptorWrite),    // CreateDepthStencilView
++    METHOD(IgnoreDescriptorWrite),    // CreateSampler
++    METHOD(IgnoreDescriptorWrite),    // CopyDescriptors
++    METHOD(IgnoreDescriptorWrite),    // CopyDescriptorsSimple
++    METHOD(GetResourceAllocationInfo), METHOD(GetCustomHeapProperties),
++    METHOD(CreateCommittedResource),  METHOD(CreateHeap),
++    METHOD(CreatePlacedResource),     METHOD(CreateReservedResource),
++    METHOD(CreateSharedHandle),       METHOD(OpenSharedHandle),
++    METHOD(OpenSharedHandleByName),   METHOD(MakeResident),
++    METHOD(Evict),                    METHOD(CreateFence),
++    METHOD(GetDeviceRemovedReason),   METHOD(GetCopyableFootprints),
++    METHOD(CreateQueryHeap),          METHOD(SetStablePowerState),
++    METHOD(CreateCommandSignature),   METHOD(GetResourceTiling),
++    METHOD(GetAdapterLuid),
++};
++static_assert(sizeof(device_vtbl) / sizeof(device_vtbl[0]) == 44, "ID3D12Device has 44 methods");
++
++#undef METHOD
++
++bool
++adapter_luid(IUnknown *adapter, LUID *luid) {
++  IDXGIAdapter *dxgi = nullptr;
++  if (adapter) {
++    if (FAILED(adapter->QueryInterface(IID_PPV_ARGS(&dxgi))))
++      return false;
++  } else {
++    auto create = reinterpret_cast<HRESULT(WINAPI *)(REFIID, void **)>(
++        GetProcAddress(LoadLibraryA("dxgi.dll"), "CreateDXGIFactory1")
++    );
++    IDXGIFactory1 *factory = nullptr;
++    if (!create || FAILED(create(IID_PPV_ARGS(&factory))))
++      return false;
++    HRESULT hr = factory->EnumAdapters(0, &dxgi);
++    factory->Release();
++    if (FAILED(hr))
++      return false;
++  }
++  DXGI_ADAPTER_DESC desc;
++  HRESULT hr = dxgi->GetDesc(&desc);
++  dxgi->Release();
++  if (FAILED(hr))
++    return false;
++  *luid = desc.AdapterLuid;
++  return true;
++}
++
++} // namespace
+ 
+ extern "C" {
+ 
+@@ -16,7 +425,25 @@ HRESULT WINAPI
+ D3D12CreateDevice(IUnknown *adapter, UINT feature_level, REFIID iid, void **device) {
+   if (device)
+     *device = nullptr;
+-  return D3D12_UNAVAILABLE;
++  WARN("d3d12: D3D12CreateDevice feature level ", std::hex, feature_level, ", ", iid);
++  if (feature_level > HIGHEST_FEATURE_LEVEL) // never 12_2 (DirectX 12 Ultimate)
++    return D3D12_UNAVAILABLE;
++  LUID luid;
++  if (!adapter_luid(adapter, &luid)) {
++    WARN("d3d12: D3D12CreateDevice: no DXGI adapter");
++    return D3D12_UNAVAILABLE;
++  }
++  if (!device)
++    return S_FALSE;
++  auto created = static_cast<NullDevice *>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(NullDevice)));
++  if (!created)
++    return E_OUTOFMEMORY;
++  created->vtbl = device_vtbl;
++  created->ref = 1;
++  created->luid = luid;
++  HRESULT hr = QueryInterface(created, iid, device);
++  Release(created);
++  return hr;
+ }
+ 
+ HRESULT WINAPI
+@@ -78,3 +505,5 @@ DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
+ }
+ 
+ }
++
++} // namespace dxmt
+diff --git a/src/d3d12stub/meson.build b/src/d3d12stub/meson.build
+index 5c09340..cce88af 100644
+--- a/src/d3d12stub/meson.build
++++ b/src/d3d12stub/meson.build
+@@ -1,6 +1,8 @@
+ # Stand-in d3d12.dll for DLSS sessions (see d3d12.cpp). Only engines that offer DLSS use it.
+ d3d12stub_dll = shared_library('d3d12', 'd3d12.cpp',
+   name_prefix         : '',
++  dependencies        : [ util_dep ],
++  include_directories : [ dxmt_include_path ],
+   install             : true,
+   install_dir         : windows_native_install_dir,
+   vs_module_defs      : 'd3d12.def',
+diff --git a/src/dxgi/dxgi_adapter.cpp b/src/dxgi/dxgi_adapter.cpp
+index b32aa1c..673dd33 100644
+--- a/src/dxgi/dxgi_adapter.cpp
++++ b/src/dxgi/dxgi_adapter.cpp
+@@ -152,6 +152,14 @@ public:
+           pDesc->Description,
+           sizeof(pDesc->Description) / sizeof(pDesc->Description[0]) - 1,
+           options_.customDeviceDesc.c_str(), options_.customDeviceDesc.size());
++    } else if (g_extension_enabled == VendorExtension::Nvidia) {
++      // With NVEXT the adapter is the GPU NVAPI reports (nvapi.cpp: an RTX 4090, AD102), so a
++      // game that checks the DXGI adapter before offering DLSS sees the same card.
++      static const std::string nvidia_desc = "NVIDIA GeForce RTX 4090";
++      str::transcodeString(
++          pDesc->Description,
++          sizeof(pDesc->Description) / sizeof(pDesc->Description[0]) - 1,
++          nvidia_desc.c_str(), nvidia_desc.size());
+     } else {
+       device_.name().getCString((char *)pDesc->Description, sizeof(pDesc->Description), WMTUTF16StringEncoding);
+     }
+@@ -167,12 +175,14 @@ public:
+ 
+     if (options_.customDeviceId >= 0) {
+       pDesc->DeviceId = options_.customDeviceId;
++    } else if (g_extension_enabled == VendorExtension::Nvidia) {
++      pDesc->DeviceId = 0x2684; // GeForce RTX 4090
+     } else {
+       pDesc->DeviceId = 0;
+     }
+ 
+     pDesc->SubSysId = 0;
+-    pDesc->Revision = 0;
++    pDesc->Revision = g_extension_enabled == VendorExtension::Nvidia ? 0xA1 : 0;
+     if (options_.customVideoMemory > 0)
+       pDesc->DedicatedVideoMemory = uint64_t(options_.customVideoMemory) << 20;
+     else if (device_.hasUnifiedMemory())
+@@ -213,8 +223,13 @@ public:
+ 
+     // We can't really reconstruct the version numbers
+     // returned by Windows drivers from Metal
+-    if (SUCCEEDED(hr) && umd_version)
+-      umd_version->QuadPart = ~0ull;
++    if (SUCCEEDED(hr) && umd_version) {
++      if (g_extension_enabled == VendorExtension::Nvidia)
++        // NVIDIA's numbering (32.0.19.9999) for driver 999.99, which NVAPI reports (nvapi.cpp)
++        umd_version->QuadPart = 32ull << 48 | 19ull << 16 | 9999;
++      else
++        umd_version->QuadPart = ~0ull;
++    }
+ 
+     if (FAILED(hr)) {
+       Logger::err("DXGI: CheckInterfaceSupport: Unsupported interface");
+diff --git a/src/dxmt/dxmt_command.cpp b/src/dxmt/dxmt_command.cpp
+index a36737a..ed488cd 100644
+--- a/src/dxmt/dxmt_command.cpp
++++ b/src/dxmt/dxmt_command.cpp
+@@ -496,6 +496,203 @@ struct downscale_dilated_mv_desc {
+   float scale_y;
+ };
+ 
++// Compiled from source the first time it is needed (by macOS, which needs no developer tools), so
++// that the build's precompiled library stays as it is.
++static const char kOffsetMotionVectorSource[] = R"(
++#include <metal_stdlib>
++using namespace metal;
++
++struct offset_mv_desc {
++  float2 scale;
++  float2 offset;
++  uint2 size;
++};
++
++[[kernel]] void cs_offset_mv(
++  uint2 pos [[thread_position_in_grid]],
++  constant offset_mv_desc& desc [[buffer(0)]],
++  texture2d<float, access::read> motion [[texture(0)]],
++  texture2d<float, access::write> offset [[texture(1)]]
++) {
++  if (pos.x >= desc.size.x || pos.y >= desc.size.y)
++    return;
++  offset.write(float4(motion.read(pos).xy * desc.scale + desc.offset, 0, 0), pos);
++}
++)";
++
++struct offset_mv_desc {
++  float scale_x;
++  float scale_y;
++  float offset_x;
++  float offset_y;
++  uint32_t width;
++  uint32_t height;
++};
++
++bool
++MTLFXMVScaleContext::dispatchOffset(
++    const Rc<Texture> &motion, TextureViewKey view_motion, const Rc<Texture> &offset, float scale_x,
++    float scale_y, float offset_x, float offset_y, uint32_t width, uint32_t height
++) {
++  if (!std::exchange(offset_mv_tried_, true)) {
++    WMT::Reference<WMT::Error> err;
++    auto library = device_.newLibraryWithSource(kOffsetMotionVectorSource, err);
++    if (library) {
++      auto cs = library.newFunction("cs_offset_mv");
++      pso_offset_mv_ = device_.newComputePipelineState(cs, err);
++    }
++    if (!pso_offset_mv_)
++      ERR("MetalFX: the motion vector offset pass did not compile; jittered motion vectors stay as they are");
++  }
++  if (!pso_offset_mv_)
++    return false;
++
++  ctx_.startComputePass(0);
++  auto tex_motion = ctx_.access(motion, view_motion, ResourceAccess::Read).texture;
++  auto tex_offset = ctx_.access(offset, offset->fullView, ResourceAccess::Write).texture;
++
++  auto &setpso = ctx_.encodeComputeCommand<wmtcmd_compute_setpso>();
++  setpso.type = WMTComputeCommandSetPSO;
++  setpso.pso = pso_offset_mv_;
++  setpso.threadgroup_size = {8, 8, 1};
++
++  auto &setmotion = ctx_.encodeComputeCommand<wmtcmd_compute_settexture>();
++  setmotion.type = WMTComputeCommandSetTexture;
++  setmotion.texture = tex_motion;
++  setmotion.index = 0;
++
++  auto &setoffset = ctx_.encodeComputeCommand<wmtcmd_compute_settexture>();
++  setoffset.type = WMTComputeCommandSetTexture;
++  setoffset.texture = tex_offset;
++  setoffset.index = 1;
++
++  offset_mv_desc desc{scale_x, scale_y, offset_x, offset_y, width, height};
++  auto &setdesc = ctx_.encodeComputeCommand<wmtcmd_compute_setbytes>();
++  setdesc.type = WMTComputeCommandSetBytes;
++  void *temp = ctx_.allocate_cpu_heap(sizeof(desc), 16);
++  memcpy(temp, &desc, sizeof(desc));
++  setdesc.bytes.set(temp);
++  setdesc.length = sizeof(desc);
++  setdesc.index = 0;
++
++  auto &dispatch = ctx_.encodeComputeCommand<wmtcmd_compute_dispatch>();
++  dispatch.type = WMTComputeCommandDispatchThreads;
++  dispatch.size = {width, height, 1};
++
++  ctx_.endPass();
++  return true;
++}
++
++// Sharpening after MetalFX (Recall's MetalFX upscaling setting), compiled at run time like the pass
++// above. The method is AMD FidelityFX RCAS (robust contrast-adaptive sharpening): each pixel gets a
++// negative lobe on its four neighbours, as strong as it can be without leaving the neighbours' range,
++// times `amount`. RCAS expects values from 0 to 1, and the game hands MetalFX HDR colour, so each
++// pixel is divided by 1 + its brightest channel (Reinhard) and the result scaled back by the centre
++// pixel's own factor: a lone bright highlight changes by as little as the rest of the picture.
++// Alpha is kept.
++static const char kSharpenSource[] = R"(
++#include <metal_stdlib>
++using namespace metal;
++
++struct sharpen_desc {
++  float amount;
++  uint width;
++  uint height;
++};
++
++static float3 compress(float3 c) {
++  c = max(c, 0.0f);
++  return c / (1.0f + max3(c.r, c.g, c.b));
++}
++
++[[kernel]] void cs_sharpen(
++  uint2 pos [[thread_position_in_grid]],
++  constant sharpen_desc& desc [[buffer(0)]],
++  texture2d<float, access::read> source [[texture(0)]],
++  texture2d<float, access::write> target [[texture(1)]]
++) {
++  if (pos.x >= desc.width || pos.y >= desc.height)
++    return;
++  uint2 last = uint2(desc.width - 1, desc.height - 1);
++  float4 center = source.read(pos);
++  float3 c = max(center.rgb, 0.0f);
++  float scale = 1.0f + max3(c.r, c.g, c.b);
++  float3 e = c / scale;
++  float3 b = compress(source.read(uint2(pos.x, pos.y > 0 ? pos.y - 1 : 0)).rgb);
++  float3 d = compress(source.read(uint2(pos.x > 0 ? pos.x - 1 : 0, pos.y)).rgb);
++  float3 f = compress(source.read(uint2(min(pos.x + 1, last.x), pos.y)).rgb);
++  float3 h = compress(source.read(uint2(pos.x, min(pos.y + 1, last.y))).rgb);
++  float3 lo = min(min(b, d), min(f, h));
++  float3 hi = max(max(b, d), max(f, h));
++  float3 hit_lo = min(lo, e) / max(4.0f * hi, 1.0e-6f);
++  float3 hit_hi = (1.0f - max(hi, e)) / min(4.0f * lo - 4.0f, -1.0e-6f);
++  float3 lobes = max(-hit_lo, hit_hi);
++  float lobe = max(-0.1875f, min(max3(lobes.r, lobes.g, lobes.b), 0.0f)) * desc.amount;
++  float3 sharp = (lobe * (b + d + f + h) + e) / (4.0f * lobe + 1.0f);
++  target.write(float4(sharp * scale, center.a), pos);
++}
++)";
++
++struct sharpen_desc {
++  float amount;
++  uint32_t width;
++  uint32_t height;
++};
++
++bool
++MTLFXMVScaleContext::sharpenAvailable() {
++  if (!std::exchange(sharpen_tried_, true)) {
++    WMT::Reference<WMT::Error> err;
++    auto library = device_.newLibraryWithSource(kSharpenSource, err);
++    if (library) {
++      auto cs = library.newFunction("cs_sharpen");
++      pso_sharpen_ = device_.newComputePipelineState(cs, err);
++    }
++    if (!pso_sharpen_)
++      ERR("MetalFX: the sharpening pass did not compile; the picture stays unsharpened");
++  }
++  return pso_sharpen_ != nullptr;
++}
++
++void
++MTLFXMVScaleContext::dispatchSharpen(
++    const Rc<Texture> &source, const Rc<Texture> &target, float amount, uint32_t width, uint32_t height
++) {
++  ctx_.startComputePass(0);
++  auto tex_source = ctx_.access(source, source->fullView, ResourceAccess::Read).texture;
++  auto tex_target = ctx_.access(target, target->fullView, ResourceAccess::Write).texture;
++
++  auto &setpso = ctx_.encodeComputeCommand<wmtcmd_compute_setpso>();
++  setpso.type = WMTComputeCommandSetPSO;
++  setpso.pso = pso_sharpen_;
++  setpso.threadgroup_size = {8, 8, 1};
++
++  auto &setsource = ctx_.encodeComputeCommand<wmtcmd_compute_settexture>();
++  setsource.type = WMTComputeCommandSetTexture;
++  setsource.texture = tex_source;
++  setsource.index = 0;
++
++  auto &settarget = ctx_.encodeComputeCommand<wmtcmd_compute_settexture>();
++  settarget.type = WMTComputeCommandSetTexture;
++  settarget.texture = tex_target;
++  settarget.index = 1;
++
++  sharpen_desc desc{amount, width, height};
++  auto &setdesc = ctx_.encodeComputeCommand<wmtcmd_compute_setbytes>();
++  setdesc.type = WMTComputeCommandSetBytes;
++  void *temp = ctx_.allocate_cpu_heap(sizeof(desc), 16);
++  memcpy(temp, &desc, sizeof(desc));
++  setdesc.bytes.set(temp);
++  setdesc.length = sizeof(desc);
++  setdesc.index = 0;
++
++  auto &dispatch = ctx_.encodeComputeCommand<wmtcmd_compute_dispatch>();
++  dispatch.type = WMTComputeCommandDispatchThreads;
++  dispatch.size = {width, height, 1};
++
++  ctx_.endPass();
++}
++
+ void
+ MTLFXMVScaleContext::dispatch(
+     const Rc<Texture> &dilated, TextureViewKey view_dilated, const Rc<Texture> &downscaled,
+diff --git a/src/dxmt/dxmt_command.hpp b/src/dxmt/dxmt_command.hpp
+index 0984bed..a4f3d57 100644
+--- a/src/dxmt/dxmt_command.hpp
++++ b/src/dxmt/dxmt_command.hpp
+@@ -259,10 +259,36 @@ public:
+       TextureViewKey view_downscaled, float mv_scale_x, float mv_scale_y
+   );
+ 
++  /**
++  Writes width x height motion vectors scaled and then offset (in pixels) to `offset`, for MetalFX.
++  Returns false, writing nothing, when the pass is unavailable.
++  */
++  bool dispatchOffset(
++      const Rc<Texture> &motion, TextureViewKey view_motion, const Rc<Texture> &offset, float scale_x,
++      float scale_y, float offset_x, float offset_y, uint32_t width, uint32_t height
++  );
++
++  /**
++  Whether the sharpening pass can run; it is compiled the first time this is asked.
++  */
++  bool sharpenAvailable();
++
++  /**
++  Writes `target` from `source`, both width x height, with contrast-adaptive sharpening of
++  `amount` (0 to 1). Only after sharpenAvailable() returned true.
++  */
++  void dispatchSharpen(
++      const Rc<Texture> &source, const Rc<Texture> &target, float amount, uint32_t width, uint32_t height
++  );
++
+ private:
+   ArgumentEncodingContext &ctx_;
+   WMT::Device device_;
+   WMT::Reference<WMT::ComputePipelineState> pso_downscale_dilated_mv_;
++  WMT::Reference<WMT::ComputePipelineState> pso_offset_mv_;
++  bool offset_mv_tried_ = false;
++  WMT::Reference<WMT::ComputePipelineState> pso_sharpen_;
++  bool sharpen_tried_ = false;
+ };
+ 
+ constexpr auto kBarrierTileSize = 16;
+diff --git a/src/nvapi/nvapi.cpp b/src/nvapi/nvapi.cpp
+index 3bf6da2..477f69a 100644
+--- a/src/nvapi/nvapi.cpp
++++ b/src/nvapi/nvapi.cpp
+@@ -852,6 +852,41 @@ NvAPI_GPU_GetVirtualizationInfo(NvPhysicalGpuHandle hPhysicalGpu, NV_GPU_VIRTUAL
+   return NVAPI_OK;
+ }
+ 
++NVAPI_INTERFACE
++NvAPI_GPU_GetThermalSettings(NvPhysicalGpuHandle hPhysicalGpu, NvU32 sensorIndex,
++                             NV_GPU_THERMAL_SETTINGS *pThermalSettings) {
++  if (!hPhysicalGpu || !pThermalSettings)
++    return NVAPI_INVALID_ARGUMENT;
++  if (sensorIndex != 0 && sensorIndex != NVAPI_THERMAL_TARGET_ALL)
++    return NVAPI_INVALID_ARGUMENT;
++  // Metal exposes no GPU temperature: one internal sensor at a steady, unremarkable reading.
++  switch (pThermalSettings->version) {
++  case NV_GPU_THERMAL_SETTINGS_VER_1: {
++    auto settings = (NV_GPU_THERMAL_SETTINGS_V1 *)pThermalSettings;
++    memset(settings->sensor, 0, sizeof(settings->sensor));
++    settings->count = 1;
++    settings->sensor[0].controller = NVAPI_THERMAL_CONTROLLER_GPU_INTERNAL;
++    settings->sensor[0].defaultMaxTemp = 90;
++    settings->sensor[0].currentTemp = 50;
++    settings->sensor[0].target = NVAPI_THERMAL_TARGET_GPU;
++    break;
++  }
++  case NV_GPU_THERMAL_SETTINGS_VER_2: {
++    auto settings = (NV_GPU_THERMAL_SETTINGS_V2 *)pThermalSettings;
++    memset(settings->sensor, 0, sizeof(settings->sensor));
++    settings->count = 1;
++    settings->sensor[0].controller = NVAPI_THERMAL_CONTROLLER_GPU_INTERNAL;
++    settings->sensor[0].defaultMaxTemp = 90;
++    settings->sensor[0].currentTemp = 50;
++    settings->sensor[0].target = NVAPI_THERMAL_TARGET_GPU;
++    break;
++  }
++  default:
++    return NVAPI_INCOMPATIBLE_STRUCT_VERSION;
++  }
++  return NVAPI_OK;
++}
++
+ static void *nvapi_lookup(NvU32 id);
+ 
+ extern "C" __cdecl void *nvapi_QueryInterface(NvU32 id) {
+@@ -986,6 +1021,8 @@ static void *nvapi_lookup(NvU32 id) {
+     return (void *)&NvAPI_GPU_GetAdapterIdFromPhysicalGpu;
+   case 0x842b066e:
+     return (void *)&NvAPI_GPU_GetLogicalGpuInfo;
++  case 0xe3640a56:
++    return (void *)&NvAPI_GPU_GetThermalSettings;
+   default:
+     break;
+   }
+diff --git a/src/nvngx/nvngx.cpp b/src/nvngx/nvngx.cpp
+index 4be074e..5e799e0 100644
+--- a/src/nvngx/nvngx.cpp
++++ b/src/nvngx/nvngx.cpp
+@@ -6,7 +6,9 @@
+ #include "nvngx_parameter.hpp"
+ #include "../d3d11/d3d11_interfaces.hpp"
+ #include "../dxgi/dxgi_interfaces.h"
++#include <algorithm>
+ #include <cmath>
++#include <sstream>
+ 
+ namespace dxmt {
+ Logger Logger::s_instance("nvngx.log");
+@@ -87,6 +89,33 @@ NVSDK_NGX_D3D11_CreateFeature(
+   return NVNGX_RESULT_FAIL;
+ }
+ 
++// Diagnostics: the textures and rectangles the game hands to DLSS, logged whenever they change
++// (at most 32 times per feature), so a dynamic render scale shows without flooding the log.
++static std::string
++DescribeTexture(ID3D11Resource *resource) {
++  if (!resource)
++    return "none";
++  Com<ID3D11Texture2D> texture;
++  if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&texture))))
++    return "not a 2D texture";
++  D3D11_TEXTURE2D_DESC desc;
++  texture->GetDesc(&desc);
++  std::stringstream s;
++  s << desc.Width << "x" << desc.Height << " format " << desc.Format << " mips " << desc.MipLevels << " array "
++    << desc.ArraySize << " samples " << desc.SampleDesc.Count;
++  return s.str();
++}
++
++static std::string
++DescribeBase(ParametersImpl *parameters, const char *x, const char *y) {
++  unsigned int base_x = 0, base_y = 0;
++  bool set = !NVNGX_FAILED(parameters->Get(x, &base_x));
++  set = !NVNGX_FAILED(parameters->Get(y, &base_y)) || set;
++  if (!set)
++    return "";
++  return " at " + std::to_string(base_x) + "," + std::to_string(base_y);
++}
++
+ NVNGX_API NVNGX_RESULT
+ NVSDK_NGX_D3D11_EvaluateFeature(
+     ID3D11DeviceContext *context, const unsigned int *handle, NVNGXParameter *params, void *callback
+@@ -118,6 +147,28 @@ NVSDK_NGX_D3D11_EvaluateFeature(
+     if (NVNGX_FAILED(parameters->Get(NVNGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &height)))
+       return NVNGX_RESULT_INVALID_PARAMETER;
+ 
++    dlss->evaluations++;
++    {
++      std::stringstream s;
++      s << "render " << width << "x" << height << " (created " << dlss->width << "x" << dlss->height << " -> "
++        << dlss->target_width << "x" << dlss->target_height << "); color " << DescribeTexture(input)
++        << DescribeBase(parameters, "DLSS.Input.Color.Subrect.Base.X", "DLSS.Input.Color.Subrect.Base.Y")
++        << "; depth " << DescribeTexture(depth)
++        << DescribeBase(parameters, "DLSS.Input.Depth.Subrect.Base.X", "DLSS.Input.Depth.Subrect.Base.Y")
++        << "; motion " << DescribeTexture(mv)
++        << DescribeBase(parameters, "DLSS.Input.MV.Subrect.Base.X", "DLSS.Input.MV.Subrect.Base.Y")
++        << "; output " << DescribeTexture(output)
++        << DescribeBase(parameters, "DLSS.Output.Subrect.Base.X", "DLSS.Output.Subrect.Base.Y")
++        << "; exposure " << DescribeTexture(exposure);
++      if (s.str() != dlss->last_report && dlss->reports < 32) {
++        dlss->reports++;
++        dlss->last_report = s.str();
++        WARN("NVSDK_NGX_D3D11_EvaluateFeature #", dlss->evaluations, ": ", dlss->last_report);
++      }
++      if (dlss->evaluations == 1)
++        Logger::info(str::format("NVSDK_NGX_D3D11_EvaluateFeature: parameters\n", parameters->Describe()));
++    }
++
+     MTL_TEMPORAL_UPSCALE_D3D11_DESC desc = {};
+     desc.InputContentWidth = width;
+     desc.InputContentHeight = height;
+@@ -149,6 +200,33 @@ NVSDK_NGX_D3D11_EvaluateFeature(
+         !(desc.PreExposure > 0))
+       desc.PreExposure = 1.0f;
+ 
++    // Jittered motion vectors (the game's flag; Overwatch sets it) also hold the change in jitter
++    // since the last frame. DLSS takes it out; MetalFX does not, so the history moved by up to a pixel
++    // every frame and the picture shook. Remove it as AMD FSR 2 does for its equivalent flag:
++    // subtract (previous jitter - current jitter), here in this frame's pixels.
++    if (dlss->flag & NVNGX_DLSS_FLAG_MV_JITTERED) {
++      uint32_t render_width = width ? width : dlss->width, render_height = height ? height : dlss->height;
++      desc.MotionVectorOffsetEnabled = TRUE;
++      if (!reset && dlss->previous_width && dlss->previous_height) {
++        desc.MotionVectorOffsetX =
++            desc.JitterOffsetX - dlss->previous_jitter_x * float(render_width) / float(dlss->previous_width);
++        desc.MotionVectorOffsetY =
++            desc.JitterOffsetY - dlss->previous_jitter_y * float(render_height) / float(dlss->previous_height);
++      }
++      dlss->previous_jitter_x = desc.JitterOffsetX;
++      dlss->previous_jitter_y = desc.JitterOffsetY;
++      dlss->previous_width = render_width;
++      dlss->previous_height = render_height;
++    }
++
++    if (dlss->evaluations <= 8 || dlss->evaluations % 3000 == 0)
++      Logger::info(str::format(
++          "NVSDK_NGX_D3D11_EvaluateFeature #", dlss->evaluations, ": jitter ", desc.JitterOffsetX, ",",
++          desc.JitterOffsetY, " motion scale ", desc.MotionVectorScaleX, ",", desc.MotionVectorScaleY,
++          " motion offset ", desc.MotionVectorOffsetX, ",", desc.MotionVectorOffsetY, " pre-exposure ",
++          desc.PreExposure, " reset ", reset
++      ));
++
+     pCtxExt->TemporalUpscale(&desc);
+ 
+     pCtxExt->Release();
+@@ -253,12 +331,25 @@ NVNGX_DLSS_GetOptimalSettingsCallback(NVNGXParameter *params) {
+   params->Set(NVNGX_Parameter_OutHeight, out_height);
+   params->Set(NVNGX_Parameter_Sharpness, 0.0f);
+ 
+-  params->Set(NVNGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, (unsigned int)std::ceil(width / 3));
+-  params->Set(NVNGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, (unsigned int)std::ceil(height / 3));
++  // The chosen mode is the floor of the dynamic range. Offered one third of the output, Overwatch
++  // moved its render size between 853x480 and 1983x1120 at 1440p Quality, softening the picture
++  // below the mode the player picked. Overwatch steps through the range in fifteenths, so the range
++  // stays at least 15 pixels wide (DLAA).
++  unsigned int min_width = std::min(out_width, width > 15 ? width - 15 : width);
++  unsigned int min_height = std::min(out_height, height > 15 ? height - 15 : height);
++  params->Set(NVNGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, min_width);
++  params->Set(NVNGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, min_height);
+ 
+   params->Set(NVNGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, width);
+   params->Set(NVNGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, height);
+ 
++  static uint32_t reports = 0;
++  if (reports++ < 32)
++    Logger::info(str::format(
++        "DLSS optimal settings: ", width, "x", height, " quality ", perf_quality_value, " -> render ", out_width, "x",
++        out_height, ", dynamic ", min_width, "x", min_height, " to ", width, "x", height
++    ));
++
+   params->Set("DLSSMode", 1);
+ 
+   params->Set(NVNGX_Parameter_DLSS_Hint_Render_Preset_DLAA, (unsigned int)0);
+@@ -336,6 +427,121 @@ NVSDK_NGX_D3D11_GetFeatureRequirements(
+   return NVNGX_RESULT_FAIL;
+ }
+ 
++// Direct3D 12. In a Direct3D 11 game NVIDIA Streamline also initialises NGX for its "DX11 on
++// DX12" helper device (see d3d12stub) and unloads every NGX feature when that fails. DXMT has
++// no Direct3D 12: these accept initialisation and report that nothing runs on it.
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_Init_Ext(
++    unsigned long long id, const wchar_t *path, void *device, unsigned int sdk_version, const void *feature_info
++) {
++  WARN("NVSDK_NGX_D3D12_Init_Ext: app ", id, ", sdk ", std::hex, sdk_version);
++  return NVNGX_RESULT_OK;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_Init(
++    unsigned long long id, const wchar_t *path, void *device, const void *feature_info, unsigned int sdk_version
++) {
++  WARN("NVSDK_NGX_D3D12_Init: app ", id, ", sdk ", std::hex, sdk_version);
++  return NVNGX_RESULT_OK;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_Init_ProjectID(
++    const char *project, unsigned int engine_type, const char *engine_version, const wchar_t *path, void *device,
++    unsigned int sdk_version, const void *feature_info
++) {
++  WARN("NVSDK_NGX_D3D12_Init_ProjectID: ", project ? project : "", ", sdk ", std::hex, sdk_version);
++  return NVNGX_RESULT_OK;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_Init_with_ProjectID(
++    const char *project, unsigned int engine_type, const char *engine_version, const wchar_t *path, void *device,
++    const void *feature_info, unsigned int sdk_version
++) {
++  WARN("NVSDK_NGX_D3D12_Init_with_ProjectID: ", project ? project : "", ", sdk ", std::hex, sdk_version);
++  return NVNGX_RESULT_OK;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_Shutdown() {
++  return NVNGX_RESULT_OK;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_Shutdown1(void *device) {
++  return NVNGX_RESULT_OK;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_GetCapabilityParameters(NVNGXParameter **out_params) {
++  WARN("NVSDK_NGX_D3D12_GetCapabilityParameters: nothing runs on Direct3D 12");
++  if (!out_params)
++    return NVNGX_RESULT_INVALID_PARAMETER;
++  auto out_parameters = new ParametersImpl();
++  out_parameters->Set("SuperSampling.Available", 0u);
++  out_parameters->Set(NVSDK_NGX_EParameter_SuperSampling_Available, 0u);
++  out_parameters->Set("SuperSampling.FeatureInitResult", (unsigned int)NVNGX_RESULT_FEATURE_NOT_SUPPORTED);
++  *out_params = out_parameters;
++  return NVNGX_RESULT_OK;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_GetParameters(NVNGXParameter **out_params) {
++  return NVSDK_NGX_D3D12_GetCapabilityParameters(out_params);
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_AllocateParameters(NVNGXParameter **out_params) {
++  if (!out_params)
++    return NVNGX_RESULT_INVALID_PARAMETER;
++  *out_params = new ParametersImpl();
++  return NVNGX_RESULT_OK;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_DestroyParameters(NVNGXParameter *params) {
++  delete static_cast<ParametersImpl *>(params);
++  return NVNGX_RESULT_OK;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_GetScratchBufferSize(unsigned int feature, const NVNGXParameter *params, size_t *out_size) {
++  if (out_size)
++    *out_size = 0;
++  return NVNGX_RESULT_FEATURE_NOT_SUPPORTED;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_GetFeatureRequirements(
++    IDXGIAdapter *adapter, const NVNGX_FeatureDiscoveryInfo *discovery_info, NVNGX_FeatureRequirement *requirement
++) {
++  if (!requirement)
++    return NVNGX_RESULT_INVALID_PARAMETER;
++  WARN("NVSDK_NGX_D3D12_GetFeatureRequirements: feature ", discovery_info ? discovery_info->FeatureID : 0,
++       " not on Direct3D 12");
++  requirement->FeatureSupported = NVNGX_FEATURE_SUPPORT_RESULT_UNSUPPORTED;
++  return NVNGX_RESULT_FEATURE_NOT_SUPPORTED;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_CreateFeature(void *command_list, unsigned int feature, NVNGXParameter *params, unsigned int **out_handle) {
++  ERR("NVSDK_NGX_D3D12_CreateFeature: feature ", feature, " not on Direct3D 12");
++  return NVNGX_RESULT_FEATURE_NOT_SUPPORTED;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_ReleaseFeature(unsigned int *handle) {
++  return NVNGX_RESULT_FEATURE_NOT_SUPPORTED;
++}
++
++NVNGX_API NVNGX_RESULT
++NVSDK_NGX_D3D12_EvaluateFeature(void *command_list, const unsigned int *handle, NVNGXParameter *params, void *callback) {
++  return NVNGX_RESULT_FEATURE_NOT_SUPPORTED;
++}
++
+ extern "C" BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason,
+                                LPVOID reserved) {
+   if (reason != DLL_PROCESS_ATTACH)
+diff --git a/src/nvngx/nvngx.hpp b/src/nvngx/nvngx.hpp
+index 82bae54..36ac7de 100644
+--- a/src/nvngx/nvngx.hpp
++++ b/src/nvngx/nvngx.hpp
+@@ -5,14 +5,16 @@ struct ID3D12Resource;
+ 
+ #define NVNGX_API extern "C"
+ 
++// NVIDIA's codes: NVSDK_NGX_Result_Fail is 0xBAD00000, and a failure keeps those top 12 bits.
++// (They were 0xbad0000-style here, which NVIDIA's NVSDK_NGX_FAILED reads as success.)
+ enum NVNGX_RESULT : unsigned int {
+   NVNGX_RESULT_OK = 1,
+-  NVNGX_RESULT_FAIL = 0xbad0000,
+-  NVNGX_RESULT_FEATURE_NOT_SUPPORTED = 0xbad0001,
+-  NVNGX_RESULT_INVALID_PARAMETER = 0xbad0005,
++  NVNGX_RESULT_FAIL = 0xBAD00000,
++  NVNGX_RESULT_FEATURE_NOT_SUPPORTED = 0xBAD00001,
++  NVNGX_RESULT_INVALID_PARAMETER = 0xBAD00005,
+ };
+ 
+-#define NVNGX_FAILED(result) (result & NVNGX_RESULT_FAIL) == NVNGX_RESULT_FAIL
++#define NVNGX_FAILED(result) (((result) & 0xFFF00000) == NVNGX_RESULT_FAIL)
+ 
+ enum NVNGX_FEATURE : unsigned int {
+   NVNGX_FEATURE_SUPERSAMPLING = 1,
+diff --git a/src/nvngx/nvngx_feature.hpp b/src/nvngx/nvngx_feature.hpp
+index 05f1fd0..3a33b70 100644
+--- a/src/nvngx/nvngx_feature.hpp
++++ b/src/nvngx/nvngx_feature.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ #include "nvngx.hpp"
+ #include <cstdint>
++#include <string>
+ 
+ namespace dxmt {
+ 
+@@ -17,6 +18,15 @@ struct DLSSFeature : CommonFeature {
+   int quality;
+   int flag;
+   int enable_output_subrects;
++  // The previous frame's jitter and render size (jittered motion vectors).
++  float previous_jitter_x = 0;
++  float previous_jitter_y = 0;
++  uint32_t previous_width = 0;
++  uint32_t previous_height = 0;
++  // Diagnostics: evaluations so far, and the last logged shape of the inputs.
++  uint32_t evaluations = 0;
++  uint32_t reports = 0;
++  std::string last_report;
+ };
+ 
+ }
+\ No newline at end of file
+diff --git a/src/nvngx/nvngx_parameter.hpp b/src/nvngx/nvngx_parameter.hpp
+index 93f06c8..fe443d5 100644
+--- a/src/nvngx/nvngx_parameter.hpp
++++ b/src/nvngx/nvngx_parameter.hpp
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include "nvngx.hpp"
++#include <map>
+ #include <unordered_map>
+ #include <variant>
+ #include <string>
+@@ -190,6 +191,32 @@ public:
+     values_.clear();
+   }
+ 
++  // Every parameter with its type and value, sorted by name, eight to a line (diagnostics; Wine
++  // raises an exception for a debug line over about 1000 bytes).
++  std::string
++  Describe() const {
++    std::map<std::string, std::string> sorted;
++    for (auto &[name, value] : values_)
++      sorted[name] = std::visit(
++          overloads{
++              [](unsigned long long v) { return "ull " + std::to_string(v); },
++              [](float v) { return "float " + std::to_string(v); },
++              [](double v) { return "double " + std::to_string(v); },
++              [](unsigned int v) { return "uint " + std::to_string(v); },
++              [](int v) { return "int " + std::to_string(v); },
++              [](void *v) { return std::string(v ? "pointer" : "null pointer"); },
++              [](ID3D11Resource *v) { return std::string(v ? "D3D11 resource" : "null D3D11 resource"); },
++              [](ID3D12Resource *v) { return std::string(v ? "D3D12 resource" : "null D3D12 resource"); }
++          },
++          value
++      );
++    std::string out;
++    unsigned count = 0;
++    for (auto &[name, value] : sorted)
++      out += name + " = " + value + (++count % 8 ? "; " : "\n");
++    return out;
++  }
++
+ private:
+   std::unordered_map<std::string, Parameter> values_;
+ 

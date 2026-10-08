@@ -39,8 +39,14 @@ struct SetupFailure: Error {
         case "run_from_installed_app", "app_move_failed": return "\(Brand.name) couldn’t move itself. Drag \(Brand.name) to Applications, eject the disk image, then open it from Applications."
         case "app_name_taken": return "Another app named \(Brand.name) is in your Applications folders. Rename or remove that app, then try again."
         case "release_unavailable": return "This app is missing its verified setup components. Download a complete copy from the release page."
+        case "setting_change_failed": return "This setting couldn’t be changed. Close Overwatch and Battle.net, then try again."
         default: return "This step couldn’t finish. Retry, or open Help & FAQ to save a support report. Your game data has been kept."
         }
+    }
+    /// The code as a support report shows it. Worker and app codes are fixed names like
+    /// process_launch_failed, never paths or account details; anything else stays generic.
+    var reportCode:String {
+        code.isEmpty ? "none" : (code.range(of:"^[a-z][a-z0-9_]{0,63}$",options:.regularExpression) != nil ? code : "other_setup_error")
     }
 }
 

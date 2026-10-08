@@ -133,6 +133,7 @@ struct SetupView: View {
                             .font(LauncherStyle.font(13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     }
                     PerformanceTip()
+                    if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
                     if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
                 }
             }
@@ -155,11 +156,13 @@ struct SetupView: View {
             VStack(spacing:16) {
                 if model.lowStorage { storageWarning }
                 PerformanceTip()
+                if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
                 if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
             }
         case .running:
             VStack(spacing:16) {
                 PerformanceTip()
+                if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
                 if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
             }
         case .driveMissing: EmptyView()
@@ -334,6 +337,32 @@ struct FirstMatchTip: View {
             .padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
             .task(id:copied) { if copied { try? await Task.sleep(for:.seconds(2));copied=false } }
+    }
+}
+// Korean accounts linked to Nexon need Korean account support (Settings › Advanced). Shown
+// on the Play, opening and running screens once the game folder holds Nexon's files and the
+// option is off, until dismissed; the option itself stays in Settings either way. In English
+// and Korean, since Recall is otherwise English-only.
+struct KoreanAccountTip: View {
+    let open:()->Void
+    let dismiss:()->Void
+    var body:some View {
+        HStack(alignment:.top,spacing:10) {
+            Label {
+                VStack(alignment:.leading,spacing:10) {
+                    Text("Playing on a Korean account linked to Nexon? Turn on Korean account support in Settings › Advanced.")
+                        .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+                    Text("넥슨과 연동된 한국 계정으로 플레이하시나요? 설정 › 고급에서 한국 계정 지원을 켜세요.")
+                        .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+                    Button("Open Settings 설정 열기",action:open).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                }
+            } icon: { Image(systemName:"person.crop.circle.badge.questionmark") }
+            Spacer(minLength:0)
+            Button(action:dismiss) { Image(systemName:"xmark").font(.system(size:11,weight:.bold)).frame(width:22,height:22).contentShape(Rectangle()) }
+                .buttonStyle(.borderless).foregroundStyle(.secondary).help("Dismiss this tip").accessibilityLabel("Dismiss tip")
+        }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+            .padding(16).frame(maxWidth:.infinity,alignment:.leading)
+            .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
     }
 }
 // The footer's three destinations, sized as buttons.

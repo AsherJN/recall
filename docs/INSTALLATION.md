@@ -70,7 +70,7 @@ After you update Recall or macOS, the first launch can spend a minute or two on
 you've already used, so your first match runs smoothly. It only happens that
 once.
 
-You can turn automatic checks off in Settings and check any time with Recall ›
+You can turn automatic checks off in Settings › General and check any time with Recall ›
 Check for Updates….
 
 ## Uninstalling

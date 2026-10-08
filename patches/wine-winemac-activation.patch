@@ -661,6 +661,100 @@ index 2663eb8..0be985b 100644
      free_display_mode_descriptor(desc);
  
      for (i = 0; !modes_has_16bpp && i < count; i++)
+diff --git a/dlls/winemac.drv/gdi.c b/dlls/winemac.drv/gdi.c
+index 7342494..c031291 100644
+--- a/dlls/winemac.drv/gdi.c
++++ b/dlls/winemac.drv/gdi.c
+@@ -231,12 +231,89 @@ static INT macdrv_GetDeviceCaps(PHYSDEV dev, INT cap)
+ }
+ 
+ 
++static void free_image_bits(struct gdi_image_bits *bits)
++{
++    free(bits->ptr);
++}
++
++
++/* WINEMAC_SCREEN_READBACK=1: Recall's Korean account support (see macdrv_GetImage). */
++static BOOL screen_readback(void)
++{
++    static int enabled = -1;
++
++    if (enabled < 0)
++    {
++        const char *value = getenv("WINEMAC_SCREEN_READBACK");
++        enabled = value && !strcmp(value, "1");
++    }
++    return enabled;
++}
++
++
++/***********************************************************************
++ *              GetImage (MACDRV.@)
++ *
++ * The Mac driver can't read the screen back, so BitBlt and StretchBlt from the
++ * screen DC failed (the null driver's ERROR_NOT_SUPPORTED). Windows never fails
++ * them, and Nexon's anti-cheat, which takes screenshots that way, crashes the
++ * game on the failure. With WINEMAC_SCREEN_READBACK=1 the driver answers with a
++ * black image, laid out as X11DRV_GetImage returns the screen: 32-bit top-down
++ * BI_RGB covering src->visrect, the source rectangle made relative to it. No
++ * pixels are read, so no screen recording permission is involved. Otherwise the
++ * call goes on to the next driver, as before.
++ */
++static DWORD macdrv_GetImage(PHYSDEV dev, BITMAPINFO *info, struct gdi_image_bits *bits,
++                             struct bitblt_coords *src)
++{
++    UINT width, height;
++    int x, y;
++
++    if (!screen_readback())
++    {
++        dev = GET_NEXT_PHYSDEV(dev, pGetImage);
++        return dev->funcs->pGetImage(dev, info, bits, src);
++    }
++
++    info->bmiHeader.biSize          = sizeof(info->bmiHeader);
++    info->bmiHeader.biPlanes        = 1;
++    info->bmiHeader.biBitCount      = 32;
++    info->bmiHeader.biCompression   = BI_RGB;
++    info->bmiHeader.biXPelsPerMeter = 0;
++    info->bmiHeader.biYPelsPerMeter = 0;
++    info->bmiHeader.biClrUsed       = 0;
++    info->bmiHeader.biClrImportant  = 0;
++    if (!bits) return ERROR_SUCCESS;  /* just querying the format */
++
++    x = src->visrect.left;
++    y = src->visrect.top;
++    width = max(src->visrect.right - x, 0);
++    height = max(src->visrect.bottom - y, 0);
++    /* make the source rectangle relative to the returned bits */
++    src->x -= x;
++    src->y -= y;
++    OffsetRect(&src->visrect, -x, -y);
++
++    info->bmiHeader.biWidth     = width;
++    info->bmiHeader.biHeight    = -(int)height;
++    info->bmiHeader.biSizeImage = width * height * 4;
++    if (!(bits->ptr = calloc(1, max(info->bmiHeader.biSizeImage, 4)))) return ERROR_OUTOFMEMORY;
++    bits->is_copy = TRUE;
++    bits->free    = free_image_bits;
++    bits->param   = NULL;
++
++    TRACE("hdc %p %ux%u black\n", dev->hdc, width, height);
++    return ERROR_SUCCESS;
++}
++
++
+ static const struct user_driver_funcs macdrv_funcs =
+ {
+     .dc_funcs.pCreateCompatibleDC = macdrv_CreateCompatibleDC,
+     .dc_funcs.pCreateDC = macdrv_CreateDC,
+     .dc_funcs.pDeleteDC = macdrv_DeleteDC,
+     .dc_funcs.pGetDeviceCaps = macdrv_GetDeviceCaps,
++    .dc_funcs.pGetImage = macdrv_GetImage,
+     .dc_funcs.pGetDeviceGammaRamp = macdrv_GetDeviceGammaRamp,
+     .dc_funcs.pSetDeviceGammaRamp = macdrv_SetDeviceGammaRamp,
+     .dc_funcs.priority = GDI_PRIORITY_GRAPHICS_DRV,
 diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
 index 4d4efaa..5845bef 100644
 --- a/dlls/winemac.drv/macdrv_cocoa.h

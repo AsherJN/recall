@@ -19,8 +19,15 @@
      "patch": "patches/dxmt-portable-metal.patch",
      "sha256": "3b9d6a3248c62e8eb3b623fbd3f5c4939d6973dfa366e827b7d25e814428745d",
      "applies_after": "patches/dxmt-v1-performance.patch"
+    },
+    {
+     "patch": "patches/dxmt-metalfx-upscaling.patch",
+     "sha256": "87ab3e3a74a1c140653d6d66cda6576049472c8999afab68bccc866e48028b17",
+     "applies_after": "patches/dxmt-portable-metal.patch"
     }
-   ]
+   ],
+   "nvapi_headers_commit": "d08488fcc82eef313b0464db37d2955709691e94",
+   "nvapi_headers_license": "MIT"
   },
   "wine": {
    "url": "https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.3.0.tar.gz",
@@ -45,7 +52,7 @@
     },
     {
      "patch": "patches/wine-winemac-activation.patch",
-     "sha256": "4921a4a9fe12333e5b179f809837d221db1514bdc61bc80a4613110049383a7d"
+     "sha256": "5cce039910a420a16e7d9f8907e17206b1413c6cc4092248548d3d6b29f1138d"
     }
    ],
    "v1_patches_apply_after": "patches/wine-portable-directory-boolean.patch and Soju's ncrypt-persisted-keys.patch"
@@ -132,6 +139,10 @@
    "sha256": "3b9d6a3248c62e8eb3b623fbd3f5c4939d6973dfa366e827b7d25e814428745d"
   },
   {
+   "path": "patches/dxmt-metalfx-upscaling.patch",
+   "sha256": "87ab3e3a74a1c140653d6d66cda6576049472c8999afab68bccc866e48028b17"
+  },
+  {
    "path": "patches/wine-portable-directory-boolean.patch",
    "sha256": "9c7f811b1eb83d8c322d42509a82c1bcd786f101ce1b26fc1dc0c5badebe619b"
   },
@@ -149,7 +160,7 @@
   },
   {
    "path": "patches/wine-winemac-activation.patch",
-   "sha256": "4921a4a9fe12333e5b179f809837d221db1514bdc61bc80a4613110049383a7d"
+   "sha256": "5cce039910a420a16e7d9f8907e17206b1413c6cc4092248548d3d6b29f1138d"
   }
  ]
 }

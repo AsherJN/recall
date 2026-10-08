@@ -226,6 +226,29 @@ class NativeSetup(unittest.TestCase):
         self.root.mkdir();(self.root/'.overwatch-2-mac-owner').write_text('ow2-native-setup-v1\n')
         self.call('status')
 
+    def test_voice_microphone_points_wine_at_the_built_in_microphone(self):
+        # Wine's registry as the game leaves it: the built-in microphone's GUID, no defaults yet.
+        self.call('status');(self.root/'environment').mkdir()
+        registry=self.root/'environment'/'user.reg'
+        device=('[Software\\\\Wine\\\\Drivers\\\\winecoreaudio.drv\\\\devices\\\\1,BuiltInMicrophoneDevice] 1790620772\n'
+                '#time=1dd4f78b421c0b8\n"guid"=hex:76,c3,38,12,cf,58,16,4a,81,26,58,3b,91,93,ec,43\n\n')
+        registry.write_text('WINE REGISTRY Version 2\n\n'+device)
+        endpoint='{0.0.1.00000000}.{1238C376-58CF-4A16-8126-583B9193EC43}'
+        result=self.call('voice-microphone','--uid','BuiltInMicrophoneDevice','--apply','0')[-1]
+        self.assertEqual((result['device'],result['id'],result['changes']),('built_in',endpoint,['DefaultVoiceInput','DefaultInput']))
+        # Already set: nothing to write. Back to macOS's default microphone: both values go.
+        registry.write_text(registry.read_text()+'[Software\\\\Wine\\\\Drivers\\\\winecoreaudio.drv] 1790620772\n'
+                            f'"DefaultVoiceInput"="{endpoint}"\n"DefaultInput"="{endpoint}"\n\n')
+        self.assertEqual(self.call('voice-microphone','--uid','BuiltInMicrophoneDevice','--apply','0')[-1]['changes'],[])
+        result=self.call('voice-microphone','--uid','none','--apply','0')[-1]
+        self.assertEqual((result['device'],result['changes'],'id' in result),('default',['DefaultVoiceInput','DefaultInput'],False))
+        # A microphone Wine has not listed yet gets a GUID first; an odd UID is never used.
+        result=self.call('voice-microphone','--uid','OtherMicrophone','--apply','0')[-1]
+        self.assertEqual(result['changes'],['guid','DefaultVoiceInput','DefaultInput'])
+        self.assertRegex(result['id'],r'^\{0\.0\.1\.00000000\}\.\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\}$')
+        result=self.call('voice-microphone','--uid','Bad]Name','--apply','0')[-1]
+        self.assertEqual((result['device'],result['reason']),('default','unsupported_device'))
+
     def test_discard_unused_removes_only_an_empty_scaffold(self):
         self.call('status');(self.root/'logs'/'rosetta-check.log').write_text('')
         self.assertEqual(self.call('discard-unused')[-1]['stage'],'location_released')

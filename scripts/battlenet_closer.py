@@ -162,10 +162,12 @@ def run(session, *, grace_seconds=25.0, timeout_seconds=1800.0, poll_seconds=2.0
 
 
 def accepts(engine, prefix):
-    """Only this experiment's engines, with its own prefixes or the installed app's environment."""
-    runtime, prefix = ROOT / "runtime", prefix.resolve()
-    return engine.resolve().is_relative_to(runtime) and (
-        prefix.is_relative_to(runtime) or prefix == INSTALLED_PREFIX.resolve())
+    """Only this experiment's engines, with its own prefixes or the installed app's environment.
+    In a worktree, runtime/ links to the main tree's folders (replay/ holds the engines)."""
+    runtime = ROOT / "runtime"
+    roots = [runtime.resolve()] + [child.resolve() for child in runtime.iterdir() if child.is_symlink()]
+    inside = lambda path: any(path.resolve().is_relative_to(root) for root in roots)
+    return inside(engine) and (inside(prefix) or prefix.resolve() == INSTALLED_PREFIX.resolve())
 
 
 def main():

@@ -35,6 +35,13 @@ import Foundation
         do { _ = try await slow.value;fatalError("Cancellation succeeded") }
         catch let e as SetupFailure { precondition(e.code=="cancelled") }
         let resumed=try await service.run("success");precondition(resumed.count==2)
-        print("PASS: native event stream, graphics progress, structured errors, concurrent operation exclusion, cancellation and resume")
+        // Support reports name the failure; anything that isn't a plain code stays generic.
+        precondition(SetupFailure(code:"process_launch_failed").reportCode=="process_launch_failed")
+        precondition(SetupFailure(code:"rosetta_required").reportCode=="rosetta_required")
+        precondition(SetupFailure(code:"").reportCode=="none")
+        for odd in ["/private/tmp/folder","Some Error","code-with-dash","x\n","_leading",String(repeating:"a",count:65)] {
+            precondition(SetupFailure(code:odd).reportCode=="other_setup_error",odd)
+        }
+        print("PASS: native event stream, graphics progress, structured errors, concurrent operation exclusion, cancellation and resume, support report codes")
     }
 }

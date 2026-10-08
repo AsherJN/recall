@@ -42,6 +42,14 @@ license and NOTICE from this tree; text files only, so it needs no signing ident
 --controllers (1.2) replaces the controller bus with build_wine_native.py's winebus,
 built with SDL2, and adds that SDL2 library (build_portable_dependencies.py --only sdl2,
 packaged and signed as the assembler packages a dependency) and its license.
+
+--microphone (1.3) re-signs the Wine loader and server with the microphone entitlement
+and makes the game app again from that loader; unsigned, every file stays byte-identical.
+
+--metalfx DXMT_WORKSPACE (1.3) replaces the base's DXMT with the build_portable_dxmt.py build
+in that workspace (MetalFX upscaling: dxmt-metalfx-upscaling.patch), replaces Wine's d3d12.dll
+with DXMT's stand-in and adds DXMT's signed DLSS stand-in (nvngx.dll), its NVAPI stand-in
+(nvapi64.dll) and NVAPI's MIT license. Launches disable all three unless upscaling is on.
 """
 import argparse
 import hashlib
@@ -56,6 +64,7 @@ import tarfile
 import tempfile
 
 import game_mode_app
+import sign_pe
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / 'runtime/phase-2/artifacts'
@@ -326,8 +335,10 @@ DXMT_FILES = {'lib/wine/x86_64-windows/d3d11.dll': 'x86_64-windows/d3d11.dll',
               'lib/wine/x86_64-windows/winemetal.dll': 'x86_64-windows/winemetal.dll',
               'lib/wine/x86_64-unix/winemetal.so': 'x86_64-unix/winemetal.so'}
 PROFILE = 'config/dxmt.conf'
+MICROPHONE = 'com.apple.security.device.audio-input'
 ENTITLEMENTS = ['com.apple.security.cs.allow-jit', 'com.apple.security.cs.allow-unsigned-executable-memory',
-                'com.apple.security.cs.disable-executable-page-protection', 'com.apple.security.cs.disable-library-validation']
+                'com.apple.security.cs.disable-executable-page-protection', 'com.apple.security.cs.disable-library-validation',
+                MICROPHONE]
 
 
 def check_native(path, shipped):
@@ -511,7 +522,7 @@ def replace_files(base, dest, base_version, version, identity, manifest, sources
 
     archive = write_archive(dest)
     base_proof = json.loads(Path(str(base) + '.tar.json').read_text())
-    for key in ('restamped', 'removed', 'added', 'repackaged_from'):
+    for key in ('restamped', 'removed', 'added', 'repackaged_from', 'resigned', 'entitlement_added'):
         base_proof.pop(key, None)  # the base's own records, not this derivation's
     result = dict(base_proof, version=version, archive_sha256=sha(archive), archive_bytes=archive.stat().st_size,
                   unpacked_file_bytes=sum(v.get('bytes', 0) for v in manifest['files'].values()),
@@ -742,6 +753,167 @@ def derive_controllers(base_version, version, identity):
                   additions=additions)
 
 
+# MetalFX upscaling (1.3): DXMT's d3d12.dll stand-in replaces Wine's (which launches disable),
+# and the DLSS and NVAPI stand-ins are new. NVAPI's headers are a submodule of the DXMT source.
+METALFX_REPLACED = {**DXMT_FILES, 'lib/wine/x86_64-windows/d3d12.dll': 'x86_64-windows/d3d12.dll'}
+METALFX_NVNGX = 'lib/wine/x86_64-windows/nvngx.dll'
+METALFX_ADDED = {METALFX_NVNGX: 'x86_64-windows/nvngx.dll',
+                 'lib/wine/x86_64-windows/nvapi64.dll': 'x86_64-windows/nvapi64.dll'}
+NVAPI_LICENSE = 'licenses/NVAPI-MIT'
+DXMT_PATCHES = {'patches/dxmt-v1-private.patch': 'patch_sha256',
+                'patches/dxmt-v1-performance.patch': 'performance_patch_sha256',
+                'patches/dxmt-portable-metal.patch': 'portable_metal_patch_sha256',
+                'patches/dxmt-metalfx-upscaling.patch': 'metalfx_patch_sha256'}
+
+
+def derive_metalfx(base_version, version, identity, dxmt_workspace):
+    """1.3: MetalFX upscaling. The DXMT build with the MetalFX patch replaces the base's five DXMT
+    files, and its d3d12.dll stand-in replaces Wine's; its DLSS and NVAPI stand-ins and NVAPI's
+    license are added. DLLs are packaged as the assembler packages DXMT's, except nvngx.dll: its
+    Authenticode signature (Recall's certificate, which NVIDIA's loader checks) covers its bytes,
+    so it is copied as built and its signature checked."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
+        raise ValueError('Invalid runtime version')
+    base, dest = ARTIFACTS / base_version, ARTIFACTS / version
+    if dest.exists() or Path(str(dest) + '.tar.gz').exists():
+        raise ValueError('Use a new version; existing artifact is never overwritten')
+    manifest = json.loads((base / 'runtime.json').read_text())
+    if manifest['version'] != base_version:
+        raise ValueError('The base artifact names a different version')
+    proof = json.loads((dxmt_workspace / 'dxmt-build-proof.json').read_text())
+    install = dxmt_workspace / 'dxmt-install'
+    for patch, key in DXMT_PATCHES.items():
+        if proof.get(key) != sha(ROOT / patch):
+            raise ValueError(f'Rebuild DXMT: {patch} changed since the build')
+    for built in [*METALFX_REPLACED.values(), *METALFX_ADDED.values()]:
+        if proof['files'].get(built) != sha(install / built):
+            raise ValueError(f'DXMT build proof does not match {built}')
+    if not sign_pe.check(install / METALFX_ADDED[METALFX_NVNGX]):
+        raise ValueError('nvngx.dll is not signed (build_portable_dxmt.py signs it)')
+    license_text = dxmt_workspace / 'dxmt-source/external/nvapi/License.txt'
+    if 'SPDX-License-Identifier: MIT' not in license_text.read_text():
+        raise ValueError('NVAPI license not found in the DXMT source')
+    record = {'built_by': 'scripts/build_portable_dxmt.py', 'patches': {patch: proof[key] for patch, key in DXMT_PATCHES.items()}}
+    with tempfile.TemporaryDirectory() as folder:
+        sources, replaced, additions = {}, {}, {}
+        for relative, built in METALFX_REPLACED.items():
+            source = install / built
+            if relative not in DXMT_FILES:  # replace_files packages DXMT's own five
+                source = Path(folder) / Path(built).name
+                shutil.copy2(install / built, source)
+                package_like_assembler(source)
+            sources[relative] = source
+            replaced[relative] = dict(record, build_sha256=proof['files'][built])
+        for relative, built in METALFX_ADDED.items():
+            source = install / built
+            if relative != METALFX_NVNGX:
+                source = Path(folder) / Path(built).name
+                shutil.copy2(install / built, source)
+                package_like_assembler(source)
+            check_paths(source)
+            additions[relative] = (source, dict(record, build_sha256=proof['files'][built]))
+        additions[NVAPI_LICENSE] = (license_text, {'from': 'NVIDIA NVAPI ' + proof['nvapi'] + '/License.txt'})
+        replace_files(base, dest, base_version, version, identity, manifest, sources, replaced, additions=additions)
+    if sha(dest / METALFX_NVNGX) != proof['files'][METALFX_ADDED[METALFX_NVNGX]] or not sign_pe.check(dest / METALFX_NVNGX):
+        raise ValueError('nvngx.dll changed on its way into the runtime')
+
+
+def unsigned_identical(original, resigned):
+    """True when the two files are the same once their signatures are removed."""
+    with tempfile.TemporaryDirectory() as folder:
+        copies = [Path(folder) / 'a', Path(folder) / 'b']
+        for source, copy in zip((original, resigned), copies):
+            shutil.copy2(source, copy)
+            run('codesign', '--remove-signature', copy)
+        return copies[0].read_bytes() == copies[1].read_bytes()
+
+
+def signature_of(path):
+    """Identifier and entitlements of a file signed with the hardened runtime."""
+    info = subprocess.run(['codesign', '-dvv', str(path)], capture_output=True, text=True).stderr
+    identifier = re.search(r'^Identifier=(.+)$', info, re.M)
+    if not identifier or not re.search(r'^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*\bruntime\b', info, re.M):
+        raise ValueError(f'{Path(path).name} is not signed with the hardened runtime')
+    xml = subprocess.run(['codesign', '-d', '--xml', '--entitlements', '-', str(path)], capture_output=True).stdout
+    return identifier.group(1), plistlib.loads(xml) if xml.strip() else None
+
+
+def derive_microphone(base_version, version, identity):
+    """1.3: the hardened runtime gives a process signed without the microphone entitlement
+    silence, with no prompt, so Overwatch's voice chat heard nothing. The Wine loader and server
+    (every file the assembler signs with Wine's entitlements) are re-signed with it added, as
+    CrossOver signs its loader, and the game app is made again from that loader (it carries the
+    loader's entitlements). Unsigned, each re-signed file is byte-identical to the base's."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
+        raise ValueError('Invalid runtime version')
+    base, dest = ARTIFACTS / base_version, ARTIFACTS / version
+    if dest.exists() or Path(str(dest) + '.tar.gz').exists():
+        raise ValueError('Use a new version; existing artifact is never overwritten')
+    manifest = json.loads((base / 'runtime.json').read_text())
+    if manifest['version'] != base_version:
+        raise ValueError('The base artifact names a different version')
+    game_app = [f for f in manifest['files'] if f.startswith(game_mode_app.BUNDLE + '/')]
+    targets = sorted(f for f in manifest['files'] if Path(f).name in ('wine', 'wineserver') and f not in game_app)
+    if not targets:
+        raise ValueError(f'{base_version} has no Wine loader or server')
+    signatures = {relative: signature_of(base / relative) for relative in targets}
+    if any(MICROPHONE in (entitlements or {}) for _, entitlements in signatures.values()):
+        raise ValueError(f'{base_version} already has the microphone entitlement')
+
+    run('/bin/cp', '-Rc', base, dest)  # APFS clone: only re-signed files take space
+    resigned = {}
+    with tempfile.TemporaryDirectory() as folder:
+        for relative in targets:
+            target = dest / relative
+            identifier, entitlements = signatures[relative]
+            entitlements = {**(entitlements or {}), MICROPHONE: True}
+            plist = Path(folder) / 'entitlements.plist'
+            plist.write_bytes(plistlib.dumps(entitlements))
+            args = ['codesign', '--force', '--options', 'runtime', '--sign', identity, '--identifier', identifier,
+                    '--entitlements', plist]
+            if identity != '-':
+                args.insert(4, '--timestamp')
+            run(*args, target, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            run('codesign', '--verify', '--strict', target)
+            if signature_of(target) != (identifier, entitlements):
+                raise ValueError(f'{relative} is not signed as intended')
+            if not unsigned_identical(base / relative, target):
+                raise ValueError(f'{relative} differs from the base beyond its signature')
+            resigned[relative] = {'base_sha256': manifest['files'][relative]['sha256'], 'entitlement_added': MICROPHONE}
+            manifest['files'][relative] = {'sha256': sha(target), 'bytes': target.stat().st_size}
+    if game_app:
+        # Signing its executable alone would break the bundle's seal.
+        shutil.rmtree(dest / game_mode_app.BUNDLE)
+        if sorted(game_mode_app.make(dest, manifest.get('minimum_macos', '26.0'), identity)) != sorted(game_app):
+            raise ValueError('The game app was made with other files than the base has')
+        for relative in game_app:
+            if relative == game_mode_app.EXECUTABLE and not unsigned_identical(base / relative, dest / relative):
+                raise ValueError('The game app executable differs from the base beyond its signature')
+            resigned[relative] = {'base_sha256': manifest['files'][relative]['sha256'], 'remade_by': 'scripts/game_mode_app.py'}
+            manifest['files'][relative] = {'sha256': sha(dest / relative), 'bytes': (dest / relative).stat().st_size}
+
+    manifest['version'] = version
+    manifest['derived_from'] = {'version': base_version, 'archive_sha256': sha(str(base) + '.tar.gz'),
+                                'entitlement_added': MICROPHONE, 'resigned': resigned}
+    (dest / 'runtime.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+    before, after = tree(base), tree(dest)
+    changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
+    if not set(changed) <= {*resigned, 'runtime.json'} or not set(targets) <= set(changed):
+        raise ValueError('Unexpected differences from the base runtime: ' + ', '.join(changed))
+
+    archive = write_archive(dest)
+    base_proof = json.loads(Path(str(base) + '.tar.json').read_text())
+    for key in ('replaced', 'restamped', 'removed', 'added', 'repackaged_from'):
+        base_proof.pop(key, None)  # the base's own records, not this derivation's
+    result = dict(base_proof, version=version, archive_sha256=sha(archive), archive_bytes=archive.stat().st_size,
+                  unpacked_file_bytes=sum(v.get('bytes', 0) for v in manifest['files'].values()),
+                  files=len(manifest['files']), derived_from=base_version, resigned=sorted(resigned),
+                  entitlement_added=MICROPHONE)
+    archive.with_suffix('.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(result, indent=2))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--base-version', required=True)
@@ -763,6 +935,11 @@ if __name__ == '__main__':
                         help="Replace the project's MIT license file with the Apache 2.0 license and NOTICE")
     parser.add_argument('--controllers', action='store_true',
                         help='Replace winebus with the SDL2 build and add the SDL2 library and its license')
+    parser.add_argument('--microphone', action='store_true',
+                        help='Re-sign the Wine loader and server with the microphone entitlement and remake the game app')
+    parser.add_argument('--metalfx', type=Path, metavar='DXMT_WORKSPACE',
+                        help="Replace DXMT with this build_portable_dxmt.py workspace's MetalFX build and add its "
+                             'd3d12, DLSS and NVAPI stand-ins')
     args = parser.parse_args()
     if args.repackage:
         repackage(args.base_version, args.version)
@@ -772,6 +949,10 @@ if __name__ == '__main__':
         parser.error('--identity is required to replace components')
     elif args.controllers:
         derive_controllers(args.base_version, args.version, args.identity)
+    elif args.microphone:
+        derive_microphone(args.base_version, args.version, args.identity)
+    elif args.metalfx:
+        derive_metalfx(args.base_version, args.version, args.identity, args.metalfx.resolve())
     elif args.minimum_macos:
         restamp_runtime(args.base_version, args.version, args.identity, args.minimum_macos)
     elif args.native:

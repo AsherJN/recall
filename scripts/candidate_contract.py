@@ -18,6 +18,12 @@ def load():
     if (value['schema'] != 1 or value['supported_resolutions'] != RESOLUTIONS
             or value['default_resolution'] not in RESOLUTIONS):
         raise ValueError('Unsupported candidate contract')
+    # MetalFX upscaling (1.3): its environment turns on what the contract's own leaves off (DXMT's
+    # NVIDIA identity; the d3d12, DLSS and NVAPI stand-ins); sharpening is DXMT's amount per choice.
+    if (set(value['metalfx_environment']) != {'DXMT_ENABLE_NVEXT', 'WINEDLLOVERRIDES'}
+            or set(value['metalfx_sharpening']) != {'low', 'high'}
+            or not all(0 < float(amount) <= 1 for amount in value['metalfx_sharpening'].values())):
+        raise ValueError('Unsupported candidate contract')
     if hashlib.sha256((ROOT/value['renderer_profile']).read_bytes()).hexdigest() != value['renderer_profile_sha256']:
         raise ValueError('Candidate renderer profile changed without review')
     return value
@@ -43,7 +49,9 @@ def native_header():
              ','.join('@[@%d,@%d]' % (w, h) for w, h in contract['supported_resolutions'])+']; }']
     for key, name in [('launch_preferences', 'candidateLaunchPreferences'),
                       ('baseline_preferences', 'candidateBaselinePreferences'),
-                      ('environment', 'candidateEnvironment')]:
+                      ('environment', 'candidateEnvironment'),
+                      ('metalfx_environment', 'candidateMetalFXEnvironment'),
+                      ('metalfx_sharpening', 'candidateMetalFXSharpening')]:
         entries = ','.join(quoted(k)+':'+quoted(v) for k,v in sorted(contract[key].items()))
         lines.append('static NSDictionary *'+name+'(void) { return @{'+entries+'}; }')
     return '\n'.join(lines)+'\n'

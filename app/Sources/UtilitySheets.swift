@@ -1,31 +1,45 @@
 import SwiftUI
 import AppKit
 
-// Updates, the one display setting the app owns, and recovery actions. Driver
-// tuning is deliberately absent: FPS, quality and sensitivity live in Overwatch.
+/// Settings' categories, in tabs across the top: everyday choices first, rarely needed ones in
+/// Advanced. Settings reopens on the tab shown last (AppModel.settingsTab).
+enum SettingsTab:String, CaseIterable, Identifiable {
+    case general, display, graphics, audio, advanced
+    var id:String { rawValue }
+    var title:String { rawValue.capitalized }
+    var symbol:String {
+        switch self {
+        case .general: return "gearshape"
+        case .display: return "display"
+        case .graphics: return "cube"
+        case .audio: return "speaker.wave.2"
+        case .advanced: return "gearshape.2"
+        }
+    }
+}
+// Updates, the display setting the app owns, what Battle.net and Overwatch start with, and
+// recovery actions, in tabs. Driver tuning is deliberately absent: FPS, quality and
+// sensitivity live in Overwatch.
 struct SettingsSheet:View {
     @Bindable var model:AppModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var scheme
     @State private var confirmForceQuit=false
     @State private var confirmRepair=false
     @State private var confirmResetDisplay=false
-    /// Settings opens with the resolution sizes folded away.
-    @State private var displayExpanded=false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var confirmKorean=false
+    @State private var aboutUpscaling=false
     /// Follows System Settings: the main display can change while Settings is open.
     @State private var main=MainDisplay.current
+    /// Also follows System Settings, where the player turns the microphone on or off.
+    @State private var microphoneAccess=Microphone.access
     var body:some View {
         VStack(spacing:16) {
             LauncherHeading(title:"Settings",subtitle:"",compact:true)
-            ScrollView {
-                VStack(spacing:12) {
-                    updates
-                    display
-                    battleNet
-                    metalHUD
-                    troubleshooting
-                }
-            }.scrollIndicators(.hidden)
+            tabs
+            // Each tab fits without scrolling; the sheet takes the open tab's height, as the
+            // update sheet takes its step's.
+            VStack(spacing:12) { page }
             if !model.notice.isEmpty { LauncherNotice(text:model.notice) }
             HStack {
                 // Uninstall lives here, always visible and apart from the
@@ -37,19 +51,18 @@ struct SettingsSheet:View {
                 Spacer()
                 Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
             }
-        }.font(LauncherStyle.font(14)).padding(.horizontal,32).padding(.vertical,28).frame(width:540,height:860)
+        }.font(LauncherStyle.font(14)).padding(.horizontal,32).padding(.vertical,28).frame(width:540)
             .tint(.primary).background { LauncherBackground() }
             .onReceive(NotificationCenter.default.publisher(for:NSApplication.didChangeScreenParametersNotification)) { _ in
                 main=MainDisplay.current
                 model.refreshDisplay()
             }
-            // Battle.net or Overwatch may have opened or closed while the player was away.
-            .onAppear {
-                model.checkRunning()
-                // Private previews can open with the resolution sizes shown.
-                if model.isPreview && CommandLine.arguments.contains("--preview-resolution-open") { displayExpanded=true }
+            // Battle.net or Overwatch may have opened or closed while the player was away,
+            // and the microphone been turned on or off in System Settings.
+            .onAppear { model.checkRunning() }
+            .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in
+                model.checkRunning();microphoneAccess=Microphone.access
             }
-            .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in model.checkRunning() }
             .alert("Force quit Overwatch and Battle.net?",isPresented:$confirmForceQuit) {
                 Button("Cancel",role:.cancel) {}
                 Button("Force Quit",role:.destructive,action:model.forceQuit)
@@ -58,17 +71,63 @@ struct SettingsSheet:View {
                 Button("Cancel",role:.cancel) {}
                 Button("Repair",action:model.repair)
             } message: { Text("Overwatch and Battle.net must be closed. This reinstalls the files this app adds and refreshes the Windows environment. Overwatch, its settings and your Battle.net sign-in are kept.") }
+            .sheet(isPresented:$confirmKorean) { KoreanSupportSheet { model.setAdvanced(.koreanSupport,true) } }
             .alert("Reset display settings?",isPresented:$confirmResetDisplay) {
                 Button("Cancel",role:.cancel) {}
                 Button("Reset",action:model.resetDisplay)
             } message: { Text("Overwatch will open full screen at \(DisplayResolution.initial(for:main).label)\(model.rememberEachDisplay ? " on this display" : "") the next time it starts. Your graphics quality and FPS settings stay as they are.") }
     }
+    /// The categories, each an icon above its name, like the toolbar of a Mac app's Settings.
+    private var tabs:some View {
+        HStack(spacing:6) {
+            ForEach(SettingsTab.allCases) { tab in
+                let selected=model.settingsTab == tab
+                let shape=RoundedRectangle(cornerRadius:14,style:.continuous)
+                Button { model.settingsTab=tab } label: {
+                    VStack(spacing:5) {
+                        Image(systemName:tab.symbol).font(.system(size:17,weight:.medium)).frame(height:21)
+                            .foregroundStyle(selected ? AnyShapeStyle(LauncherStyle.accent) : AnyShapeStyle(.secondary))
+                        Text(tab.title).font(LauncherStyle.font(12,selected ? .semibold : .medium))
+                            .foregroundStyle(selected ? .primary : .secondary)
+                    }.frame(width:78,height:54)
+                        .background {
+                            if selected {
+                                shape.fill(LauncherStyle.surface(scheme)).overlay { shape.strokeBorder(.primary.opacity(0.05),lineWidth:1) }
+                            }
+                        }.contentShape(shape)
+                }.buttonStyle(.plain).accessibilityLabel(tab.title).accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+    }
+    @ViewBuilder private var page:some View {
+        switch model.settingsTab {
+        case .general:
+            updates
+            battleNet
+        case .display:
+            display
+            resetDisplay
+        case .graphics:
+            upscaling
+            metalHUD
+        case .audio:
+            microphone
+            sound
+        case .advanced:
+            troubleshooting
+            advanced
+        }
+    }
     private var updates:some View {
         LauncherPanel(inset:16) {
-            VStack(alignment:.leading,spacing:12) {
-                HStack {
-                    Text("Updates").font(LauncherStyle.font(14,.semibold))
-                    Spacer()
+            VStack(alignment:.leading,spacing:6) {
+                HStack(alignment:.center,spacing:12) {
+                    VStack(alignment:.leading,spacing:2) {
+                        Text("Updates").font(LauncherStyle.font(14,.semibold))
+                        Text("\(status) · Nothing about you or your Mac is sent.").font(LauncherStyle.font(12))
+                            .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Spacer(minLength:12)
                     if case .available=model.update {
                         Button("Update…") { model.sheet = .update }.buttonStyle(.borderedProminent).buttonBorderShape(.capsule).tint(LauncherStyle.accent)
                             .foregroundStyle(LauncherStyle.ink)
@@ -77,9 +136,8 @@ struct SettingsSheet:View {
                             .disabled(model.update == .checking || model.update == .installing)
                     }
                 }
-                Toggle("Check for updates automatically",isOn:$model.automaticUpdates).toggleStyle(.switch).tint(LauncherStyle.accent)
-                Text("\(status) · Nothing about you or your Mac is sent.").font(LauncherStyle.font(12))
-                    .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                Divider().padding(.vertical,6)
+                SettingSwitch(title:"Check for updates automatically",isOn:$model.automaticUpdates)
             }
         }
     }
@@ -93,27 +151,33 @@ struct SettingsSheet:View {
         default: return "Version \(UpdateCheck.installed)"
         }
     }
-    /// Overwatch's own Video settings are where players change resolution; Recall keeps
-    /// their choice. This row shows it, and opens Settings' sizes for players who want
-    /// to set it from here.
+    private var battleNet:some View {
+        LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:6) {
+                SettingSwitch(title:"Open Battle.net when \(Brand.name) opens",detail:"Turn off to start Battle.net yourself with Open Battle.net.",
+                              isOn:$model.autoOpenBattleNet)
+                Divider().padding(.vertical,6)
+                SettingSwitch(title:"Mac-sized Battle.net window",
+                              detail:"Shows Battle.net at twice its Windows size, so it’s easy to read. Overwatch isn’t affected. Takes effect the next time Battle.net opens.",
+                              isOn:$model.largeBattleNet)
+            }
+        }
+    }
+    /// Overwatch's own Video settings are where players usually change resolution; Recall
+    /// keeps their choice. This shows it, with sizes for players who set it from here.
     private var display:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:12) {
-                Button { withAnimation(reduceMotion ? nil : .easeOut(duration:0.15)) { displayExpanded.toggle() } } label: {
-                    HStack(spacing:10) {
-                        VStack(alignment:.leading,spacing:2) {
-                            Text("Fullscreen resolution").font(LauncherStyle.font(14,.semibold))
-                            Text("Set it in game under Options › Video, or here.")
-                                .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                        }
-                        Spacer(minLength:8)
-                        Text(model.resolution.label).font(LauncherStyle.font(13,.medium)).monospacedDigit()
-                        Image(systemName:"chevron.down").font(.system(size:11,weight:.semibold)).foregroundStyle(.secondary)
-                            .rotationEffect(.degrees(displayExpanded ? 180 : 0)).accessibilityHidden(true)
-                    }.contentShape(Rectangle())
-                }.buttonStyle(.plain).accessibilityLabel("Fullscreen resolution, \(model.resolution.label)")
-                    .accessibilityValue(displayExpanded ? "Expanded" : "Collapsed")
-                if displayExpanded { displayOptions }
+                HStack(alignment:.center,spacing:12) {
+                    VStack(alignment:.leading,spacing:2) {
+                        Text("Fullscreen resolution").font(LauncherStyle.font(14,.semibold))
+                        Text("Set it in game under Options › Video, or here.")
+                            .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Spacer(minLength:8)
+                    Text(model.resolution.label).font(LauncherStyle.font(13,.medium)).monospacedDigit()
+                }.accessibilityElement(children:.combine)
+                displayOptions
             }
         }
     }
@@ -131,13 +195,6 @@ struct SettingsSheet:View {
             }
             Text("Overwatch opens on the main display, the one with the menu bar. To use another, choose Displays… and set it as the main display.")
                 .font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-            VStack(alignment:.leading,spacing:4) {
-                Toggle(isOn:Binding(get:{ model.rememberEachDisplay },set:{ model.setRememberEachDisplay($0) })) {
-                    Text("Remember a resolution for each display").font(LauncherStyle.font(13,.medium))
-                }.toggleStyle(.switch).tint(LauncherStyle.accent).disabled(model.busy)
-                Text("Your MacBook screen and each monitor open at the resolution you last used on them.")
-                    .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-            }
             Grid(alignment:.leading,horizontalSpacing:12,verticalSpacing:10) {
                 GridRow {
                     Text("Shape").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
@@ -172,6 +229,9 @@ struct SettingsSheet:View {
                 Text(model.rememberEachDisplay ? "Changes save for this display and apply the next time Overwatch starts." : "Changes save as you choose and apply the next time Overwatch starts.")
                     .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             }.font(LauncherStyle.font(12)).animation(.easeOut(duration:0.15),value:model.displaySaved)
+            Divider().padding(.vertical,2)
+            SettingSwitch(title:"Remember a resolution for each display",detail:"Your MacBook screen and each monitor open at the resolution you last used on them.",
+                          isOn:Binding(get:{ model.rememberEachDisplay },set:{ model.setRememberEachDisplay($0) }),disabled:model.busy)
         }
     }
     private func mainDisplay(_ main:MainDisplay) -> some View {
@@ -205,20 +265,42 @@ struct SettingsSheet:View {
         guard let main else { return source+"Larger sizes look sharper and lower your frame rate." }
         return source+main.caption(for:choice)
     }
-    private var battleNet:some View {
+    private var resetDisplay:some View {
+        LauncherPanel(inset:16) {
+            action("Reset Display Settings…",detail:"If Overwatch opens to a black screen or at the wrong size.",button:"Reset") { confirmResetDisplay=true }
+        }
+    }
+    /// MetalFX upscaling and its sharpening. Battle.net carries both from when it opens, like
+    /// the HUD; sharpening applies only with upscaling on, so it waits until then.
+    private var upscaling:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
-                Toggle(isOn:$model.largeBattleNet) {
-                    Text("Mac-sized Battle.net window").font(LauncherStyle.font(14,.semibold))
-                }.toggleStyle(.switch).tint(LauncherStyle.accent)
-                Text("Shows Battle.net at twice its Windows size, so it’s easy to read. Overwatch isn’t affected. Takes effect the next time Battle.net opens.")
-                    .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                SettingSwitch(title:"MetalFX upscaling",detail:"Adds NVIDIA DLSS to Overwatch’s Video options. Recall runs it on Apple’s MetalFX.",
+                              isOn:$model.metalFXUpscaling,disabled:model.running != nil) {
+                    Text("New").font(LauncherStyle.font(12,.semibold)).foregroundStyle(LauncherStyle.accent)
+                    Button { aboutUpscaling=true } label: {
+                        Image(systemName:"info.circle").font(.system(size:14))
+                    }.buttonStyle(.borderless).foregroundStyle(.secondary)
+                        .help("About MetalFX upscaling").accessibilityLabel("About MetalFX upscaling")
+                        .popover(isPresented:$aboutUpscaling,arrowEdge:.bottom) { MetalFXInfo() }
+                }
                 Divider().padding(.vertical,6)
-                Toggle(isOn:$model.autoOpenBattleNet) {
-                    Text("Open Battle.net when \(Brand.name) opens").font(LauncherStyle.font(14,.semibold))
-                }.toggleStyle(.switch).tint(LauncherStyle.accent)
-                Text("Turn off to start Battle.net yourself with Open Battle.net.")
-                    .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                HStack(alignment:.center,spacing:12) {
+                    VStack(alignment:.leading,spacing:2) {
+                        Text("Sharpening").font(LauncherStyle.font(14,.semibold))
+                            .foregroundStyle(model.metalFXUpscaling ? .primary : .secondary)
+                        Text(model.metalFXUpscaling ? "Makes the upscaled picture crisper." : "Available with MetalFX upscaling on.")
+                            .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Spacer(minLength:12)
+                    Picker("Sharpening",selection:$model.metalFXSharpening) {
+                        Text("Off").tag(AppModel.Sharpening.off)
+                        Text("Low").tag(AppModel.Sharpening.low)
+                        Text("High").tag(AppModel.Sharpening.high)
+                    }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                        .disabled(!model.metalFXUpscaling || model.running != nil)
+                }
+                if let running=model.running { closeFirst(running,"these") }
             }
         }
     }
@@ -227,23 +309,66 @@ struct SettingsSheet:View {
     private var metalHUD:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
-                Toggle(isOn:$model.metalHUD) {
-                    Text("Metal Performance HUD").font(LauncherStyle.font(14,.semibold))
-                }.toggleStyle(.switch).tint(LauncherStyle.accent).disabled(model.running != nil)
-                Text("Shows Apple’s performance overlay in Overwatch: FPS, frame times, and when your Mac is compiling shaders, the cause of first-match stutters.")
-                    .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                if let running=model.running {
-                    HStack(spacing:12) {
-                        Text(running == .game ? "Quit Overwatch to change this." : "Close Battle.net to change this.")
-                            .font(LauncherStyle.font(12,.medium)).fixedSize(horizontal:false,vertical:true)
-                        Spacer(minLength:8)
-                        if running == .client {
-                            Button("Close Battle.net",action:model.closeBattleNet).buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(model.busy)
-                        }
-                    }.padding(.top,6)
-                }
+                SettingSwitch(title:"Metal Performance HUD",
+                              detail:"Shows Apple’s performance overlay in Overwatch: FPS, frame times, and when your Mac is compiling shaders, the cause of first-match stutters.",
+                              isOn:$model.metalHUD,disabled:model.running != nil)
+                if let running=model.running { closeFirst(running,"this") }
             }
         }
+    }
+    /// A setting Battle.net carries from when it opens: change it once it's closed.
+    private func closeFirst(_ running:AppModel.Running, _ what:String) -> some View {
+        HStack(spacing:12) {
+            Text(running == .game ? "Quit Overwatch to change \(what)." : "Close Battle.net to change \(what).")
+                .font(LauncherStyle.font(12,.medium)).fixedSize(horizontal:false,vertical:true)
+            Spacer(minLength:8)
+            if running == .client {
+                Button("Close Battle.net",action:model.closeBattleNet).buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(model.busy)
+            }
+        }.padding(.top,6)
+    }
+    /// macOS lets only the player switch the permission, in System Settings, which then
+    /// asks to reopen the app; the button opens that switch (or, before the first answer,
+    /// shows macOS's prompt). With Bluetooth headphones the worker picks the Mac's own
+    /// microphone at launch (portable_voice.h).
+    private var microphone:some View {
+        LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:6) {
+                HStack(alignment:.center,spacing:12) {
+                    VStack(alignment:.leading,spacing:2) {
+                        Text("Microphone").font(LauncherStyle.font(14,.semibold))
+                        Text(microphoneDetail).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Spacer(minLength:12)
+                    Button(microphoneAccess == .allowed ? "Turn Off…" : microphoneAccess == .denied ? "Turn On…" : "Allow…") {
+                        guard microphoneAccess == .undecided else { NSWorkspace.shared.open(Microphone.privacySettings);return }
+                        Task { await Microphone.ask();microphoneAccess=Microphone.access }
+                    }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                        .help(microphoneAccess == .undecided ? "Shows macOS’s microphone prompt" : "Opens Privacy & Security › Microphone in System Settings")
+                }
+                Divider().padding(.vertical,6)
+                note("Bluetooth headphones","With AirPods or other Bluetooth headphones, voice chat uses your Mac’s built-in microphone when it’s available. Their own microphone would switch them to a lower-quality mode for all sound.")
+            }
+        }
+    }
+    private var microphoneDetail:String {
+        switch microphoneAccess {
+        case .allowed: return "On. Your team can hear you in voice chat."
+        case .denied: return "Off. Your team can’t hear you in voice chat."
+        case .undecided: return "Lets your team hear you in voice chat."
+        }
+    }
+    /// Wine picks the sound output once, as Overwatch starts, and keeps it.
+    private var sound:some View {
+        LauncherPanel(inset:16) {
+            note("Speakers and headphones","Overwatch keeps the sound output that was selected when it started. Connect your headphones and select them on your Mac before you press Play; to switch later, quit Overwatch and play again.")
+        }
+    }
+    private func note(_ title:String,_ text:String) -> some View {
+        VStack(alignment:.leading,spacing:2) {
+            Text(title).font(LauncherStyle.font(14,.semibold))
+            Text(text).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+        }.accessibilityElement(children:.combine)
     }
     private var troubleshooting:some View {
         LauncherPanel(inset:16) {
@@ -251,8 +376,6 @@ struct SettingsSheet:View {
                 Text("Troubleshooting").font(LauncherStyle.font(14,.semibold))
                 action("Force Quit Overwatch & Battle.net",detail:"If the game stops responding.",button:"Force Quit") { confirmForceQuit=true }
                 action("Repair Game Files…",detail:"If Overwatch won’t start. Takes a minute or two.",button:"Repair") { confirmRepair=true }
-                action("Reset Display Settings…",detail:"If Overwatch opens to a black screen or at the wrong size.",button:"Reset") { confirmResetDisplay=true }
-
             }
         }
     }
@@ -267,6 +390,121 @@ struct SettingsSheet:View {
                 .disabled(model.busy || !model.clientInstalled)
         }
     }
+    /// Rarely needed: a network that hands out its proxy automatically (Recall connects
+    /// directly, issue #15), and Korean accounts linked to Nexon (#16). Battle.net and
+    /// Overwatch carry both from when they start.
+    private var advanced:some View {
+        let locked=model.running != nil || !model.canChangeAdvanced
+        return LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:6) {
+                SettingSwitch(title:"Detect network proxy automatically",detail:"Only needed on some work or school networks.",
+                              isOn:Binding(get:{ model.proxyAutoDetect },set:{ model.setAdvanced(.proxyAutoDetect,$0) }),disabled:locked)
+                Divider().padding(.vertical,6)
+                // Turning it on asks first (account risk); turning it off doesn't.
+                SettingSwitch(title:"Korean account support (한국 계정 지원)",detail:"For Korean accounts linked to Nexon. Experimental.",
+                              isOn:Binding(get:{ model.koreanSupport },set:{ on in
+                                  if on { confirmKorean=true } else { model.setAdvanced(.koreanSupport,false) }
+                              }),disabled:locked)
+                if let running=model.running { closeFirst(running,"these") }
+            }
+        }
+    }
+}
+/// A setting with its switch at the trailing edge, as in System Settings: title (and anything
+/// beside it, such as New) over an optional explanation.
+private struct SettingSwitch<Accessory:View>:View {
+    let title:String
+    var detail:String?=nil
+    @Binding var isOn:Bool
+    var disabled=false
+    @ViewBuilder var accessory:Accessory
+    var body:some View {
+        HStack(alignment:.center,spacing:12) {
+            VStack(alignment:.leading,spacing:2) {
+                HStack(spacing:8) {
+                    Text(title).font(LauncherStyle.font(14,.semibold))
+                    accessory
+                }
+                if let detail {
+                    Text(detail).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                }
+            }
+            Spacer(minLength:12)
+            Toggle(title,isOn:$isOn).labelsHidden().toggleStyle(.switch).tint(LauncherStyle.accent).disabled(disabled)
+                .accessibilityHint(detail ?? "")
+        }
+    }
+}
+extension SettingSwitch where Accessory == EmptyView {
+    init(title:String, detail:String?=nil, isOn:Binding<Bool>, disabled:Bool=false) {
+        self.init(title:title,detail:detail,isOn:isOn,disabled:disabled) { EmptyView() }
+    }
+}
+/// Settings › Graphics' info button: what MetalFX upscaling is, how Recall provides it, and
+/// how to use it in Overwatch.
+struct MetalFXInfo:View {
+    private let steps=["Close Battle.net, turn on MetalFX upscaling, then press Play.",
+                       "In Overwatch’s Video settings, choose NVIDIA DLSS.",
+                       "Choose a mode. Quality looks closest to full resolution; Performance and Ultra Performance give the most FPS."]
+    var body:some View {
+        VStack(alignment:.leading,spacing:12) {
+            Text("MetalFX upscaling").font(LauncherStyle.font(15,.semibold)).accessibilityAddTraits(.isHeader)
+            paragraph("What it is.","MetalFX is Apple’s upscaling technology, built into macOS. It runs on your Mac’s GPU.")
+            paragraph("How it works.","Overwatch renders each frame at a lower resolution, which takes less work. MetalFX then rebuilds the frame at full resolution, using detail from earlier frames and how things have moved since. You get a higher frame rate with a picture close to full resolution. Sharpening, if you turn it on, runs after MetalFX.")
+            paragraph("How Recall does it.","Overwatch offers this kind of upscaling as NVIDIA DLSS, and only on NVIDIA graphics cards. With this setting on, Recall presents your Mac to Overwatch as an NVIDIA card, so the DLSS option appears. Overwatch only loads a signed DLSS component, so Recall includes a signed stand-in from the open-source DXMT project, which hands each frame to MetalFX. NVIDIA’s DLSS isn’t used; your Mac does all the work.")
+            VStack(alignment:.leading,spacing:4) {
+                Text("Turning it on.").fontWeight(.semibold)
+                ForEach(steps.indices,id:\.self) { index in
+                    HStack(alignment:.firstTextBaseline,spacing:6) {
+                        Text("\(index+1).").monospacedDigit()
+                        Text(steps[index]).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                }
+            }.lineSpacing(3)
+            paragraph("Good to know.","While it’s on, Overwatch lists your graphics card as an NVIDIA GeForce RTX 4090, and NVIDIA Reflex has no effect. Turning it off puts your Mac’s GPU back and keeps your other video settings.")
+        }.font(LauncherStyle.font(13)).padding(20).frame(width:420,alignment:.leading)
+    }
+    private func paragraph(_ lead:String,_ text:String) -> some View {
+        Text("\(Text(lead).fontWeight(.semibold).foregroundStyle(.primary)) \(Text(text).foregroundStyle(.secondary))")
+            .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+    }
+}
+/// Asked before Korean account support turns on: what it changes and the account risk, in
+/// English and Korean (Recall is otherwise English-only). Return doesn't confirm.
+struct KoreanSupportSheet:View {
+    let turnOn:()->Void
+    @Environment(\.dismiss) private var dismiss
+    static let english=[
+        "This experimental option lets Overwatch run on Korean accounts linked to Nexon. Recall adds a security certificate the game checks when it starts. Nexon’s anti-cheat also takes screenshots of the game now and then, which Wine on a Mac can’t take, so the game crashes. Recall hands the anti-cheat a blank image instead.",
+        "This doesn’t turn off Nexon’s anti-cheat, but Nexon doesn’t support playing on a Mac, so using it could affect your account."]
+    static let korean=[
+        "이 실험적 기능을 켜면 넥슨과 연동된 한국 계정으로 오버워치를 플레이할 수 있습니다. Recall은 게임이 시작할 때 확인하는 보안 인증서를 추가합니다. 또한 넥슨의 안티치트는 가끔 게임 화면을 캡처하는데, Mac의 Wine에서는 이 캡처를 할 수 없어 게임이 강제 종료됩니다. 그래서 Recall은 대신 빈 이미지를 전달합니다.",
+        "이 기능은 넥슨의 안티치트를 끄지 않습니다. 하지만 넥슨은 Mac에서의 플레이를 지원하지 않으므로, 이 기능을 사용하면 계정에 영향이 있을 수 있습니다."]
+    var body:some View {
+        VStack(spacing:24) {
+            SheetHero(symbol:"exclamationmark.shield",title:"Turn on Korean account support?",subtitle:"한국 계정 지원을 켜시겠습니까?")
+            LauncherPanel(inset:20) {
+                VStack(alignment:.leading,spacing:12) {
+                    ForEach(Self.english,id:\.self,content:paragraph)
+                    Divider().padding(.vertical,4)
+                    ForEach(Self.korean,id:\.self,content:paragraph)
+                }
+            }
+            HStack(spacing:16) {
+                Button("Cancel 취소") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                    .controlSize(.large).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button { turnOn();dismiss() } label: { Text("Turn On 켜기").font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
+                    .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)
+                    .tint(LauncherStyle.accent).foregroundStyle(LauncherStyle.ink)
+            }
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:520)
+            .tint(.primary).background { LauncherBackground() }
+    }
+    private func paragraph(_ text:String) -> some View {
+        Text(text).font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary)
+            .frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
+    }
 }
 struct HelpSheet:View {
     @Bindable var model:AppModel
@@ -276,15 +514,19 @@ struct HelpSheet:View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let questions:[(question:String, answer:String)]=[
         ("What are the best Overwatch settings?","In Overwatch’s Video settings, set Render Scale to 100%, Dynamic Render Scale to Off and Frame Rate to Custom, then restart Overwatch. Overwatch resets these whenever you change the graphics quality preset, so check them again after a preset change."),
+        ("How do I use MetalFX upscaling?","Close Battle.net, turn on Settings › Graphics › MetalFX upscaling, then play from \(Brand.name). In Overwatch’s Video settings, choose NVIDIA DLSS and a mode: Quality looks closest to full resolution; Performance and Ultra Performance give the most FPS. The info button beside the setting explains how it works."),
         ("Why do my first matches stutter?","Your Mac prepares each of Overwatch’s graphics effects the first time it appears. The stutters fade as you play, and the prepared graphics are kept for next time."),
         ("How do I play on an external monitor?","Overwatch opens on your main display, the one with the menu bar. In System Settings › Displays, select the monitor and set Use as to Main display. Then choose your monitor’s resolution in Overwatch under Options › Video, for example 2560 × 1440 for a 1440p monitor or 5120 × 2160 for a 5K2K ultrawide. \(Brand.name) remembers it for that monitor, and your MacBook screen keeps its own."),
         ("“No compatible graphics hardware was found”","This can follow connecting or unplugging a display while Battle.net was open. Open Battle.net from \(Brand.name) rather than from the Dock: \(Brand.name) reopens it for your current displays."),
-        ("Which resolution should I choose?","Your display’s own resolution gives the sharpest picture; a smaller one runs faster and is scaled up to fill the screen. Change it in Overwatch under Options › Video, or in Settings › Fullscreen resolution, which shows what each size looks like on your main display."),
-        ("The game is black or the wrong size","Quit Overwatch, choose Settings › Reset Display Settings, then play again. Overwatch opens at 1080p; your graphics and FPS settings stay as they are."),
+        ("Which resolution should I choose?","Your display’s own resolution gives the sharpest picture; a smaller one runs faster and is scaled up to fill the screen. Change it in Overwatch under Options › Video, or in Settings › Display, which shows what each size looks like on your main display."),
+        ("The game is black or the wrong size","Quit Overwatch, choose Settings › Display › Reset Display Settings, then play again. Overwatch opens at 1080p; your graphics and FPS settings stay as they are."),
         ("I can’t find the game window","Select Overwatch or Battle.net in the Dock. If it’s still hidden, check your other desktops."),
         ("Battle.net shows a blank window","Close Battle.net, then open it again from \(Brand.name)."),
-        ("Battle.net looks too big or cut off","Turn off Settings › Mac-sized Battle.net window, then close Battle.net and open it again from \(Brand.name)."),
-        ("The game stopped responding","Choose Settings › Force Quit, then open Overwatch again. If it still won’t start, choose Settings › Repair Game Files."),
+        ("Battle.net looks small or cut off","Battle.net opens at its Windows size. To make it larger, turn on Settings › General › Mac-sized Battle.net window, then close Battle.net and open it again from \(Brand.name). If part of a window is cut off, turn it off again."),
+        ("The game stopped responding","Choose Settings › Advanced › Force Quit, then open Overwatch again. If it still won’t start, choose Settings › Advanced › Repair Game Files."),
+        ("Battle.net can’t connect on a work or school network","Some of these networks set up their proxy automatically. Close Battle.net, turn on Settings › Advanced › Detect network proxy automatically, then open Battle.net again from \(Brand.name)."),
+        ("Overwatch closes as it starts on a Korean account","Korean accounts linked to Nexon need Korean account support (한국 계정 지원), an experimental option in Settings › Advanced. Close Battle.net, turn it on, then play from \(Brand.name)."),
+        ("My team can’t hear me","Open Settings › Audio. If the microphone is off, choose Turn On…, switch on \(Brand.name) in System Settings, then open \(Brand.name) again. Then check the voice chat settings in Overwatch’s Sound options."),
         ("Which Macs can play?","Macs with Apple silicon on macOS 26.5 or later, with Rosetta. 16 GB of memory is recommended, and a new installation needs about 85–95 GB of storage."),
         ("How do I uninstall?","Choose Settings › Uninstall \(Brand.name). \(Brand.name), Battle.net and Overwatch move to the Trash; your Blizzard account isn’t affected."),
         ("Found a bug?","Choose Report a Problem to open an issue on GitHub, and attach a support report (below): it lists your setup, never account details."),

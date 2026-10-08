@@ -142,7 +142,8 @@ class DisplaySetup(setup.NativeSetup):
         client=environment/'drive_c/Program Files (x86)/Battle.net/Battle.net.exe'
         client.parent.mkdir(parents=True);client.write_text('fixture')
         seen=self.base/'battlenet-environment'
-        wine=engine/'bin/wine';wine.write_text(f'#!/bin/sh\nenv > "{seen}.part" && mv "{seen}.part" "{seen}"\n');wine.chmod(0o755)
+        # Launches also run Wine's registry tool (proxy, microphone); only Battle.net's start counts.
+        wine=engine/'bin/wine';wine.write_text(f'#!/bin/sh\ncase "$1" in *Battle.net.exe) env > "{seen}.part" && mv "{seen}.part" "{seen}";; esac\n');wine.chmod(0o755)
         # Each launch also starts the client monitor, which waits for a Battle.net that never comes.
         self.addCleanup(subprocess.run,['pkill','-f',f'ow2-setup watch --root {self.root}'])
         def launched(*args):

@@ -175,7 +175,9 @@ def assemble(work,version,identity):
     entitlements=work/'wine-entitlements.plist'
     entitlements.write_bytes(plistlib.dumps({name:True for name in [
         'com.apple.security.cs.allow-jit','com.apple.security.cs.allow-unsigned-executable-memory',
-        'com.apple.security.cs.disable-executable-page-protection','com.apple.security.cs.disable-library-validation']}))
+        'com.apple.security.cs.disable-executable-page-protection','com.apple.security.cs.disable-library-validation',
+        # 1.3: without it the hardened runtime gives the game silence for the microphone, with no prompt.
+        'com.apple.security.device.audio-input']}))
     for index,p in enumerate(sorted(native)):
         args=['codesign','--force','--options','runtime','--timestamp','--sign',identity]
         if p.name in ('wine','wineserver'):args+=['--entitlements',entitlements]

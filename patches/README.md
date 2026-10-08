@@ -27,6 +27,32 @@ canvas, presentation and shader/pipeline caching tuned for Overwatch.
 `scripts/portable_metal.py`, which keeps the build machine's paths out of the
 compiled shaders.
 
+`dxmt-metalfx-upscaling.patch` is MetalFX upscaling (1.3): with Recall's
+MetalFX upscaling setting on, Overwatch offers NVIDIA DLSS, which runs on
+Apple's MetalFX temporal upscaler.
+- The adapter and NVAPI report one NVIDIA GeForce RTX 4090, so the game offers
+  DLSS. This happens only when `DXMT_ENABLE_NVEXT=1`; the stand-ins refuse to
+  load otherwise.
+- DXMT's DLSS stand-in (`nvngx.dll`) gains Direct3D 12 entry points that report
+  "not supported" and NVIDIA's own failure codes. A `d3d12.dll` stand-in answers
+  the setup questions of NVIDIA Streamline (shipped with the game), which builds
+  a Direct3D 12 helper even in Direct3D 11 games; it creates nothing and refuses
+  feature level 12_2, so the game stays on Direct3D 11.
+- The DLSS output is made shader-writable before MetalFX writes it (see the
+  compression change in `dxmt-v1-performance.patch`).
+- Jittered motion vectors, which MetalFX cannot cancel, lose the change in
+  jitter since the last frame in a small compute pass, as AMD FSR 2 does.
+- The DLSS mode the player chooses is the lowest render size the stand-in
+  offers.
+- Optional sharpening after MetalFX (`d3d11.metalfxSharpness`, 0 to 1), with
+  the method of AMD FidelityFX RCAS on tone-mapped values.
+- Both compute passes are compiled by macOS at run time, so DXMT's precompiled
+  shaders are unchanged.
+
+`build_portable_dxmt.py` signs the built `nvngx.dll` (Authenticode, SHA-256)
+with `scripts/sign_pe.py`: NVIDIA's loader, part of the game, loads only a
+signed core DLL.
+
 ## Wine
 
 These apply to the `sources/wine` subtree of the
@@ -83,7 +109,12 @@ patches above:
 - after you switch to another app from the game in fullscreen, the game stays
   minimized and out of fullscreen until you come back to it: on macOS its own
   requests to restore the window or re-enter fullscreen would bring it back to
-  the front.
+  the front;
+- with Korean account support on (`WINEMAC_SCREEN_READBACK=1`, set by the app),
+  reading the screen back (BitBlt or StretchBlt from the screen) gives a black
+  image instead of failing, so the anti-cheat in the Korean build of Overwatch
+  no longer crashes the game when it takes a screenshot. No pixels are read;
+  without the variable the call fails as before.
 `WINEMAC_INPUT_STATS` writes an input report (off unless set).
 
 Menus, Battle.net and every other program keep the standard behavior.

@@ -16,6 +16,10 @@ import Darwin
             for app in NSRunningApplication.runningApplications(withBundleIdentifier:Bundle.main.bundleIdentifier ?? "") where app.processIdentifier != ProcessInfo.processInfo.processIdentifier { app.activate(options:[]) }
             NSApp.terminate(nil);return
         }
+        // Quits from outside the app (the Dock, logging out, System Settings' "Quit & Reopen"
+        // after a privacy change) arrive as this event. AppKit drops it while a sheet is open,
+        // so AppModel.quit handles it: it closes the sheet first.
+        NSAppleEventManager.shared().setEventHandler(self,andSelector:#selector(quitEvent(_:withReplyEvent:)),forEventClass:AEEventClass(kCoreEventClass),andEventID:AEEventID(kAEQuitApplication))
         window=NSWindow(contentRect:NSRect(x:0,y:0,width:600,height:800),styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
         window.title=Brand.name;window.isReleasedWhenClosed=false
         window.titlebarAppearsTransparent=true;window.minSize=NSSize(width:540,height:620)
@@ -101,6 +105,7 @@ import Darwin
     }
     @objc func launch() { show();model.launch() }
     @objc func quit() { model.quit() }
+    @objc func quitEvent(_ event:NSAppleEventDescriptor,withReplyEvent reply:NSAppleEventDescriptor) { model.quit() }
     @objc func settings() { show();model.sheet = .settings }
     @objc func about() { show();model.sheet = .about }
     @objc func uninstall() { show();model.sheet = .uninstall }

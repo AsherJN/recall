@@ -15,14 +15,16 @@ reference.
 |---|---|
 | DXMT | `https://github.com/NerRobDog/dxmt`, commit `c5dc3a0dfe9108e667da43de871324bd298c9c02` |
 | DirectX headers | `https://github.com/misyltoad/mingw-directx-headers`, submodule commit `9df86f2341616ef1888ae59919feaa6d4fad693d` |
+| NVIDIA NVAPI headers (MIT) | `https://github.com/NVIDIA/nvapi`, DXMT submodule commit `d08488fcc82eef313b0464db37d2955709691e94` |
 | Wine | `https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.3.0.tar.gz`, `sources/wine` subtree |
 | Engine recipe reference | Soju commit `3a350b32bf906dd2a509b18c642a5a2676de022a`, `engine-v1.5` |
 | LLVM / Windows compiler | LLVM 15.0.7 x86_64; llvm-mingw 20251216 UCRT macOS universal |
 | Other build tools | Bison 3.8.2, Python 3.10+, Meson/Ninja, Apple Command Line Tools (macOS 26.5 SDK) and Metal compiler |
 
-Initialize DXMT at its exact commit and initialize the pinned DirectX headers
-submodule. Apply, once each and in this order, `patches/dxmt-v1-private.patch`,
-`patches/dxmt-v1-performance.patch` and `patches/dxmt-portable-metal.patch`.
+Initialize DXMT at its exact commit and initialize the pinned DirectX and NVAPI
+headers submodules. Apply, once each and in this order, `patches/dxmt-v1-private.patch`,
+`patches/dxmt-v1-performance.patch`, `patches/dxmt-portable-metal.patch` and
+`patches/dxmt-metalfx-upscaling.patch`.
 Extract the Wine source and apply, once each and in this order,
 `patches/wine-v1-canvas.patch`, `patches/wine-mouselook.patch`,
 `patches/wine-portable-directory-boolean.patch`, Soju's
@@ -40,6 +42,12 @@ compiled shader. Without the Metal toolchain, `DXMT_METAL_CACHE` can name a
 folder of outputs made earlier through the same wrapper from byte-identical
 shader sources (`<sha256 of input>.air` and `.metallib`); a missing entry stops
 the build.
+
+NVIDIA's loader, part of the game, loads DXMT's DLSS stand-in (`nvngx.dll`) only
+when it carries an Authenticode signature, and never checks who signed it.
+`build_portable_dxmt.py` signs it with the certificate in `runtime/signing/recall-nvngx`;
+make your own once with `python3 scripts/sign_pe.py create-certificate
+runtime/signing/recall-nvngx` (it needs OpenSSL 3). Keep the keys out of git.
 
 From each clean source directory, use `git apply --check` before applying the
 corresponding patch. Absolute patch paths are supported. The publisher's source
@@ -61,8 +69,9 @@ runtime/build/                             generated build outputs
 `scripts/build_dxmt_local.py --check` lists missing prerequisites without
 installing anything. Once the prerequisites are provided, `--configure` prepares
 Meson and `--build --jobs 2` builds into `runtime/build/dxmt-local/install`.
-The release configuration disables D3D12, NVAPI, and NVNGX in DXMT. No player
-needs this developer toolchain.
+This development configuration disables D3D12, NVAPI, and NVNGX in DXMT; the
+release build (`build_portable_dxmt.py`) builds NVAPI and NVNGX with the d3d12
+stand-in for MetalFX upscaling. No player needs this developer toolchain.
 
 `scripts/build_v1_window_driver.py` builds the Mac driver against the installed
 reference engine's ntdll/win32u and ad-hoc signs the development output. It also
@@ -120,6 +129,26 @@ runtime/tools/dmgbuild/bin/python scripts/build_release_dmg.py --app runtime/bui
 The DMG opens as a fixed Finder window with the app, an Applications shortcut
 and a background drawn by `scripts/dmg_background.swift`. dmgbuild writes that
 layout without scripting Finder; `--plain` skips it.
+
+Runtime `phase2-20261007.3` is `phase2-20261007.2` with DXMT built with
+`patches/dxmt-metalfx-upscaling.patch` for MetalFX upscaling (`scripts/build_portable_dxmt.py`,
+then `scripts/derive_runtime.py --metalfx <DXMT workspace>`): DXMT's five files are
+replaced, its `d3d12.dll` stand-in replaces Wine's, and its signed DLSS stand-in
+(`nvngx.dll`), its NVAPI stand-in (`nvapi64.dll`) and NVAPI's license
+(`licenses/NVAPI-MIT`) are added. Launches leave all three off unless MetalFX
+upscaling is on; `nvngx.dll` keeps the signature `build_portable_dxmt.py` gave it.
+
+Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
+replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py
+--native winemac`), built with the updated `patches/wine-winemac-activation.patch`: with
+`WINEMAC_SCREEN_READBACK=1` (Korean account support) it answers screen reads with a
+black image.
+
+Runtime `phase2-20261007.1` is `phase2-20261005.1` with Wine's loader and server
+re-signed with the microphone entitlement (`com.apple.security.device.audio-input`)
+and the game app made again from that loader (`scripts/derive_runtime.py
+--microphone`), so Overwatch's voice chat can hear the microphone; unsigned, every
+file is unchanged. A full build signs them the same way.
 
 Runtime `phase2-20261005.1` is `phase2-20261004.4` with Wine's controller bus
 rebuilt with SDL2 2.32.10 and that SDL2 library added, so Xbox and other
