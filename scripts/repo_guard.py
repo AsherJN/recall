@@ -39,6 +39,9 @@ REVIEWED_ASSETS = {
     'app/Resources/HowItWorksStack.png': {'bcdd822c8001984822d71c047d1a64543e7ada9de9d720fec63f9afe3e0357cf'},
     'app/Resources/HowItWorksMouse.png': {'409eef05ccad7ad05e8075d57bf9debc0dc01e053c6061827d035f63164c372e'},
     'app/Resources/HowItWorksShaders.png': {'0fedfb291cfd28805a2bfc4b3fbd9db6d639f00b5a424c572ea1e06c1ab44016'},
+    'app/Resources/MetalFXResults.png': {'6134cbfa9676bc38e5e6bfe2c2f5fc3228e75370c2caf1ee4acb1bc7431a34c3'},
+    'app/Resources/MetalFXPixels.png': {'9d82b2c18c24b2a7e5f517ae4321c740e854a6576725289316bd56b36dcaaa94'},
+    'app/Resources/MetalFXChain.png': {'6f41debaf566b679dd1f9d0a4b1834d6e410a94cb446bb783a9593c429983528'},
 }
 
 MAX_BYTES = 2 * 1024 * 1024

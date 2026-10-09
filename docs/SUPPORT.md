@@ -44,7 +44,8 @@ Remove account names and personal file paths before posting.
   fewer pixels and Apple's MetalFX rebuilds the full-size picture; Settings › Graphics ›
   Sharpening makes it crisper. While it's on, Overwatch lists your graphics card
   as an NVIDIA GeForce RTX 4090 (that's how it offers DLSS; your Mac does the
-  work), and the NVIDIA Reflex option has no effect.
+  work), and the NVIDIA Reflex option has no effect. See
+  [how MetalFX upscaling works](METALFX.md).
 - **My team can't hear me.** Open Settings › Audio in the app. If the microphone
   is off, choose Turn On…, switch on Recall in System Settings, then open Recall
   again. Then check the voice chat settings in Overwatch's Sound options.

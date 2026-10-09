@@ -36,6 +36,7 @@ Recall offers the most optimized and seamless Overwatch experience on Apple Sili
 ## Why Recall
 
 - **Smoother matches.** In the same match on the same Mac, Recall averaged 70% more frames per second than CrossOver, with 1% lows nearly five times higher and 95% fewer stutters.
+- **More FPS with MetalFX upscaling.** Overwatch draws fewer pixels and Apple's MetalFX rebuilds the full-resolution picture: up to 77% more frames per second at 1440p on the High preset. [How it works](docs/METALFX.md).
 - **Aim that keeps up.** Recall reads your mouse directly, up to 2,000 times a second. Your flicks and tracking reach the game sooner and land exactly where your hand put them.
 - **Free.** No price, trial, subscription, ads or account. The code is open source.
 - **Download, sign in, play.** Recall installs what it needs and opens Battle.net for you. Play on your MacBook's screen or an external monitor, ultrawide and 5K included.
