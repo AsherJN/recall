@@ -2,6 +2,7 @@
 import json
 import re
 import subprocess
+import sys
 import time
 import test_portable_setup as setup
 import unittest
@@ -86,6 +87,31 @@ class DisplaySetup(setup.NativeSetup):
         (app/'Contents').mkdir(parents=True);(app/'Contents/Info.plist').write_text('<plist/>')
         self.assertEqual(arguments(),[str(self.root),str(app)])
         self.assertEqual(arguments('--game-mode','0'),[str(self.root)])
+    def test_launch_first_stops_the_last_sessions_preparation(self):
+        # After a match the session's monitor prepares the archive, which takes minutes.
+        # A launch stops it (it holds launch-monitor.lock, its pid in the cache) before
+        # anything else, and leaves alone a process that only has a pid left behind.
+        self.profile(b'[Render.13]\n')
+        (self.root/'runtimes/v1/config/dxmt.conf').write_text((setup.ROOT/'config/dxmt-source60-1200.conf').read_text())
+        (self.root/'environment/user.reg').write_text('[Software\\\\Wine\\\\Mac Driver]\n"RetinaMode"="Y"\n')
+        client=self.root/'environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe'
+        client.parent.mkdir(parents=True);client.write_text('fixture')
+        (self.root/'cache').mkdir(exist_ok=True)
+        lock,pidfile,ready=self.root/'launch-monitor.lock',self.root/'cache/after-session.pid',self.base/'monitor-ready'
+        monitor=subprocess.Popen([sys.executable,'-c','import fcntl,signal,sys,time\n'
+            f'f=open({str(lock)!r},"a");fcntl.flock(f,fcntl.LOCK_EX)\n'
+            'signal.signal(signal.SIGTERM,lambda *a:sys.exit(0))\n'
+            f'open({str(ready)!r},"w").close();time.sleep(60)'])
+        self.addCleanup(lambda:(monitor.kill(),monitor.wait()))
+        deadline=time.monotonic()+10
+        while not ready.exists() and time.monotonic()<deadline:time.sleep(.05)
+        pidfile.write_text(str(monitor.pid))
+        self.call('launch',success=False)  # the fixture runtime cannot start Wine
+        self.assertEqual(monitor.wait(timeout=1),0)
+        bystander=subprocess.Popen(['/bin/sleep','60']);self.addCleanup(lambda:(bystander.kill(),bystander.wait()))
+        pidfile.write_text(str(bystander.pid))
+        self.call('launch',success=False)
+        self.assertIsNone(bystander.poll())
     def test_launch_writes_the_canvas_size_with_dxmt_option_names(self):
         # DXMT matches option names exactly; a case-insensitive edit once wrote
         # "fullScreenCanvasHeight", which turned the canvas off for 1080.

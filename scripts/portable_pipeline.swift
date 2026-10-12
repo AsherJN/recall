@@ -5,11 +5,18 @@ import Darwin
 import Metal
 
 let fm = FileManager.default
-let root = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
+// A launch keeps what was learned and warms the game app's cache, but prepares no
+// archive: that takes minutes, so the session's monitor runs it after the game closes
+// (--after-session), and a launch stops one still running (portable_setup.m).
+let afterSession = CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--after-session"
+let arguments = afterSession ? [CommandLine.arguments[0]] + CommandLine.arguments.dropFirst(2) : CommandLine.arguments
+let root = URL(fileURLWithPath: arguments[1]).standardizedFileURL
 let cache = root.appendingPathComponent("cache/pipelines")
+// What the last preparation after a session added, for the next launch to report.
+let report = root.appendingPathComponent("cache/prepared.json")
 let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("pipeline-prepare")
 // The app Overwatch runs as (the engine's Game Mode app), when the launch uses it.
-let gameApp = CommandLine.arguments.count > 2 ? URL(fileURLWithPath: CommandLine.arguments[2]).standardizedFileURL : nil
+let gameApp = arguments.count > 2 ? URL(fileURLWithPath: arguments[2]).standardizedFileURL : nil
 let started = Date()
 var child: Process?
 var interrupted: Int32 = 0
@@ -102,6 +109,13 @@ func inventory(_ directory: URL) throws -> [String: String] {
 // game will open now, and removed.
 let namespaceBuild = "ow2-source-v1"
 let mergeLimit = 256 * 1048576 // Leaves the game's 512 MB budget room for archives and new learning.
+// The game's limits (pipeline_cache.c): its folder holds at most 512 MiB and an
+// archive at most 128 MiB, and an archive is saved only while the folder holds at
+// most the difference. Over it, the save is skipped without a failure.
+let cacheLimit = 512 * 1048576, packLimit = 128 * 1048576, saveLimit = cacheLimit - packLimit
+// Past forgetAbove, learned pipelines are forgotten down to forgetTo, so a full
+// archive and a session's new learning (64 MiB) still fit in the game's folder.
+let forgetAbove = saveLimit - 64 * 1048576, forgetTo = forgetAbove - 32 * 1048576
 func validKey(_ key: String) -> Bool { key.count == 64 && key.allSatisfy { "0123456789abcdef".contains($0) } }
 func identity(_ device: MTLDevice) -> (UInt64) -> [UInt8] {
     let prefix = Array("dxmt-render-cache-v1|\(namespaceBuild)|\(ProcessInfo.processInfo.operatingSystemVersionString)|".utf8), suffix = Array("|\(device.name)".utf8)
@@ -125,6 +139,46 @@ func folderBytes(_ folder: URL) -> Int {
     return total
 }
 func fileBytes(_ url: URL) -> Int? { (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize }
+// The files a rebuilt archive replaces: the catalog and every archive.
+func packBytes(_ folder: URL) -> Int {
+    let archives = (try? fm.contentsOfDirectory(at: folder.appendingPathComponent("archives"), includingPropertiesForKeys: [.isRegularFileKey,.fileSizeKey])) ?? []
+    return archives.reduce(fileBytes(folder.appendingPathComponent("archive.json")) ?? 0) { total, file in
+        guard file.pathExtension == "metallib", let value = try? file.resourceValues(forKeys: [.isRegularFileKey,.fileSizeKey]), value.isRegularFile == true else { return total }
+        return total + (value.fileSize ?? 0)
+    }
+}
+// The game rewrites each recipe it uses once a session (pipeline_cache.c), so a
+// recipe's date is its last use. Past forgetAbove, recipes are forgotten from the
+// least recently used day, cheapest first, until forgetTo: never the archive's, and
+// a library only once no kept recipe needs it. The game learns again any it uses.
+// Nothing is forgotten when that could not reach forgetTo: what fills the folder is
+// then not recipes. Returns how many were forgotten.
+func forget(_ folder: URL, _ learned: inout Int, _ costs: inout [String: Double], _ modified: inout [String: Double],
+            _ sizes: [String: Int], _ uses: [String: [String]], keep: Set<String>) -> Int {
+    var needed: [String: Int] = [:]
+    for (key, libraries) in uses where costs[key] != nil { for library in Set(libraries) { needed[library, default: 0] += 1 } }
+    let kept = Set(keep.flatMap { uses[$0] ?? [] })
+    let freeable = costs.keys.filter { !keep.contains($0) }.reduce(0) { $0 + (sizes[$1] ?? 0) }
+        + needed.keys.filter { !kept.contains($0) }.reduce(0) { $0 + (fileBytes(folder.appendingPathComponent("libraries/\($1).air")) ?? 0) }
+    guard learned - freeable <= forgetTo else { print("Learned pipelines are over budget, but not by recipes that can be forgotten"); return 0 }
+    let newest = modified.values.max() ?? 0
+    func day(_ key: String) -> Int { Int((newest - modified[key]!) / 86400) }
+    let order = costs.keys.filter { !keep.contains($0) }.sorted {
+        day($0) != day($1) ? day($0) > day($1) : costs[$0]! != costs[$1]! ? costs[$0]! < costs[$1]! : $0 < $1
+    }
+    var forgotten = 0
+    for key in order {
+        guard learned > forgetTo && interrupted == 0 else { break }
+        guard (try? fm.removeItem(at: folder.appendingPathComponent("recipes/\(key).json"))) != nil else { continue }
+        learned -= sizes[key] ?? 0; costs[key] = nil; modified[key] = nil; forgotten += 1
+        for library in Set(uses[key] ?? []) {
+            needed[library, default: 0] -= 1
+            let file = folder.appendingPathComponent("libraries/\(library).air")
+            if needed[library] == 0, let bytes = fileBytes(file), (try? fm.removeItem(at: file)) != nil { learned -= bytes }
+        }
+    }
+    return forgotten
+}
 // Earlier folders of this GPU on this macOS: the same name with another registry
 // ID. macOS numbers registry entries in boot order, so the GPU's ID moves little
 // between restarts. A folder from another macOS version or GPU is not found.
@@ -261,16 +315,30 @@ func prepare() throws {
     let manifestPath = original.appendingPathComponent("archive.json")
     let manifest = fm.fileExists(atPath: manifestPath.path) ? try json(manifestPath) : [:]
     let archiveBytes = (manifest["archives"] as? [[String: Any]] ?? []).reduce(0) { $0 + ($1["bytes"] as? Int ?? 0) }
-    var costs: [String: Double] = [:], modified: [String: Double] = [:]
-    for file in try fm.contentsOfDirectory(at: original.appendingPathComponent("recipes"), includingPropertiesForKeys: [.isSymbolicLinkKey,.contentModificationDateKey]).sorted(by: { $0.path < $1.path }).prefix(32768) {
+    var costs: [String: Double] = [:], modified: [String: Double] = [:], sizes: [String: Int] = [:], uses: [String: [String]] = [:]
+    for file in try fm.contentsOfDirectory(at: original.appendingPathComponent("recipes"), includingPropertiesForKeys: [.isSymbolicLinkKey,.contentModificationDateKey,.fileSizeKey]).sorted(by: { $0.path < $1.path }).prefix(32768) {
         let key = file.deletingPathExtension().lastPathComponent
         guard file.pathExtension == "json", key.count == 64, key.allSatisfy({ "0123456789abcdef".contains($0) }),
-              let values = try? file.resourceValues(forKeys: [.isSymbolicLinkKey,.contentModificationDateKey]), values.isSymbolicLink != true,
+              let values = try? file.resourceValues(forKeys: [.isSymbolicLinkKey,.contentModificationDateKey,.fileSizeKey]), values.isSymbolicLink != true,
               let data = try? json(file), let cost = data["cost_us"] as? Double, cost.isFinite, cost >= 0, cost <= 60000000 else { continue }
-        costs[key] = cost; modified[key] = values.contentModificationDate?.timeIntervalSince1970 ?? 0
+        costs[key] = cost; modified[key] = values.contentModificationDate?.timeIntervalSince1970 ?? 0; sizes[key] = values.fileSize ?? 0
+        uses[key] = ["vertex","fragment"].compactMap { ((data["recipe"] as? [String: Any])?[$0] as? [String: Any])?["library"] as? String }.filter(validKey)
+    }
+    // A process killed while saving an archive leaves it half written; the game counts it.
+    for file in (try? fm.contentsOfDirectory(at: original.appendingPathComponent("archives"), includingPropertiesForKeys: nil)) ?? []
+        where file.lastPathComponent.hasPrefix("capture-") && file.pathExtension == "tmp" { try? fm.removeItem(at: file) }
+    let packed = packBytes(original)
+    var learned = folderBytes(original) - packed
+    if learned > forgetAbove {
+        let before = learned, forgotten = forget(original, &learned, &costs, &modified, sizes, uses, keep: previous)
+        if forgotten > 0 { print("Forgot \(forgotten) least recently used learned pipelines (\(before / 1048576) -> \(learned / 1048576) MB)") }
     }
     progress("learned", ["learned": costs.count, "ready": previous.count])
     warmed = try warm(original, costs)
+    guard afterSession else {
+        if let saved = try? json(report) { added = saved["added"] as? Int ?? 0; try? fm.removeItem(at: report) }
+        print("The archive is prepared after the session"); return
+    }
     let candidates = costs.keys.filter { !previous.contains($0) && costs[$0]! >= 16667 }
     guard !candidates.isEmpty else { print("Learned pipelines are up to date"); return }
     let newest = modified.values.max() ?? 0
@@ -281,11 +349,13 @@ func prepare() throws {
     // A full archive is rebuilt from the best-scoring pipelines, sized to fit with
     // room to spare. So is one listing pipelines with no recipe left to restore
     // (the game archives what it prewarms): offline preparation must cover every
-    // listed key, so it could never extend that archive.
-    let full = archiveBytes >= Int(128 * 1048576 * 0.85), orphaned = previous.subtracting(costs.keys).count
-    let refresh = full || orphaned > 0
-    let additional = previous.isEmpty || archiveBytes == 0 ? 256 : max(1,Int(Double(previous.count) * (Double(128 * 1048576) * 0.90 / Double(archiveBytes) - 1)))
-    var limit = full ? min(7168,max(1,Int(Double(previous.count) * min(1, Double(128 * 1048576) * 0.85 / Double(archiveBytes)))),ranking.count)
+    // listed key, so it could never extend that archive. So is one in a folder over
+    // the save limit: the rebuild's clone leaves the old archive out, so it can save.
+    let full = archiveBytes >= Int(Double(packLimit) * 0.85), orphaned = previous.subtracting(costs.keys).count
+    let refresh = full || orphaned > 0 || learned + packed > saveLimit
+    guard learned <= saveLimit else { print("Preparation skipped: learned pipelines leave no room to save an archive"); return }
+    let additional = previous.isEmpty || archiveBytes == 0 ? 256 : max(1,Int(Double(previous.count) * (Double(packLimit) * 0.90 / Double(archiveBytes) - 1)))
+    var limit = full ? min(7168,max(1,Int(Double(previous.count) * min(1, Double(packLimit) * 0.85 / Double(archiveBytes)))),ranking.count)
         : refresh ? min(7168,previous.count - orphaned + min(candidates.count,additional,1024),ranking.count)
         : min(7168,previous.count + min(candidates.count,additional,1024))
     if refresh && score(Set(ranking.prefix(limit))) <= score(previous)*1.05 { print("Current archive covers comparable historical cost"); return }
@@ -331,10 +401,15 @@ func prepare() throws {
         try require(prepared["namespace_directory"] as? String == candidate.path && prepared["write_owner"] as? Bool == true,"Namespace or writer ownership changed")
         // A failed archive (too large, or not covering every listed key) leaves the
         // clone's catalog as it was, so the counts apply only to a saved one; a
-        // failure tries again with fewer pipelines.
+        // failure tries again with fewer pipelines. A saved catalog lists what the
+        // tool captured, which leaves out a pipeline finished after its deadline. A
+        // catalog left as it was (gone, for a rebuild) was not saved, without a
+        // failure: the game's folder was over its save limit.
         let failures = prepared["archive_failures"] as? Int ?? 1
         if failures == 0 {
-            try require(selected.count <= limit && prepared["prepared"] as? Int == selected.count,"Preparation count mismatch")
+            let captured = Set(prepared["captured_keys"] as? [String] ?? [])
+            if selected != captured && (refresh ? selected.isEmpty : selected == previous) { print("Archive not saved; existing cache kept"); break }
+            try require(selected.count <= limit && selected == captured,"Preparation count mismatch")
             if refresh { try require(selected.isSubset(of:Set(ranking.prefix(limit))),"Unexpected refresh selection") }
             complete = refresh ? !selected.subtracting(previous).isEmpty && score(selected)>score(previous)*1.05 : previous.isSubset(of:selected) && !selected.subtracting(previous).isEmpty
             break
@@ -356,6 +431,8 @@ func prepare() throws {
         try require(renameatx_np(AT_FDCWD,original.path,AT_FDCWD,candidate.path,UInt32(RENAME_SWAP)) == 0,"Atomic cache publication failed")
         print("Prepared and verified \(selected.count) learned pipelines; previous cache retained")
         ready = selected.count; added = selected.subtracting(previous).count
+        let earlier = (try? json(report))?["added"] as? Int ?? 0
+        try? save(["added": earlier + added], report)
     } else { print("Existing cache preserved: no verified improvement within budget") }
     if refresh { try decisionData.write(to:decisionFile,options:.atomic) }
 }

@@ -86,7 +86,13 @@ declares itself a game, which is what macOS needs to turn Game Mode on.
 are developer diagnostics (off unless set).
 
 `wine-win32u-display-log.patch`: `WINE_DISPLAY_LOG` records each forced
-display-device update with its reason and duration (off unless set).
+display-device update with its reason and duration (off unless set). The
+programs named in `WINE_APP_DPI` get their own DPI for the system and every
+monitor, as Windows programs do at that scaling; everything else, and Wine's
+shared record of the displays, keeps the session's DPI. Wine's Retina mode
+shows each Windows pixel at half a point on every display, so Recall names
+Battle.net's programs at 192, the size Battle.net has on Windows at 200%, while
+Overwatch sees 96 as before.
 
 `wine-winemac-activation.patch` applies to the Mac driver after the two driver
 patches above:

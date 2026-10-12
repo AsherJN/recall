@@ -156,10 +156,6 @@ struct SettingsSheet:View {
             VStack(alignment:.leading,spacing:6) {
                 SettingSwitch(title:"Open Battle.net when \(Brand.name) opens",detail:"Turn off to start Battle.net yourself with Open Battle.net.",
                               isOn:$model.autoOpenBattleNet)
-                Divider().padding(.vertical,6)
-                SettingSwitch(title:"Mac-sized Battle.net window",
-                              detail:"Shows Battle.net at twice its Windows size, so it’s easy to read. Overwatch isn’t affected. Takes effect the next time Battle.net opens.",
-                              isOn:$model.largeBattleNet)
             }
         }
     }
@@ -522,7 +518,7 @@ struct HelpSheet:View {
         ("The game is black or the wrong size","Quit Overwatch, choose Settings › Display › Reset Display Settings, then play again. Overwatch opens at 1080p; your graphics and FPS settings stay as they are."),
         ("I can’t find the game window","Select Overwatch or Battle.net in the Dock. If it’s still hidden, check your other desktops."),
         ("Battle.net shows a blank window","Close Battle.net, then open it again from \(Brand.name)."),
-        ("Battle.net looks small or cut off","Battle.net opens at its Windows size. To make it larger, turn on Settings › General › Mac-sized Battle.net window, then close Battle.net and open it again from \(Brand.name). If part of a window is cut off, turn it off again."),
+        ("Battle.net looks too big or too small","This can follow connecting, unplugging or rearranging displays while Battle.net was open. Close Battle.net, then open it again from \(Brand.name)."),
         ("The game stopped responding","Choose Settings › Advanced › Force Quit, then open Overwatch again. If it still won’t start, choose Settings › Advanced › Repair Game Files."),
         ("Battle.net can’t connect on a work or school network","Some of these networks set up their proxy automatically. Close Battle.net, turn on Settings › Advanced › Detect network proxy automatically, then open Battle.net again from \(Brand.name)."),
         ("Overwatch closes as it starts on a Korean account","Korean accounts linked to Nexon need Korean account support (한국 계정 지원), an experimental option in Settings › Advanced. Close Battle.net, turn it on, then play from \(Brand.name)."),

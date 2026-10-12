@@ -31,12 +31,21 @@ for file in (namespace/'recipes').glob('*.json'):
     data=json.loads(file.read_text());data['cost_us']=50000;file.write_text(json.dumps(data))
 def learning():return {str(f.relative_to(namespace)):hashlib.sha256(f.read_bytes()).hexdigest() for d in ('recipes','libraries') for f in (namespace/d).iterdir() if f.is_file()}
 before=learning()
-def run(*game):return subprocess.run([str(helpers/'ow2-pipeline'),str(root),*map(str,game)],capture_output=True,text=True,timeout=180)
+# The archive is prepared after a session; a launch with the game app warms its cache.
+def run(*game):return subprocess.run([str(helpers/'ow2-pipeline'),*([] if game else ['--after-session']),str(root),*map(str,game)],capture_output=True,text=True,timeout=180)
 with (namespace/'write.lock').open('a') as lock:
     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     locked=run();assert locked.returncode==75,locked
+# Over the game's save limit (512 - 128 MiB) the tool saves no archive, without a
+# failure. A stale archive and padding (sparse) put the folder over it with what it
+# learned under it, so preparation rebuilds without the old archive and saves.
+def pad(path,size):
+    with open(path,'wb') as f:f.truncate(size)
+pad(namespace/'archives/stale.metallib',100<<20);pad(namespace/'padding',290<<20)
 prepared=run();assert prepared.returncode==0,prepared
 assert 'Prepared and verified 3' in prepared.stdout,prepared
+assert not (namespace/'archives/stale.metallib').exists(),'Rebuild kept the stale archive'
+(namespace/'padding').unlink()
 assert learning()==before
 manifest=json.loads((namespace/'archive.json').read_text());assert len(manifest['prepared_keys'])==3
 repeat=run();assert repeat.returncode==0 and 'up to date' in repeat.stdout,repeat

@@ -16,12 +16,6 @@ final class AppModel {
     var automaticUpdates=UserDefaults.standard.object(forKey:"automaticUpdateChecks") as? Bool ?? true {
         didSet { UserDefaults.standard.set(automaticUpdates,forKey:"automaticUpdateChecks") }
     }
-    /// Battle.net drawn at twice Windows' size, the size it has on a Mac (worker: launch
-    /// --battlenet-scale). Off by default from 1.3: at that size Battle.net's sign-in window
-    /// shows its fields only in part. Off keeps Windows' size.
-    var largeBattleNet=UserDefaults.standard.object(forKey:"largeBattleNet") as? Bool ?? false {
-        didSet { UserDefaults.standard.set(largeBattleNet,forKey:"largeBattleNet") }
-    }
     /// Opening the app opens Battle.net too. Off, the player starts it with Open Battle.net.
     var autoOpenBattleNet=UserDefaults.standard.object(forKey:"autoOpenBattleNet") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoOpenBattleNet,forKey:"autoOpenBattleNet") }
@@ -597,7 +591,7 @@ final class AppModel {
             // macOS Game Mode is on unless support turned it off for a player:
             // defaults write org.overwatch2mac.launcher gameMode -bool false
             let gameMode=UserDefaults.standard.object(forKey:"gameMode") as? Bool ?? true
-            launchEvents=try await service.run("launch",(play ? ["--play","1"] : [])+["--battlenet-scale",largeBattleNet ? "2" : "1","--metal-hud",metalHUD ? "1" : "0",
+            launchEvents=try await service.run("launch",(play ? ["--play","1"] : [])+["--metal-hud",metalHUD ? "1" : "0",
                 "--metalfx",metalFXUpscaling ? "1" : "0","--sharpening",metalFXSharpening.rawValue]+(gameMode ? [] : ["--game-mode","0"]),event:receive)
         } catch {
             guard stopLaunchWait else { throw error }

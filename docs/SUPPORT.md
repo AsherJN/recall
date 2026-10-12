@@ -52,10 +52,9 @@ Remove account names and personal file paths before posting.
 - **I don't want Battle.net to open with Recall.** Choose Cancel while it opens,
   or turn off Settings › General › Open Battle.net when Recall opens; then start it with
   Open Battle.net.
-- **Battle.net looks small or cut off.** Battle.net opens at its Windows size.
-  To make it larger, turn on Settings › General › Mac-sized Battle.net window,
-  then close Battle.net and open it again from the app. If part of a window is
-  cut off, turn it off again.
+- **Battle.net looks too big or too small.** This can follow connecting,
+  unplugging or rearranging displays while Battle.net was open. Close
+  Battle.net, then open it again from the app.
 - **"No compatible graphics hardware was found."** This can follow connecting
   or unplugging a display while Battle.net was open. Open Battle.net from the
   app rather than from the Dock: the app reopens it for your current displays.

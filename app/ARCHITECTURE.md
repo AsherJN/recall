@@ -14,8 +14,8 @@ Help & FAQ and About buttons, while `UtilitySheets.swift` owns Settings, Help & 
 (with Licenses: the bundled NOTICE and Apache 2.0 text, and the third-party
 license files in Finder), Uninstall, the update sheet and What's New (content in `WhatsNew.swift`,
 bundled). Settings is in tabs (`SettingsTab`), and reopens on the last one shown:
-General (updates, opening Battle.net with the app, Mac-sized Battle.net window, off by
-default from 1.3 because its sign-in window doesn't fit at that size), Display (fullscreen
+General (updates, opening Battle.net with the app; Battle.net's size follows the main
+display by itself, so there is no switch for it), Display (fullscreen
 resolution, Reset Display Settings), Graphics (MetalFX upscaling and Sharpening, with an
 info button explaining them; the Metal HUD), Audio (microphone; how Bluetooth headphones
 and the sound output are handled) and Advanced (Force Quit, Repair, proxy detection,
@@ -157,7 +157,15 @@ helper, `pipeline-warm`, compiles every learned pipeline into that app's cache
 (`MTLSetShaderCachePath`, 16 at a time in one process) once per app, macOS version
 and GPU (`cache/warmed.json`). A failed archive (too large, or not covering a key the
 last one listed) is tried again smaller instead of ending preparation, and an
-archive listing pipelines with no recipe left is rebuilt.
+archive listing pipelines with no recipe left is rebuilt. So is an archive in a
+folder over the game's save limit (512 − 128 MiB), where the game would skip saving
+an extended one. Past 320 MiB of learned recipes and libraries, the least recently
+used are forgotten down to 288 MiB, never the archive's, so the game keeps learning.
+Preparing the archive takes minutes, so it happens after a match: the session's
+monitor (`watch`) stays until the game has closed and runs `ow2-pipeline
+--after-session` (its pid in `cache/after-session.pid`); a launch folds folders,
+forgets, warms and reports what that preparation added, then stops a monitor still
+preparing, whose helper keeps the cache it had.
 
 Lifecycle follows AppKit's reopen callback and native window/menu behavior:
 [Apple app organization](https://developer.apple.com/documentation/swiftui/app-organization)

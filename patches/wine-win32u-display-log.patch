@@ -1,5 +1,5 @@
 diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
-index 8798fbf..bb4937f 100644
+index 8798fbf..9750770 100644
 --- a/dlls/win32u/sysparams.c
 +++ b/dlls/win32u/sysparams.c
 @@ -26,6 +26,13 @@
@@ -16,7 +16,38 @@ index 8798fbf..bb4937f 100644
  
  #include "ntstatus.h"
  #define WIN32_NO_STATUS
-@@ -2806,6 +2813,70 @@ void reset_monitor_update_serial(void)
+@@ -294,6 +301,11 @@ union sysparam_all_entry
+ };
+ 
+ static UINT system_dpi;
++/* The DPI of the session's displays (LogPixels). system_dpi is the same unless
++ * WINE_APP_DPI names this program: then app_dpi is its system DPI and every monitor's,
++ * as for a Windows program at that scaling. The shared display cache keeps session_dpi,
++ * so the programs it does not name see the session as before. */
++static UINT session_dpi, app_dpi;
+ static RECT work_area;
+ static DWORD process_layout = ~0u;
+ 
+@@ -1860,6 +1872,8 @@ static void add_source( const char *name, UINT state_flags, UINT dpi, void *para
+         source->id = 0;
+         ctx->has_primary = TRUE;
+     }
++    /* drivers pass this process's system DPI; the cache is shared with every program */
++    if (app_dpi && dpi == app_dpi) dpi = session_dpi;
+     source->dpi = dpi;
+ 
+     /* Wine specific config key where source settings will be held, symlinked with the logically indexed config key */
+@@ -2285,7 +2299,8 @@ static UINT monitor_get_dpi( struct monitor *monitor, MONITOR_DPI_TYPE type, UIN
+     float scale_x = 1.0, scale_y = 1.0;
+     UINT dpi;
+ 
+-    if (!source || !(dpi = source->dpi)) dpi = system_dpi;
++    if (app_dpi) dpi = app_dpi;
++    else if (!source || !(dpi = source->dpi)) dpi = system_dpi;
+     if (source && type != MDT_EFFECTIVE_DPI)
+     {
+         scale_x = source->physical.dmPelsWidth / (float)source->current.dmPelsWidth;
+@@ -2806,6 +2821,70 @@ void reset_monitor_update_serial(void)
      pthread_mutex_unlock( &display_lock );
  }
  
@@ -87,7 +118,7 @@ index 8798fbf..bb4937f 100644
  static BOOL lock_display_devices( BOOL force )
  {
      static const WCHAR wine_service_station_name[] =
-@@ -2833,15 +2904,21 @@ static BOOL lock_display_devices( BOOL force )
+@@ -2833,15 +2912,21 @@ static BOOL lock_display_devices( BOOL force )
          return TRUE;
      }
  
@@ -117,7 +148,7 @@ index 8798fbf..bb4937f 100644
      }
  
      if (!ret)
-@@ -4301,6 +4378,8 @@ static void display_mode_changed( BOOL broadcast )
+@@ -4301,6 +4386,8 @@ static void display_mode_changed( BOOL broadcast )
  {
      DEVMODEW current_mode = {.dmSize = sizeof(DEVMODEW)};
  
@@ -126,3 +157,46 @@ index 8798fbf..bb4937f 100644
      if (!update_display_cache( TRUE ))
      {
          ERR( "Failed to update display cache after mode change.\n" );
+@@ -5835,6 +5922,33 @@ static char *get_app_compat_flags( const WCHAR *appname )
+     return compat_flags;
+ }
+ 
++/* WINE_APP_DPI=<dpi>:<name.exe>[;<name.exe>...] gives the programs with these file names
++ * (any case) that DPI, from 96 to 480. Child processes inherit the variable, so a program
++ * it does not name keeps the session's DPI even when a named one starts it. */
++static UINT get_app_dpi(void)
++{
++    const char *value = getenv( "WINE_APP_DPI" ), *name, *next;
++    const WCHAR *image = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer, *p;
++    unsigned long dpi;
++    char *end;
++    size_t i, len;
++
++    if (!value || !image) return 0;
++    dpi = strtoul( value, &end, 10 );
++    if (*end != ':' || dpi < USER_DEFAULT_SCREEN_DPI || dpi > 480) return 0;
++    if ((p = wcsrchr( image, '\\' ))) image = p + 1;
++    if ((p = wcsrchr( image, '/' ))) image = p + 1;
++    for (name = end + 1; *name; name = next + 1)
++    {
++        len = (next = strchr( name, ';' )) ? next - name : strlen( name );
++        for (i = 0; i < len && image[i] && RtlDowncaseUnicodeChar( image[i] ) ==
++             RtlDowncaseUnicodeChar( (unsigned char)name[i] ); i++);
++        if (len && i == len && !image[i]) return dpi;
++        if (!next) break;
++    }
++    return 0;
++}
++
+ void sysparams_init(void)
+ {
+     WCHAR buffer[MAX_PATH+16], *p, *appname;
+@@ -5890,6 +6004,8 @@ void sysparams_init(void)
+         }
+     }
+     if (!system_dpi) system_dpi = USER_DEFAULT_SCREEN_DPI;
++    session_dpi = system_dpi;
++    if ((app_dpi = get_app_dpi())) system_dpi = app_dpi;
+ 
+     /* FIXME: what do the DpiScalingVer flags mean? */
+     get_dword_entry( (union sysparam_all_entry *)&entry_DPISCALINGVER, 0, &dpi_scaling, 0 );

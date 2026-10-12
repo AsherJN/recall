@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Real macOS process/mapping isolation and 25-second closer, with owned fixtures.
+"""Real macOS process/mapping isolation, 25-second closer and preparation after the
+session, with owned fixtures.
 
 No game or Wine process is signalled. Fixtures model executable names and mapped
 engine/prefix files, including foreign prefixes/engines and an update Agent.
 """
-import argparse,json,os,subprocess,tempfile,time
+import argparse,json,os,shutil,subprocess,tempfile,time
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('--worker',type=Path,required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args();worker=a.worker.resolve();out=a.output.resolve();out.mkdir(parents=True,exist_ok=False)
 with tempfile.TemporaryDirectory(prefix='ow2-session-fixture-') as temp:
     base=Path(temp).resolve();root=base/'Owned Installation';other=base/'Foreign Installation'
+    # The worker beside a stand-in pipeline helper, which records how the monitor runs it.
+    helpers=base/'Helpers';helpers.mkdir();shutil.copy2(worker,helpers/'ow2-setup');worker=helpers/'ow2-setup'
+    record=base/'after-session';(helpers/'ow2-pipeline').write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{record}"\n');(helpers/'ow2-pipeline').chmod(0o755)
     def call(command):
         r=subprocess.run([str(worker),command,'--root',str(root)],capture_output=True,text=True,timeout=20);r.check_returncode();(out/(command+'.jsonl')).write_text(r.stdout);return [json.loads(x) for x in r.stdout.splitlines()]
     call('status')
@@ -49,12 +53,20 @@ with tempfile.TemporaryDirectory(prefix='ow2-session-fixture-') as temp:
         assert all(p.poll() is None for p in processes),'Retina migration disturbed a running process'
         monitor=subprocess.Popen([str(worker),'watch','--root',str(root)],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True);processes.append(monitor)
         time.sleep(5);assert client.poll() is None,'Client closed before grace period'
-        report,_=monitor.communicate(timeout=40)
-        assert monitor.returncode==0,report
-        client.wait(timeout=5);assert client.returncode==-15,client.returncode
+        client.wait(timeout=40);assert client.returncode==-15,client.returncode
         assert all(p.poll() is None for p in [game,agent,foreignClient,foreignEngine]),'Unrelated process was signalled'
-        (out/'result.json').write_text(json.dumps({'scoped_membership':True,'grace_period_preserved':True,'client_sigterm':True,'game_agent_foreign_prefix_foreign_engine_preserved':True,'monitor_exited_after_close':True,'display_change_rejected_during_game':True},indent=2)+'\n')
-        print('PASS: exact prefix/engine membership, 25-second grace, scoped close and monitor exit')
+        # The monitor stays until the game closes, then prepares the archive and exits.
+        time.sleep(3);assert monitor.poll() is None and not record.exists(),'Preparation began during the match'
+        assert (root/'cache/after-session.pid').read_text()==str(monitor.pid)
+        game.terminate();game.wait(timeout=5)
+        report,_=monitor.communicate(timeout=60)
+        assert monitor.returncode==0,report
+        mode,folder=record.read_text().splitlines();assert mode=='--after-session' and Path(folder).resolve()==root,record.read_text()
+        assert {'stage':'pipeline_after_session','code':0} in [json.loads(x) for x in report.splitlines()],report
+        assert not (root/'cache/after-session.pid').exists()
+        assert all(p.poll() is None for p in [agent,foreignClient,foreignEngine]),'Unrelated process was signalled'
+        (out/'result.json').write_text(json.dumps({'scoped_membership':True,'grace_period_preserved':True,'client_sigterm':True,'game_agent_foreign_prefix_foreign_engine_preserved':True,'monitor_waited_for_game_then_prepared':True,'display_change_rejected_during_game':True},indent=2)+'\n')
+        print('PASS: exact prefix/engine membership, 25-second grace, scoped close, preparation after the game closed and monitor exit')
     finally:
         for proc in processes:
             if proc.poll() is None:proc.terminate()

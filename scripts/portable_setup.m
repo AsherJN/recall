@@ -391,6 +391,7 @@ static void prepare(void) {
 // The launcher stub can relaunch the client without forwarding Chromium flags.
 // Invoke the same executable as the accepted v6 launcher.
 static NSString *clientPath(void) {return join(root,@"environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe");}
+static NSMutableDictionary *battleNetSize(NSMutableDictionary *env, NSString *installer);
 static void installClient(NSString *installer, NSString *expected) {
     requireRosetta();
     NSString *engine=runtime();if(busy(engine))fail(@"close_game_before_setup");
@@ -399,11 +400,60 @@ static void installClient(NSString *installer, NSString *expected) {
     // The installer's update Agent is what stalled at 45% (portable_network.h).
     configureProxy(engine,proxyDetectionChosen());
     saveStage(@"installing_battlenet");
-    NSTask *p=task(join(engine,@"bin/wine"),@[installer,@"--lang=enUS"],wineEnv(engine),@"battlenet-installer.log");
+    NSTask *p=task(join(engine,@"bin/wine"),@[installer,@"--lang=enUS"],battleNetSize(wineEnv(engine),installer),@"battlenet-installer.log");
     event(@"battlenet_installer_open",@{@"pid":@(p.processIdentifier)});
 }
 static NSString *helperPath(NSString *name) {
     return join([NSProcessInfo.processInfo.arguments[0] stringByDeletingLastPathComponent],name);
+}
+/* Preparing the archive of learned pipelines takes minutes, so it happens after a match:
+ * the session's monitor (watch) stays until the game has closed and runs ow2-pipeline
+ * --after-session; a launch only keeps what was learned. Meanwhile the monitor's pid is
+ * in cache/after-session.pid, and a launch stops it first. The helper stops its tool and
+ * keeps the cache it had; the next session's monitor prepares again. */
+static NSString *afterSessionPath(void) { return join(root,@"cache/after-session.pid"); }
+static void stopAfterSession(void) {
+    int fd=open(join(root,@"launch-monitor.lock").fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
+    if(fd<0)return;
+    // A monitor holds this lock for as long as it runs.
+    pid_t pid=[[NSString stringWithContentsOfFile:afterSessionPath() encoding:NSUTF8StringEncoding error:nil] intValue];
+    if(flock(fd,LOCK_EX|LOCK_NB)==0 || pid<=0 || pid==getpid()) {close(fd);return;}
+    kill(pid,SIGTERM);
+    for(int i=0;i<600 && flock(fd,LOCK_EX|LOCK_NB);i++)[NSThread sleepForTimeInterval:0.05];
+    close(fd);
+}
+static void prepareAfterSession(void) {
+    NSString *pipeline=helperPath(@"ow2-pipeline");
+    if(![fm isExecutableFileAtPath:pipeline])return;
+    [fm createDirectoryAtPath:join(root,@"cache") withIntermediateDirectories:YES attributes:nil error:nil];
+    [[NSString stringWithFormat:@"%d",getpid()] writeToFile:afterSessionPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    BOOL (^gameRunning)(void)=^BOOL{ for(NSDictionary *p in sessionProcesses())if([p[@"kind"] isEqual:@"game"])return YES;return NO; };
+    NSDate *checked=[NSDate distantPast];
+    // The game holds the cache's write lock until its process ends: 75 means try again.
+    for(int attempt=0;attempt<8 && !cancelRequested;) {
+        if(-checked.timeIntervalSinceNow<10) {[NSThread sleepForTimeInterval:0.25];continue;}
+        checked=[NSDate date];
+        if(gameRunning())continue;
+        NSTask *p=task(pipeline,@[@"--after-session",root],nil,@"pipeline-after-session.log");
+        childPID=p.processIdentifier;
+        NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:900];
+        while(p.running && !cancelRequested && deadline.timeIntervalSinceNow>0) {
+            [NSThread sleepForTimeInterval:0.25];
+            // A game started from Battle.net meanwhile must find the cache free.
+            if(-checked.timeIntervalSinceNow>=5) {checked=[NSDate date];if(gameRunning())break;}
+        }
+        if(p.running) {
+            kill(p.processIdentifier,SIGTERM);
+            NSDate *grace=[NSDate dateWithTimeIntervalSinceNow:20];
+            while(p.running && grace.timeIntervalSinceNow>0)[NSThread sleepForTimeInterval:0.05];
+            if(p.running)kill(p.processIdentifier,SIGKILL);
+        }
+        [p waitUntilExit];childPID=0;
+        event(@"pipeline_after_session",@{@"code":@(p.terminationStatus)});
+        if(p.terminationStatus!=75)break;
+        attempt++;
+    }
+    [fm removeItemAtPath:afterSessionPath() error:nil];
 }
 static void closeClient(NSString *gameRunning);
 // Ends whatever is left of the Wine session (the update Agent, Wine's own services).
@@ -411,12 +461,26 @@ static void endSession(NSString *engine) {
     waitTask(task(join(engine,@"bin/wineserver"),@[@"-k"],wineEnv(engine),@"session-end.log"),15);
     if(waitTask(task(join(engine,@"bin/wineserver"),@[@"-w"],wineEnv(engine),@"session-end-wait.log"),15))fail(@"client_close_failed");
 }
-/* Battle.net (Qt around Chromium) lays itself out at Windows' 96 DPI, and Wine's Retina
- * mode shows Windows pixels at half size, so its window looked small. A Mac-sized client
- * scales both layers by 2: Qt through QT_SCALE_FACTOR, Chromium through its device scale
- * factor. Neither reaches Overwatch: the game ships no Qt, never sees Battle.net's
- * Chromium flags, and Wine's own DPI is unchanged.
- * Apple's Metal Performance HUD (Settings, launch --metal-hud 1) reaches Overwatch the
+/* Battle.net (Qt around Chromium) lays itself out for the DPI Windows reports. Wine's
+ * Retina mode (configureRetina) is one switch for every display: while the main display
+ * keeps the mode it had when the session started, which a Recall session always does
+ * (displays changing restart it), each Windows pixel is half a point on every display, a
+ * 1x monitor included (Wine sees a 2560x1440 monitor as 5120x2880). At Windows' 96 DPI
+ * Battle.net came out half size everywhere. Windows' answer is 200% (192 DPI), but Wine
+ * keeps one DPI for every program in a session, Overwatch included. The engine's
+ * WINE_APP_DPI (patches/wine-win32u-display-log.patch) gives a DPI to the programs it
+ * names only: Battle.net's, at 192, so on any display Battle.net has its Windows size in
+ * points. Overwatch, which Battle.net starts with this environment, is not named and sees
+ * 96 as before; Wine's shared record of the displays keeps 96 (tests/run_dpi_probe.py).
+ * Setup names the installer too, by its file name. launch --battlenet-scale 1 keeps
+ * Windows' size. */
+static NSMutableDictionary *battleNetSize(NSMutableDictionary *env, NSString *installer) {
+    NSMutableArray *names=[@[@"Battle.net.exe",@"Battle.net Launcher.exe",@"BlizzardError.exe"] mutableCopy];
+    if(installer)[names addObject:installer.lastPathComponent];
+    env[@"WINE_APP_DPI"]=[@"192:" stringByAppendingString:[names componentsJoinedByString:@";"]];
+    return env;
+}
+/* Apple's Metal Performance HUD (Settings, launch --metal-hud 1) reaches Overwatch the
  * same way: Battle.net starts the game with its own environment. MTL_HUD_ELEMENTS lists
  * the HUD's default panel ("gamemode" is undocumented) plus the shader compiler, which
  * shows the game compiling shaders, the cause of a first match's stutters. Battle.net
@@ -429,8 +493,8 @@ static void endSession(NSString *engine) {
  * image, so the anti-cheat's screenshots no longer crash the game.
  * So does MetalFX upscaling (Settings, launch --metalfx 1; portable_metalfx.h): the contract's
  * MetalFX environment. */
-static NSMutableDictionary *clientEnvironment(NSMutableDictionary *env, BOOL large, BOOL hud, BOOL gameMode, BOOL metalfx) {
-    if(large)env[@"QT_SCALE_FACTOR"]=@"2";
+static NSMutableDictionary *clientEnvironment(NSMutableDictionary *env, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx) {
+    if(sized)battleNetSize(env,nil);
     if(metalfx)[env addEntriesFromDictionary:candidateMetalFXEnvironment()];
     if(koreanSupportChosen())env[@"WINEMAC_SCREEN_READBACK"]=@"1";
     if(!gameMode)[env removeObjectForKey:@"WINE_GAME_MODE"];
@@ -480,7 +544,7 @@ static void (^graphicsFeed(NSString *log))(void) {
         }
     };
 }
-static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL gameMode, BOOL metalfx, NSString *sharpening) {
+static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx, NSString *sharpening) {
     requireRosetta();
     NSString *engine=runtime();if(![fm fileExistsAtPath:clientPath()])fail(@"battlenet_not_installed");
     NSArray *existing=sessionProcesses();
@@ -488,7 +552,6 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL 
     // Battle.net's own command for starting Overwatch ("Pro"). A running client
     // receives it from a second launch, which hands it over and exits.
     NSArray *client=@[clientPath(),@"--disable-gpu-compositing",@"--from-launcher",@"--in-process-gpu",@"--use-gl=angle",@"--use-angle=swiftshader"];
-    if(large)client=[client arrayByAddingObject:@"--force-device-scale-factor=2"];
     if(play)client=[client arrayByAddingObject:@"--exec=launch Pro"];
     // A game must start in a Wine session that began with the displays as they are now
     // (displaySignature). Battle.net open from before a display change is closed and
@@ -503,7 +566,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL 
         // Overwatch reads its default microphone when it starts; one already running keeps its own.
         if(!game)configureVoiceMicrophone(engine,nil,YES,NO);
         // Battle.net already open carries its own environment; this hands over the command only.
-        if(play && !game)task(join(engine,@"bin/wine"),client,clientEnvironment(wineEnv(engine),large,hud,gameMode,NO),@"battlenet-play.log");
+        if(play && !game)task(join(engine,@"bin/wine"),client,clientEnvironment(wineEnv(engine),sized,hud,gameMode,NO),@"battlenet-play.log");
         if(!game)task(NSProcessInfo.processInfo.arguments[0],@[@"watch",@"--root",root],nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
         return;
     }
@@ -527,6 +590,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL 
     config=sharpeningProfile(canvasProfile(config,gameWidth,gameHeight),sharpness);
     if(![config writeToFile:join(root,@"dxmt.conf") atomically:YES encoding:NSUTF8StringEncoding error:nil])fail(@"settings_write_failed");
     NSString *pipeline=helperPath(@"ow2-pipeline");
+    stopAfterSession();
     if([fm isExecutableFileAtPath:pipeline]) {
         event(@"preparing_pipelines",nil);
         // With Game Mode the game runs as the engine's game app, which keeps its own
@@ -544,7 +608,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL large, BOOL hud, BOOL 
     if(koreanSupportChosen())configureKoreanCertificate(engine,YES,YES);
     configureVoiceMicrophone(engine,nil,YES,YES);
     if(displays) {NSMutableDictionary *s=state();s[@"session_displays"]=displays;writeJSON(s,join(root,@"state.json"));}
-    NSDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),large,hud,gameMode,metalfx);
+    NSDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),sized,hud,gameMode,metalfx);
     NSTask *p=task(join(engine,@"bin/wine"),client,env,@"battlenet.log");
     saveStage(@"battlenet_started");event(@"battlenet_open",@{@"pid":@(p.processIdentifier)});
     task(NSProcessInfo.processInfo.arguments[0],@[@"watch",@"--root",root],nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
@@ -591,6 +655,7 @@ static void uninstall(void) {
     // environment holding Battle.net and Overwatch, runtimes, downloads, logs
     // and caches. ownRoot already refused any directory without the marker.
     closeClient(@"close_game_before_uninstall");
+    stopAfterSession();
     // Move, never delete: the folder is recoverable from the Trash with Put
     // Back. On the same volume this is a rename even for a full game install.
     NSURL *trashed=nil;NSError *error=nil;
@@ -674,7 +739,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         else if([command isEqual:@"verify"]) {verifyRuntime(runtime(),state()[@"active_runtime"]);event(@"runtime_verified",nil);}
         else if([command isEqual:@"prepare"])prepare();
         else if([command isEqual:@"install-battlenet"])installClient(options[@"installer"] ?: download(options[@"url"],options[@"sha256"]),options[@"sha256"]);
-        // --battlenet-scale 1 keeps Battle.net at Windows' size (Settings); 2 is the default.
+        // --battlenet-scale 1 keeps Battle.net at Windows' size; otherwise it has the main display's (battleNetSize).
         // --metal-hud 1 shows Apple's Metal Performance HUD over Overwatch (Settings); off by default.
         // --game-mode 0 starts Overwatch without macOS Game Mode (hidden app default); on by default.
         // --metalfx 1 offers DLSS on MetalFX, with --sharpening off|low|high (Settings); off by default.
