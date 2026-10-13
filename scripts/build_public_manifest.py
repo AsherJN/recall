@@ -71,6 +71,7 @@ README_REPLACEMENTS = [
     ('(public-how-it-works.md)', '(docs/HOW-IT-WORKS.md)'),
     ('(public-metalfx.md)', '(docs/METALFX.md)'),
     ('(public-installation.md)', '(docs/INSTALLATION.md)'),
+    ('(public-installation.md#', '(docs/INSTALLATION.md#'),
     ('(../patches)', '(patches)'),
     ('(public-support.md)', '(docs/SUPPORT.md)'),
     ('(public-support.md#', '(docs/SUPPORT.md#'),

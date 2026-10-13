@@ -100,6 +100,10 @@ deleted outright. Put Back in Finder restores everything, and the storage is
 freed when you empty the Trash. Your Blizzard account and any other Blizzard
 software are not touched.
 
+If you installed Recall with Homebrew, run `brew uninstall --zap --cask recall`
+instead. It closes Battle.net and Overwatch and moves the same things to the
+Trash, including a game installed on an external drive.
+
 ## Privacy
 
 The app keeps a small local record of setup progress and errors. It can export

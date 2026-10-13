@@ -13,6 +13,21 @@ you to confirm the first launch of an app downloaded from the internet. You neve
 need to disable Gatekeeper or any other macOS protection. If a guide tells you
 to, don't.
 
+## Installing with Homebrew
+
+If you use [Homebrew](https://brew.sh), you can install Recall with it instead of
+the DMG:
+
+```sh
+brew tap asherjn/recall
+brew trust asherjn/recall
+brew install --cask asherjn/recall/recall
+```
+
+Then open Recall from Applications and follow the setup steps. To update, run
+`brew update` and then `brew upgrade --cask recall`; **Update Now** in the app
+works too. To remove Recall and the game, run `brew uninstall --zap --cask recall`.
+
 ## Your first matches
 
 Your first matches can stutter briefly while your Mac prepares Overwatch's
@@ -39,7 +54,7 @@ stutter. The mode was made by u/Working_Dealer_5102.
 - Your Blizzard account, settings and game files belong to Battle.net, the same
   as on Windows. There is no Recall account.
 
-Nothing else is installed. No Terminal, Homebrew, Python or developer tools.
+Nothing else is installed, and you never need Terminal, Python or developer tools.
 
 ## Installing on an external drive
 
@@ -77,7 +92,9 @@ Check for Updates….
 
 Choose Settings › Uninstall Recall… and confirm. The app moves the
 game, Battle.net, its runtime and itself to the Trash; see
-[Support](SUPPORT.md#uninstalling). Your Blizzard account is untouched.
+[Support](SUPPORT.md#uninstalling). Your Blizzard account is untouched. If you
+installed Recall with Homebrew, run `brew uninstall --zap --cask recall` instead.
+It removes the same things.
 
 ## Bundled components
 

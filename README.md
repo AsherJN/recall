@@ -88,6 +88,8 @@ CrossOver is the right tool if you play many Windows games. If Overwatch is your
 
 The [installation guide](docs/INSTALLATION.md) has more detail, including installing the game on an external drive.
 
+Prefer Homebrew? See [installing with Homebrew](docs/INSTALLATION.md#installing-with-homebrew).
+
 ## Why I built Recall
 
 <img src="app/Resources/AuthorPhotoRound.png" width="120" alt="Josh Nelson">
@@ -159,7 +161,7 @@ Overwatch updates through Battle.net, as usual. If a Blizzard or macOS update ne
 <details>
 <summary><b>How do I uninstall it?</b></summary>
 
-Choose Settings › Uninstall Recall. It moves Recall and the game installation it manages to the Trash. Your Blizzard account is unaffected. See [uninstalling](docs/SUPPORT.md#uninstalling) for details.
+Choose Settings › Uninstall Recall. It moves Recall and the game installation it manages to the Trash. Your Blizzard account is unaffected. See [uninstalling](docs/SUPPORT.md#uninstalling) for details. If you installed Recall with Homebrew, run `brew uninstall --zap --cask recall` instead.
 </details>
 
 ## Help and contributions
