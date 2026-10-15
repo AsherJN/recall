@@ -601,6 +601,18 @@ static void applyShaderMemory(void) {
     id limit=[choice isEqual:@"all"] || [choice isEqual:@"first"] ? choice : @(choice.longLongValue);
     writeJSON(@{@"schema":@1,@"limit":limit},join(folder,@"load.json"));
 }
+/* Settings › Graphics › Delete Shaders: clear the prepared shader cache so every shader builds
+ * again from scratch after the next match. The game holds the cache's write lock while it runs,
+ * and a preparation after a match writes the same archives, so both block it. The Shader
+ * memory choice is kept, and load.json is written again for the next launch. */
+static void deleteShaders(void) {
+    for(NSDictionary *p in sessionProcesses())if([p[@"kind"] isEqual:@"game"])fail(@"close_game_before_maintenance");
+    if(!stopMonitor())fail(@"shader_preparation_running");
+    [fm removeItemAtPath:join(root,@"cache/pack.json") error:nil];
+    if([fm fileExistsAtPath:join(root,@"cache/pipelines")] && ![fm removeItemAtPath:join(root,@"cache/pipelines") error:nil])fail(@"shader_delete_failed");
+    applyShaderMemory();
+    event(@"shaders_deleted",nil);
+}
 static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx, NSString *sharpening) {
     requireRosetta();
     NSString *engine=runtime();if(![fm fileExistsAtPath:clientPath()])fail(@"battlenet_not_installed");
@@ -806,6 +818,9 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
                 event(@"shader_preparation_started",nil);
             }
         }
+        // Settings › Graphics › Delete Shaders: the prepared shader cache, to rebuild after the
+        // next match. Overwatch must be closed, and a preparation running left to finish.
+        else if([command isEqual:@"delete-shaders"])deleteShaders();
         // Support and tests: the microphone launch points Wine at (portable_voice.h). --uid names one
         // instead of asking Core Audio ("none": macOS's default); --apply 0 only reports.
         else if([command isEqual:@"voice-microphone"]) {

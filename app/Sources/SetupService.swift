@@ -43,6 +43,8 @@ struct SetupFailure: Error {
         case "app_name_taken": return L("Another app named {0} is in your Applications folders. Rename or remove that app, then try again.",Brand.name)
         case "release_unavailable": return L("This app is missing its verified setup components. Download a complete copy from the release page.")
         case "setting_change_failed": return L("This setting couldn’t be changed. Close Overwatch and Battle.net, then try again.")
+        case "shader_preparation_running": return L("A shader cache update is running. Wait for it to finish, then try again.")
+        case "shader_delete_failed": return L("The shader cache couldn’t be deleted. Close Overwatch and Battle.net, then try again.")
         default: return L("This step couldn’t finish. Retry, or open Help & FAQ to save a support report. Your game data has been kept.")
         }
     }

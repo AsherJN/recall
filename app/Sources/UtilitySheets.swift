@@ -34,6 +34,7 @@ struct SettingsSheet:View {
     @State private var confirmForceQuit=false
     @State private var confirmRepair=false
     @State private var confirmResetDisplay=false
+    @State private var confirmDeleteShaders=false
     @State private var confirmKorean=false
     @State private var aboutUpscaling=false
     /// Shader memory's slider: how many of the shader cache's parts Overwatch loads.
@@ -90,7 +91,11 @@ struct SettingsSheet:View {
                 Button(L("Cancel"),role:.cancel) {}
                 Button(L("Reset"),action:model.resetDisplay)
             } message: { Text(model.rememberEachDisplay ? L("Overwatch will open full screen at {0} on this display the next time it starts. Your graphics quality and FPS settings stay as they are.",DisplayResolution.initial(for:main).label)
-                                                         : L("Overwatch will open full screen at {0} the next time it starts. Your graphics quality and FPS settings stay as they are.",DisplayResolution.initial(for:main).label)) }
+                                                          : L("Overwatch will open full screen at {0} the next time it starts. Your graphics quality and FPS settings stay as they are.",DisplayResolution.initial(for:main).label)) }
+            .alert(L("Delete shaders?"),isPresented:$confirmDeleteShaders) {
+                Button(L("Cancel"),role:.cancel) {}
+                Button(L("Delete"),role:.destructive,action:model.deleteShaders)
+            } message: { Text(L("Do you really want to delete the shader cache? You might experience stuttering until the shaders are rebuilt again.")) }
     }
     @ViewBuilder private var page:some View {
         switch model.settingsTab {
@@ -104,6 +109,7 @@ struct SettingsSheet:View {
             upscaling
             metalHUD
             shaderMemory
+            deleteShaders
         case .audio:
             microphone
             sound
@@ -364,6 +370,13 @@ struct SettingsSheet:View {
         }.onAppear {
             model.loadShaderPack()
             shaderParts=Double(max(1,ShaderMemory.loaded(model.shaderMemory,model.shaderPack)))
+        }
+    }
+    /// Delete Shaders, under the Shader memory panel: empty the prepared shader cache so
+    /// every shader builds again from scratch after the next match. The confirmation asks.
+    private var deleteShaders:some View {
+        LauncherPanel(inset:16) {
+            action(L("Delete Shaders"),detail:L("Clears your shader cache. Use this if you experience shader related issues."),button:L("Delete")) { confirmDeleteShaders=true }
         }
     }
     /// A setting Battle.net carries from when it opens: change it once it's closed.
