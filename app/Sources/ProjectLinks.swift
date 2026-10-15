@@ -50,8 +50,8 @@ struct RepositoryLink:View {
                 .background(.black,in:Capsule())
                 .overlay { Capsule().strokeBorder(.white.opacity(0.18),lineWidth:1) }
                 .contentShape(Capsule())
-        }.buttonStyle(.plain).environment(\.colorScheme,.light).accessibilityLabel("\(Brand.name) on GitHub")
-            .help("Open the project repository in your browser")
+        }.buttonStyle(.plain).environment(\.colorScheme,.light).accessibilityLabel(L("{0} on GitHub",Brand.name))
+            .help(L("Open the project repository in your browser"))
     }
 }
 
@@ -105,8 +105,8 @@ struct DiscordLink:View {
             HStack(spacing:14) {
                 DiscordMark().fill(.white).frame(width:30,height:23).accessibilityHidden(true)
                 VStack(alignment:.leading,spacing:3) {
-                    Text("Join the \(Brand.name) Discord").font(LauncherStyle.font(15,.semibold))
-                    Text("Get help, compare setups, and find other Mac Overwatch players.")
+                    Text(L("Join the {0} Discord",Brand.name)).font(LauncherStyle.font(15,.semibold))
+                    Text(L("Get help, compare setups, and find other Mac Overwatch players."))
                         .font(LauncherStyle.font(12)).fixedSize(horizontal:false,vertical:true)
                 }
                 Spacer(minLength:0)
@@ -114,8 +114,8 @@ struct DiscordLink:View {
             }.foregroundStyle(.white).multilineTextAlignment(.leading)
                 .padding(.horizontal,18).padding(.vertical,13).frame(maxWidth:.infinity,minHeight:60,alignment:.leading)
         }.buttonStyle(DiscordLinkStyle())
-            .accessibilityLabel("Join the \(Brand.name) Discord").accessibilityHint("Opens the invite in your browser")
-            .help("Open the \(Brand.name) Discord invite in your browser")
+            .accessibilityLabel(L("Join the {0} Discord",Brand.name)).accessibilityHint(L("Opens the invite in your browser"))
+            .help(L("Open the {0} Discord invite in your browser",Brand.name))
     }
 }
 /// Help's footer, beside Report a Problem: questions go to the community, bugs to GitHub.
@@ -123,11 +123,53 @@ struct DiscordHelpLink:View {
     var body:some View {
         Link(destination:Brand.discord) {
             Label {
-                Text("Ask on Discord").font(LauncherStyle.font(13,.medium))
+                Text(L("Ask on Discord")).font(LauncherStyle.font(13,.medium))
             } icon: {
                 DiscordMark().fill(DiscordLink.blurple).frame(width:17,height:13).accessibilityHidden(true)
             }
-        }.buttonStyle(.borderless).help("Open the \(Brand.name) Discord invite in your browser")
+        }.buttonStyle(.borderless).help(L("Open the {0} Discord invite in your browser",Brand.name))
+    }
+}
+/// In place of the Discord card for players who chose China's Battle.net (AppModel.showsDiscord):
+/// Discord is blocked in mainland China, so questions go to GitHub (owner, October 15). Same
+/// place and size as the Discord card, in Recall's own colours.
+struct GitHubHelpLink:View {
+    @Environment(\.openURL) private var openURL
+    var body:some View {
+        Button { openURL(Brand.issues) } label: {
+            HStack(spacing:14) {
+                Image(systemName:"bubble.left.and.text.bubble.right").font(.system(size:19,weight:.medium))
+                    .foregroundStyle(LauncherStyle.accent).frame(width:30).accessibilityHidden(true)
+                VStack(alignment:.leading,spacing:3) {
+                    Text(L("Questions? Ask on GitHub")).font(LauncherStyle.font(15,.semibold))
+                    Text(L("Get help, report a problem or suggest an idea."))
+                        .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                }
+                Spacer(minLength:0)
+                Image(systemName:"arrow.up.right").font(.system(size:12,weight:.semibold)).foregroundStyle(.secondary).accessibilityHidden(true)
+            }.foregroundStyle(.primary).multilineTextAlignment(.leading)
+                .padding(.horizontal,18).padding(.vertical,13).frame(maxWidth:.infinity,minHeight:60,alignment:.leading)
+        }.buttonStyle(GitHubLinkStyle())
+            .accessibilityLabel(L("Questions? Ask on GitHub")).accessibilityHint(L("Opens GitHub in your browser"))
+            .help(L("Open a new issue on GitHub in your browser"))
+    }
+}
+private struct GitHubLinkStyle:ButtonStyle {
+    func makeBody(configuration:Configuration)->some View { GitHubLinkBody(configuration:configuration) }
+}
+private struct GitHubLinkBody:View {
+    let configuration:ButtonStyleConfiguration
+    @Environment(\.isFocused) private var focused
+    @Environment(\.colorScheme) private var scheme
+    @State private var hovering=false
+    var body:some View {
+        let shape=RoundedRectangle(cornerRadius:16,style:.continuous)
+        configuration.label
+            .background(LauncherStyle.surface(scheme).opacity(hovering ? 1 : 0.72),in:shape)
+            .overlay { shape.strokeBorder(focused ? Color.primary.opacity(0.8) : .primary.opacity(0.08),lineWidth:focused ? 2 : 1) }
+            .contentShape(shape)
+            .opacity(configuration.isPressed ? 0.75 : 1)
+            .onHover { hovering=$0 }
     }
 }
 private struct DiscordLinkStyle:ButtonStyle {
@@ -196,7 +238,7 @@ struct MosaicButton:View {
     var body:some View {
         Link(destination:Brand.mosaic(placement)) {
             HStack(spacing:8) {
-                Text("Get").font(LauncherStyle.font(13,.semibold))
+                Text(L("Get")).font(LauncherStyle.font(13,.semibold))
                 Image(nsImage:ProjectArtwork.mosaic).renderingMode(.original).resizable().scaledToFit()
                     .frame(width:100,height:19).accessibilityHidden(true)
                 Image(systemName:"arrow.up.right").font(.system(size:9,weight:.semibold)).accessibilityHidden(true)
@@ -205,7 +247,7 @@ struct MosaicButton:View {
                 .overlay { Capsule().strokeBorder(.white.opacity(0.18),lineWidth:1) }
                 .contentShape(Capsule())
         }.buttonStyle(.plain).environment(\.colorScheme,.light)
-            .accessibilityLabel("Get Mosaic News, free on the App Store").help("Open Mosaic News on the App Store. It’s free.")
+            .accessibilityLabel(L("Get Mosaic News, free on the App Store")).help(L("Open Mosaic News on the App Store. It’s free."))
     }
 }
 struct CoffeeButton:View {
@@ -215,13 +257,13 @@ struct CoffeeButton:View {
             HStack(spacing:7) {
                 Image(systemName:"cup.and.saucer.fill").font(.system(size:13,weight:.semibold)).foregroundStyle(LauncherStyle.accent)
                     .accessibilityHidden(true)
-                Text("Buy me a coffee").font(LauncherStyle.font(13,.semibold))
+                Text(L("Buy me a coffee")).font(LauncherStyle.font(13,.semibold))
                 Image(systemName:"arrow.up.right").font(.system(size:9,weight:.semibold)).accessibilityHidden(true)
             }.foregroundStyle(.primary).padding(.horizontal,16).frame(height:38)
                 .background(LauncherStyle.surface(scheme),in:Capsule())
                 .overlay { Capsule().strokeBorder(.primary.opacity(0.14),lineWidth:1) }
                 .contentShape(Capsule())
-        }.buttonStyle(.plain).accessibilityLabel("Buy me a coffee on Ko-fi").help("Open Josh’s Ko-fi page in your browser")
+        }.buttonStyle(.plain).accessibilityLabel(L("Buy me a coffee on Ko-fi")).help(L("Open Josh’s Ko-fi page in your browser"))
     }
 }
 struct LinkedInLink:View {
@@ -234,12 +276,12 @@ struct LinkedInLink:View {
             HStack(spacing:6) {
                 Image(nsImage:ProjectArtwork.linkedIn).renderingMode(.template).resizable().scaledToFit()
                     .frame(width:17,height:15).accessibilityHidden(true)
-                Text("Joshua Nelson").font(LauncherStyle.font(13,.medium))
+                Text(verbatim:"Joshua Nelson").font(LauncherStyle.font(13,.medium))
                 Image(systemName:"arrow.up.right").font(.system(size:8,weight:.medium)).accessibilityHidden(true)
             }.foregroundStyle(blue).padding(.horizontal,10).frame(height:28)
                 .background(blue.opacity(0.10),in:Capsule()).contentShape(Capsule())
-        }.buttonStyle(.plain).accessibilityLabel("Joshua Nelson on LinkedIn")
-            .help("Open Joshua Nelson’s LinkedIn profile in your browser")
+        }.buttonStyle(.plain).accessibilityLabel(L("{0} on LinkedIn","Joshua Nelson"))
+            .help(L("Open {0}’s LinkedIn profile in your browser","Joshua Nelson"))
     }
 }
 // Josh's own ask, on the home, running and loading screens once Battle.net has
@@ -251,7 +293,7 @@ struct SupportCard:View {
         VStack(alignment:.leading,spacing:12) {
             HStack(alignment:.top,spacing:12) {
                 AuthorPhoto(size:40)
-                Text("Hey there! I’m Josh, the creator of \(Brand.name). If you’re enjoying it, you can support my work by trying Mosaic News, my free news app, or buying me a coffee :)")
+                Text(L("Hey there! I’m Josh, the creator of {0}. If you’re enjoying it, you can support my work by trying Mosaic News, my free news app, or buying me a coffee :)",Brand.name))
                     .font(LauncherStyle.font(13)).lineSpacing(3).fixedSize(horizontal:false,vertical:true)
             }
             HStack(spacing:10) {
@@ -261,6 +303,6 @@ struct SupportCard:View {
         }.padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.surface(scheme),in:RoundedRectangle(cornerRadius:LauncherStyle.radius,style:.continuous))
             .overlay { RoundedRectangle(cornerRadius:LauncherStyle.radius,style:.continuous).strokeBorder(.primary.opacity(0.06),lineWidth:1) }
-            .accessibilityElement(children:.contain).accessibilityLabel("Support \(Brand.name)")
+            .accessibilityElement(children:.contain).accessibilityLabel(L("Support {0}",Brand.name))
     }
 }

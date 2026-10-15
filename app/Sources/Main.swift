@@ -45,34 +45,34 @@ import Darwin
     func menu()->NSMenu {
         let main=NSMenu(),app=NSMenu(),top=NSMenuItem();main.addItem(top);top.submenu=app
         func add(_ title:String,_ action:Selector,_ key:String="",to menu:NSMenu?=nil) { let item=NSMenuItem(title:title,action:action,keyEquivalent:key);item.target=self;(menu ?? app).addItem(item) }
-        add("About \(Brand.name)",#selector(about))
-        add("Check for Updates…",#selector(checkForUpdates))
+        add(L("About {0}",Brand.name),#selector(about))
+        add(L("Check for Updates…"),#selector(checkForUpdates))
         app.addItem(.separator())
-        add("Settings…",#selector(settings),",")
+        add(L("Settings…"),#selector(settings),",")
         app.addItem(.separator())
-        if AppModel.playEnabled { add("Play Overwatch",#selector(play),"p") }
-        add("Open Battle.net",#selector(launch),"o")
+        if AppModel.playEnabled { add(L("Play Overwatch"),#selector(play),"p") }
+        add(L("Open Battle.net"),#selector(launch),"o")
         app.addItem(.separator())
-        add("Uninstall \(Brand.name)…",#selector(uninstall))
+        add(L("Uninstall {0}…",Brand.name),#selector(uninstall))
         app.addItem(.separator())
-        let hide=NSMenuItem(title:"Hide \(Brand.name)",action:#selector(NSApplication.hide(_:)),keyEquivalent:"h");app.addItem(hide)
-        add("Quit \(Brand.name)",#selector(quit),"q")
-        let editItem=NSMenuItem();main.addItem(editItem);let edit=NSMenu(title:"Edit");editItem.submenu=edit
-        for (title,selector,key) in [("Copy",#selector(NSText.copy(_:)),"c"),("Select All",#selector(NSText.selectAll(_:)),"a")] { edit.addItem(NSMenuItem(title:title,action:selector,keyEquivalent:key)) }
-        let windowItem=NSMenuItem();main.addItem(windowItem);let wm=NSMenu(title:"Window");windowItem.submenu=wm
-        wm.addItem(NSMenuItem(title:"Minimize",action:#selector(NSWindow.performMiniaturize(_:)),keyEquivalent:"m"))
-        wm.addItem(NSMenuItem(title:"Close",action:#selector(NSWindow.performClose(_:)),keyEquivalent:"w"))
+        let hide=NSMenuItem(title:L("Hide {0}",Brand.name),action:#selector(NSApplication.hide(_:)),keyEquivalent:"h");app.addItem(hide)
+        add(L("Quit {0}",Brand.name),#selector(quit),"q")
+        let editItem=NSMenuItem();main.addItem(editItem);let edit=NSMenu(title:L("Edit"));editItem.submenu=edit
+        for (title,selector,key) in [(L("Copy"),#selector(NSText.copy(_:)),"c"),(L("Select All"),#selector(NSText.selectAll(_:)),"a")] { edit.addItem(NSMenuItem(title:title,action:selector,keyEquivalent:key)) }
+        let windowItem=NSMenuItem();main.addItem(windowItem);let wm=NSMenu(title:L("Window"));windowItem.submenu=wm
+        wm.addItem(NSMenuItem(title:L("Minimize"),action:#selector(NSWindow.performMiniaturize(_:)),keyEquivalent:"m"))
+        wm.addItem(NSMenuItem(title:L("Close"),action:#selector(NSWindow.performClose(_:)),keyEquivalent:"w"))
         NSApp.windowsMenu=wm
-        let helpItem=NSMenuItem();main.addItem(helpItem);let helpMenu=NSMenu(title:"Help");helpItem.submenu=helpMenu
-        add("\(Brand.name) Help",#selector(help),"?",to:helpMenu)
-        add("What’s New in \(Brand.name)",#selector(whatsNew),to:helpMenu)
+        let helpItem=NSMenuItem();main.addItem(helpItem);let helpMenu=NSMenu(title:L("Help"));helpItem.submenu=helpMenu
+        add(L("{0} Help",Brand.name),#selector(help),"?",to:helpMenu)
+        add(L("What’s New in {0}",Brand.name),#selector(whatsNew),to:helpMenu)
         helpMenu.addItem(.separator())
-        add("Release Notes",#selector(releaseNotes),to:helpMenu)
-        add("Report a Problem…",#selector(reportProblem),to:helpMenu)
-        add("\(Brand.name) on GitHub",#selector(repository),to:helpMenu)
+        add(L("Release Notes"),#selector(releaseNotes),to:helpMenu)
+        add(L("Report a Problem…"),#selector(reportProblem),to:helpMenu)
+        add(L("{0} on GitHub",Brand.name),#selector(repository),to:helpMenu)
         NSApp.helpMenu=helpMenu
         if model.release?.distribution == "private-preview" && CommandLine.arguments.contains("--preview-state") {
-            let item=NSMenuItem();main.addItem(item);let preview=NSMenu(title:"Preview");item.submenu=preview
+            let item=NSMenuItem();main.addItem(item);let preview=NSMenu(title:L("Preview"));item.submenu=preview
             for screen in AppModel.Screen.allCases {
                 let option=NSMenuItem(title:screen.rawValue,action:#selector(previewScreen(_:)),keyEquivalent:"")
                 option.representedObject=screen.rawValue;option.target=self;preview.addItem(option)
@@ -95,7 +95,7 @@ import Darwin
     // Right-clicking the Dock icon: start the game, or close a frozen one.
     func applicationDockMenu(_ sender:NSApplication)->NSMenu? {
         let menu=NSMenu()
-        for (title,action) in (AppModel.playEnabled ? [("Play Overwatch",#selector(play))] : [])+[("Open Battle.net",#selector(launch)),("Force Quit Overwatch & Battle.net…",#selector(forceQuit))] {
+        for (title,action) in (AppModel.playEnabled ? [(L("Play Overwatch"),#selector(play))] : [])+[(L("Open Battle.net"),#selector(launch)),(L("Force Quit Overwatch & Battle.net…"),#selector(forceQuit))] {
             let item=NSMenuItem(title:title,action:action,keyEquivalent:"");item.target=self;menu.addItem(item)
         }
         return menu
@@ -108,9 +108,9 @@ import Darwin
     @objc func repository() { NSWorkspace.shared.open(Brand.repository) }
     @objc func forceQuit() {
         show()
-        let alert=NSAlert();alert.messageText="Force quit Overwatch and Battle.net?"
-        alert.informativeText="Use this when the game stops responding. If you’re in a match, you’ll leave it."
-        alert.addButton(withTitle:"Force Quit").hasDestructiveAction=true;alert.addButton(withTitle:"Cancel")
+        let alert=NSAlert();alert.messageText=L("Force quit Overwatch and Battle.net?")
+        alert.informativeText=L("Use this when the game stops responding. If you’re in a match, you’ll leave it.")
+        alert.addButton(withTitle:L("Force Quit")).hasDestructiveAction=true;alert.addButton(withTitle:L("Cancel"))
         if alert.runModal() == .alertFirstButtonReturn { model.forceQuit() }
     }
     @objc func previewScreen(_ sender:NSMenuItem) {
@@ -138,7 +138,7 @@ import Darwin
     func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication)->Bool { false }
     func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply {
         if model.quitsNow { return .terminateNow }
-        if !model.canCancel { show();model.notice="Finishing the current step. You can quit as soon as it completes.";return .terminateCancel }
+        if !model.canCancel { show();model.notice=L("Finishing the current step. You can quit as soon as it completes.");return .terminateCancel }
         model.cancel()
         Task { while model.busy { try? await Task.sleep(for:.milliseconds(100)) };sender.reply(toApplicationShouldTerminate:true) }
         return .terminateLater

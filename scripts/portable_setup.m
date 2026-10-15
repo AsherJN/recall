@@ -201,6 +201,7 @@ static BOOL busy(NSString *engine) {
 #include "portable_retina.h"
 #include "portable_voice.h"
 #include "portable_network.h"
+#include "portable_region.h"
 #include "portable_korea.h"
 #include "portable_metalfx.h"
 #include "portable_diagnostics.h"
@@ -383,29 +384,30 @@ static void prepare(void) {
     if(waitTask(task(join(engine,@"bin/wineserver"),@[@"-w"],wineEnv(engine),@"wineboot-wait.log"),60))fail(@"environment_initialization_busy");
     if(![fm fileExistsAtPath:join(prefix,@"system.reg")])fail(@"environment_registry_missing");
     configureRetina();
-    // The player's network and Korean account choices (portable_network.h, portable_korea.h),
-    // before Battle.net's installer first goes online. Neither stops setup; launches retry.
+    // The player's network and Korean account choices (portable_network.h, portable_korea.h)
+    // and the fonts for Chinese or Korean (portable_region.h), before Battle.net's installer
+    // first goes online. None stops setup; launches retry.
     configureProxy(engine,proxyDetectionChosen());
     if(koreanSupportChosen())configureKoreanCertificate(engine,YES,YES);
+    if(cjkFontsChosen())configureFonts(engine,YES);
     if(!registrySaved(engine,60))fail(@"environment_initialization_busy");
     // An update keeps a resolution chosen in the game since the last launch.
     NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,YES);configureDisplay(width,height);
     NSMutableDictionary *s=state();s[@"prepared_runtime"]=s[@"active_runtime"];writeJSON(s,join(root,@"state.json"));
     saveStage(@"environment_ready");ownedPreparation=NO;
 }
-// The launcher stub can relaunch the client without forwarding Chromium flags.
-// Invoke the same executable as the accepted v6 launcher.
-static NSString *clientPath(void) {return join(root,@"environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe");}
 static NSMutableDictionary *battleNetSize(NSMutableDictionary *env, NSString *installer);
 static void installClient(NSString *installer, NSString *expected) {
     requireRosetta();
     NSString *engine=runtime();if(busy(engine))fail(@"close_game_before_setup");
     if(![fm fileExistsAtPath:join(root,@"environment/system.reg")])fail(@"prepare_environment_first");
     if(!matches(expected,@"^[a-f0-9]{64}$") || ![hashFile(installer) isEqual:expected])fail(@"client_installer_hash_mismatch");
-    // The installer's update Agent is what stalled at 45% (portable_network.h).
+    // The installer's update Agent is what stalled at 45% (portable_network.h). The installer
+    // shows the chosen language from its first window, fonts included (portable_region.h).
     configureProxy(engine,proxyDetectionChosen());
+    if(cjkFontsChosen())configureFonts(engine,YES);
     saveStage(@"installing_battlenet");
-    NSTask *p=task(join(engine,@"bin/wine"),@[installer,@"--lang=enUS"],battleNetSize(wineEnv(engine),installer),@"battlenet-installer.log");
+    NSTask *p=task(join(engine,@"bin/wine"),@[installer,[@"--lang=" stringByAppendingString:battleNetLanguage()]],battleNetSize(wineEnv(engine),installer),@"battlenet-installer.log");
     event(@"battlenet_installer_open",@{@"pid":@(p.processIdentifier)});
 }
 static NSString *helperPath(NSString *name) {
@@ -663,6 +665,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     // only then). The voice step below waits for Wine's server, as Battle.net needs.
     configureProxy(engine,proxyDetectionChosen());
     if(koreanSupportChosen())configureKoreanCertificate(engine,YES,YES);
+    if(cjkFontsChosen())configureFonts(engine,YES);
     configureVoiceMicrophone(engine,nil,YES,YES);
     if(displays) {NSMutableDictionary *s=state();s[@"session_displays"]=displays;writeJSON(s,join(root,@"state.json"));}
     NSDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),sized,hud,gameMode,metalfx);
@@ -755,8 +758,16 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
             NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,NO);
             NSMutableDictionary *next=[@{@"width":@(width),@"height":@(height),@"from_game":@([source isEqual:@"game"]),@"per_display":@(displayMemory(state()))} mutableCopy];
             if(mainScreen())next[@"screen"]=mainScreen();
-            event(@"status",@{@"state":state(),@"display_next":next,@"battlenet_installed":@([fm fileExistsAtPath:clientPath()]),@"game_installed":@([fm fileExistsAtPath:join(root,@"environment/drive_c/Program Files (x86)/Overwatch/_retail_/Overwatch.exe")]),@"nexon_build":@(nexonBuild()),@"free_bytes":@(freeBytes())});
+            // Where Battle.net is, relative to the data folder (the app shows its icon).
+            NSString *client=clientPath();
+            event(@"status",@{@"state":state(),@"display_next":next,@"battlenet_installed":@([fm fileExistsAtPath:client]),
+                @"battlenet_path":[client substringFromIndex:root.length+1],@"game_installed":@([fm fileExistsAtPath:join(gameFolder(),@"Overwatch.exe")]),
+                @"nexon_build":@(nexonBuild()),@"neac_build":@(neacBuild()),@"free_bytes":@(freeBytes())});
         }
+        // Setup's Choose your Battle.net: --region global|cn, --language enUS|zhCN|koKR (portable_region.h).
+        else if([command isEqual:@"battlenet"])chooseBattleNet(options[@"region"],options[@"language"]);
+        // Support and tests: the fonts setup and launches add for Chinese and Korean; --apply 0 only reports.
+        else if([command isEqual:@"fonts"])configureFonts([options[@"apply"] isEqual:@"0"] ? nil : runtime(),cjkFontsChosen());
         else if([command isEqual:@"onboarded"]) { NSMutableDictionary *s=state();s[@"onboarding_complete"]=@YES;writeJSON(s,join(root,@"state.json"));event(@"onboarding_complete",nil); }
         else if([command isEqual:@"session"])event(@"session",@{@"processes":sessionProcesses()});
         else if([command isEqual:@"watch"])watchClient();

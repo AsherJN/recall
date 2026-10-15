@@ -122,25 +122,25 @@ struct MainDisplay:Equatable {
     }
     /// What the player sees with a resolution on this display, for Settings.
     func caption(for choice:DisplayResolution) -> String {
-        let sharper="Larger sizes look sharper and lower your frame rate."
+        let sharper=L("Larger sizes look sharper and lower your frame rate.")
         if !fits(choice) {
-            return "Too large for this main display: Overwatch uses \(fitted(choice).label) until a larger display is your main display."
+            return L("Too large for this main display: Overwatch uses {0} until a larger display is your main display.",fitted(choice).label)
         }
         // Shapes within 2% look the same (a MacBook's area below the camera is 16:10).
         let screen=pixels.width/max(pixels.height,1)
         if choice.ratio < screen*0.98 {
-            return "Your main display is wider than \(choice.aspect), so the picture has black bars at the sides. \(sharper)"
+            return sentences(L("Your main display is wider than {0}, so the picture has black bars at the sides.",choice.aspect),sharper)
         }
         if choice.ratio > screen*1.02 {
-            return "Your main display is taller than \(choice.aspect), so the picture has black bars above and below. \(sharper)"
+            return sentences(L("Your main display is taller than {0}, so the picture has black bars above and below.",choice.aspect),sharper)
         }
         if CGFloat(choice.width) == pixels.width && CGFloat(choice.height) == pixels.height {
-            return "Matches your main display exactly: the sharpest picture. Smaller sizes run faster."
+            return L("Matches your main display exactly: the sharpest picture. Smaller sizes run faster.")
         }
         if CGFloat(choice.width) > pixels.width {
-            return "Larger than your main display: smoother edges, but a much lower frame rate."
+            return L("Larger than your main display: smoother edges, but a much lower frame rate.")
         }
-        return "Scaled up to fill your main display. \(sharper)"
+        return sentences(L("Scaled up to fill your main display."),sharper)
     }
     /// For a monitor macOS draws at a size other than its own pixels (issue #9: a 1440p
     /// monitor at "1920 × 1080" drawn at 3840 × 2160): what that does to Overwatch's
@@ -158,9 +158,11 @@ struct MainDisplay:Equatable {
         let label=sharpest.label.replacingOccurrences(of:" ",with:"\u{00A0}")
         let faster=refresh > 0 && sharpest.refresh >= refresh+1
         // A low-resolution mode shares its name with the sharp one.
-        let pick=sharpest.points == points ? "\(label), not the “low resolution” one" : label
-        let slower=faster ? " and runs at \(hz(refresh)) instead of \(hz(sharpest.refresh))" : ""
-        let rate=faster ? " at \(hz(sharpest.refresh))" : ""
-        return "macOS is resizing everything on this monitor, so Overwatch looks softer than it should\(slower). To fix it, close Overwatch and set this monitor to \(pick)\(rate)."
+        let pick=sharpest.points == points ? L("{0}, not the “low resolution” one",label) : label
+        let problem=faster ? L("macOS is resizing everything on this monitor, so Overwatch looks softer than it should and runs at {0} instead of {1}.",hz(refresh),hz(sharpest.refresh))
+                           : L("macOS is resizing everything on this monitor, so Overwatch looks softer than it should.")
+        let fix=faster ? L("To fix it, close Overwatch and set this monitor to {0} at {1}.",pick,hz(sharpest.refresh))
+                       : L("To fix it, close Overwatch and set this monitor to {0}.",pick)
+        return sentences(problem,fix)
     }
 }

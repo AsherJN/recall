@@ -4,8 +4,8 @@ import Observation
 
 @MainActor @Observable
 final class AppModel {
-    enum Screen: String, CaseIterable { case welcome, moveApp, checking, readyToInstall, preparing, launching, installer, ready, running, driveMissing, failure }
-    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate; var id: String { rawValue } }
+    enum Screen: String, CaseIterable { case welcome, moveApp, checking, battleNet, readyToInstall, preparing, launching, installer, ready, running, driveMissing, failure }
+    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate, china, changeRegion; var id: String { rawValue } }
     enum UninstallState: Equatable { case idle, working, done(appRemoved: Bool), failed(String) }
     enum UpdateState: Equatable { case idle, checking, upToDate, available(AvailableUpdate), downloading(Double), installing, failed(String) }
     var uninstall: UninstallState = .idle
@@ -51,6 +51,24 @@ final class AppModel {
         didSet { UserDefaults.standard.set(koreanTipDismissed,forKey:"koreanTipDismissed") }
     }
     var showKoreanTip:Bool { nexonBuild && !koreanSupport && !koreanTipDismissed }
+    /// Choose your Battle.net (BattleNetChoice.swift), before Battle.net installs: what the screen
+    /// shows, filled in from the Mac, and what setup installs. Setup hands it to the worker
+    /// (battlenet), which keeps it in state.json from then on.
+    var battleNetRegion=BattleNetRegion.suggested
+    var battleNetLanguage=BattleNetLanguage.suggested
+    /// Continue on Choose your Battle.net this session; with a choice already kept, not needed.
+    private var battleNetConfirmed=false
+    var needsBattleNetChoice:Bool { !clientInstalled && state["battlenet_region"] == nil && !battleNetConfirmed }
+    /// The region the installed Battle.net is for; installations from before 1.4 are Global.
+    var installedRegion:BattleNetRegion { BattleNetRegion(rawValue:state["battlenet_region"] as? String ?? "") ?? .global }
+    /// Discord is blocked in mainland China: players who choose China's Battle.net get GitHub
+    /// wherever Recall offers the Discord (GitHubHelpLink; owner, October 15).
+    var showsDiscord:Bool { battleNetRegion != .china }
+    /// China's game folder holds NetEase's anti-cheat (worker status); support reports name it.
+    var neacBuild=false
+    /// Settings › General › Battle.net region › Change: the installation going to the Trash.
+    enum RegionChange: Equatable { case idle, working, failed(String) }
+    var regionChange=RegionChange.idle
     /// Settings › Advanced, kept by the worker (state.json): automatic proxy detection, off
     /// unless turned on, and Korean account support, experimental.
     enum AdvancedSetting: String { case proxyAutoDetect="proxy_auto_detect", koreanSupport="korean_support" }
@@ -86,7 +104,7 @@ final class AppModel {
     var shaderUpdatePending=0
     /// A click on the main window outside the open pop-up (Main.swift): closes it where Esc
     /// does, the way its own button does, so onDisappear hooks still run. Never during an
-    /// update's download or install, or once uninstalling has started.
+    /// update's download or install, or once uninstalling or switching Battle.net has started.
     func closeSheetFromOutside()->Bool {
         guard let open=sheet else { return false }
         switch open {
@@ -95,6 +113,9 @@ final class AppModel {
             if update == .installing { return false }
         case .uninstall:
             switch uninstall { case .idle, .failed: uninstall = .idle; default: return false }
+        case .changeRegion:
+            if regionChange == .working { return false }
+            regionChange = .idle
         default: break
         }
         sheet=nil
@@ -178,8 +199,9 @@ final class AppModel {
     var graphics=GraphicsProgress()
     var release: Release?
     var root: URL
-    /// The installed Battle.net program; the worker launches the same file.
-    var battleNetExecutable:URL { root.appendingPathComponent("environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe") }
+    /// The installed Battle.net program; the worker launches the same file and says where it is.
+    var battleNetPath="environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe"
+    var battleNetExecutable:URL { root.appendingPathComponent(battleNetPath) }
     let service: SetupService
     var state=[String:Any]()
     var canCancel=false
@@ -218,23 +240,24 @@ final class AppModel {
     var title: String {
         switch screen {
         case .welcome: return Brand.name
-        case .moveApp: return installedCopy == nil ? "Move \(Brand.name) to Applications" : "\(Brand.name) is already installed"
-        case .checking: return "Checking your Mac"
-        case .readyToInstall: return clientInstalled ? "Finish setup" : "Set up Battle.net"
-        case .preparing: return repairing ? "Repairing" : (updatingComponents ? "Updating \(Brand.name)" : "Setting up Overwatch")
-        case .launching: return "Opening Battle.net"
-        case .installer: return "Finish in Battle.net"
-        case .ready: return gameInstalled ? "Play Overwatch" : "Install Overwatch"
-        case .running: return "\(existingName) is running"
-        case .driveMissing: return "Connect \(driveName)"
+        case .moveApp: return installedCopy == nil ? L("Move {0} to Applications",Brand.name) : L("{0} is already installed",Brand.name)
+        case .checking: return L("Checking your Mac")
+        case .battleNet: return L("Choose your Battle.net")
+        case .readyToInstall: return clientInstalled ? L("Finish setup") : L("Set up Battle.net")
+        case .preparing: return repairing ? L("Repairing") : (updatingComponents ? L("Updating {0}",Brand.name) : L("Setting up Overwatch"))
+        case .launching: return L("Opening Battle.net")
+        case .installer: return L("Finish in Battle.net")
+        case .ready: return gameInstalled ? L("Play Overwatch") : L("Install Overwatch")
+        case .running: return L("{0} is running",L(existingName))
+        case .driveMissing: return L("Connect {0}",driveName)
         case .failure:
             switch failure.code {
-            case "cancelled": return "Setup paused"
-            case "insufficient_disk_space": return "More space needed"
-            case "rosetta_required": return "Install Rosetta"
-            case "close_installer_client": return "Close Battle.net first"
-            case "run_from_installed_app", "app_move_failed", "app_name_taken": return "Move \(Brand.name) to Applications"
-            default: return "Setup needs attention"
+            case "cancelled": return L("Setup paused")
+            case "insufficient_disk_space": return L("More space needed")
+            case "rosetta_required": return L("Install Rosetta")
+            case "close_installer_client": return L("Close Battle.net first")
+            case "run_from_installed_app", "app_move_failed", "app_name_taken": return L("Move {0} to Applications",Brand.name)
+            default: return L("Setup needs attention")
             }
         }
     }
@@ -259,7 +282,7 @@ final class AppModel {
         if name == "graphics" { graphics.update(value);return }
         if name == "pipeline_preparation_skipped" { graphics.skipped() }
         // Allowlisted stage names only; never retain arbitrary error detail/paths.
-        let labels=["downloading":"Downloading Battle.net", "download_verified":"Download verified", "installing_runtime":"Installing game components", "runtime_ready":"Game components ready", "preparing_environment":"Preparing your game environment", "environment_ready":"Game environment ready", "installing_battlenet":"Opening the Battle.net installer", "preparing_pipelines":"Preparing graphics", "battlenet_started":"Opening Battle.net", "pipeline_preparation_skipped":"Opening Battle.net", "closing_client":"Closing Battle.net", "displays_changed":"Reopening Battle.net for your displays"]
+        let labels=["downloading":L("Downloading Battle.net"), "download_verified":L("Download verified"), "installing_runtime":L("Installing game components"), "runtime_ready":L("Game components ready"), "preparing_environment":L("Preparing your game environment"), "environment_ready":L("Game environment ready"), "installing_battlenet":L("Opening the Battle.net installer"), "preparing_pipelines":L("Preparing graphics"), "battlenet_started":L("Opening Battle.net"), "pipeline_preparation_skipped":L("Opening Battle.net"), "closing_client":L("Closing Battle.net"), "displays_changed":L("Reopening Battle.net for your displays")]
         if let label=labels[name] { stage=label; lastEvents.append(name); lastEvents=Array(lastEvents.suffix(12)) }
     }
     func refresh() async throws {
@@ -269,6 +292,14 @@ final class AppModel {
         clientInstalled=status["battlenet_installed"] as? Bool ?? false
         gameInstalled=status["game_installed"] as? Bool ?? false
         nexonBuild=status["nexon_build"] as? Bool ?? false
+        neacBuild=status["neac_build"] as? Bool ?? false
+        if let path=status["battlenet_path"] as? String,path.hasPrefix("environment/drive_c/") { battleNetPath=path }
+        // A choice the worker keeps is the one setup goes on with, unless the player changed it
+        // on Choose your Battle.net this session (setup then hands the worker the new one).
+        if !battleNetConfirmed {
+            if let region=(state["battlenet_region"] as? String).flatMap(BattleNetRegion.init) { battleNetRegion=region }
+            if let language=(state["battlenet_language"] as? String).flatMap(BattleNetLanguage.init) { battleNetLanguage=language }
+        }
         freeBytes=(status["free_bytes"] as? NSNumber)?.uint64Value ?? 0
         // Match Finder's "available" figure, which includes purgeable storage.
         if let available=try? root.resourceValues(forKeys:[.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage,available>0 {
@@ -316,7 +347,7 @@ final class AppModel {
             let retired=self.retireOlderCopies()
             try await self.route(autoLaunch:true)
             if let old=retired.first,self.notice.isEmpty {
-                self.notice="The old \(old.url.deletingPathExtension().lastPathComponent) app is in the Trash now. \(Brand.name) replaces it; your game and sign-in are kept."
+                self.notice=L("The old {0} app is in the Trash now. {1} replaces it; your game and sign-in are kept.",old.url.deletingPathExtension().lastPathComponent,Brand.name)
             }
         }
     }
@@ -357,7 +388,7 @@ final class AppModel {
         perform {
             let bundle=Bundle.main.bundleURL
             guard let team=UpdateInstaller.team(of:bundle),let identifier=Bundle.main.bundleIdentifier else { throw SetupFailure(code:"run_from_installed_app") }
-            self.stage="Copying \(Brand.name) to Applications"
+            self.stage=L("Copying {0} to Applications",Brand.name)
             let target=try AppLocation.destination(identifier:identifier)
             try await AppLocation.install(bundle,at:target,team:team,identifier:identifier,version:UpdateCheck.installed)
             _ = AppLocation.retire(AppLocation.olderCopies(identifier:identifier,version:UpdateCheck.installed,build:UpdateCheck.build,keeping:target))
@@ -397,7 +428,7 @@ final class AppModel {
                 update = .available(found);launchDeferredForUpdate=true;sheet = .update;return
             }
             try await openClient()
-        } else if state["active_runtime"] != nil { screen = .readyToInstall }
+        } else if state["active_runtime"] != nil { screen = needsBattleNetChoice ? .battleNet : .readyToInstall }
         else { screen = .welcome }
     }
     /// True until What's New for this version was shown on an installation an
@@ -435,7 +466,7 @@ final class AppModel {
         updateCheck=task
         Task {
             do { update=try await task.value.map { UpdateState.available($0) } ?? .upToDate }
-            catch { update = manual ? .failed("The update check couldn’t reach GitHub. Check your internet connection, then try again.") : .idle }
+            catch { update = manual ? .failed(L("The update check couldn’t reach GitHub. Check your internet connection, then try again.")) : .idle }
         }
     }
     func checkIfDue() {
@@ -482,13 +513,13 @@ final class AppModel {
     }
     static func updateMessage(_ code:String) -> String {
         switch code {
-        case "close_game_before_update": return "Quit Overwatch first, then choose Update Now."
-        case "client_close_failed": return "Battle.net couldn’t be closed. Quit it from the Dock, then try again."
-        case "update_location_read_only": return "This copy of the app is in a folder you can’t change. Download the update from the release page instead."
-        case "update_signature_invalid": return "The download couldn’t be verified as an official release, so nothing was changed."
-        case "update_needs_newer_macos": return "This update needs a newer version of macOS, so nothing was changed."
-        case "update_hash_mismatch", "update_download_failed": return "The download didn’t complete correctly. Nothing was changed. Try again."
-        default: return "The update couldn’t be installed. Nothing was changed. You can try again or download it from the release page."
+        case "close_game_before_update": return L("Quit Overwatch first, then choose Update Now.")
+        case "client_close_failed": return L("Battle.net couldn’t be closed. Quit it from the Dock, then try again.")
+        case "update_location_read_only": return L("This copy of the app is in a folder you can’t change. Download the update from the release page instead.")
+        case "update_signature_invalid": return L("The download couldn’t be verified as an official release, so nothing was changed.")
+        case "update_needs_newer_macos": return L("This update needs a newer version of macOS, so nothing was changed.")
+        case "update_hash_mismatch", "update_download_failed": return L("The download didn’t complete correctly. Nothing was changed. Try again.")
+        default: return L("The update couldn’t be installed. Nothing was changed. You can try again or download it from the release page.")
         }
     }
     func recheck() {
@@ -524,8 +555,8 @@ final class AppModel {
     func chooseOtherLocation() {
         let panel=NSOpenPanel()
         panel.canChooseDirectories=true;panel.canChooseFiles=false;panel.canCreateDirectories=true;panel.allowsMultipleSelection=false
-        panel.title="Choose Install Location";panel.prompt="Choose"
-        panel.message="Choose a drive or folder. Overwatch, Battle.net and their files go in an “\(InstallLocation.folderName)” folder inside it."
+        panel.title=L("Choose Install Location");panel.prompt=L("Choose")
+        panel.message=L("Choose a drive or folder. Overwatch, Battle.net and their files go in an “{0}” folder inside it.",InstallLocation.folderName)
         panel.directoryURL=URL(fileURLWithPath:"/Volumes")
         if panel.runModal() == .OK,let folder=panel.url { useLocation(InstallLocation.root(forChosen:folder)) }
     }
@@ -538,7 +569,7 @@ final class AppModel {
         guard isPreview else { return }
         screen=value;sheet=nil;notice="";clientInstalled=true;gameInstalled=true
         busy=[.checking,.preparing,.launching].contains(value);canCancel=[.preparing,.launching].contains(value)
-        launchStarted=Date();stage=value == .launching ? "Waiting for the Battle.net window" : "Preparing your game environment"
+        launchStarted=Date();stage=value == .launching ? L("Waiting for the Battle.net window") : L("Preparing your game environment")
         failure=SetupFailure(code:"insufficient_disk_space")
         // Setup screens show the location dropdown as for a new installation.
         if value == .readyToInstall { clientInstalled=false;gameInstalled=false;freeBytes=412_000_000_000 }
@@ -548,6 +579,12 @@ final class AppModel {
         let args=CommandLine.arguments
         if let i=args.firstIndex(of:"--preview-macos"),args.indices.contains(i+1) { macOS=args[i+1] }
         if args.contains("--preview-korean") { nexonBuild=true;state["korean_support"]=false }
+        // Choose your Battle.net with a region selected, and Settings' region as installed.
+        if let i=args.firstIndex(of:"--preview-region"),args.indices.contains(i+1),let region=BattleNetRegion(rawValue:args[i+1]) {
+            battleNetRegion=region;state["battlenet_region"]=region.rawValue
+            if region == .china { battleNetLanguage = .simplifiedChinese }
+        }
+        if value == .battleNet { clientInstalled=false;gameInstalled=false }
         preparingAfterMatch=args.contains("--preview-after-match") || args.contains("--preview-shader-update")
         updatingShaderCache=args.contains("--preview-shader-update")
         afterMatchProgress=preparingAfterMatch ? AfterMatch.Progress(ready:3072,learned:17767) : nil
@@ -560,20 +597,20 @@ final class AppModel {
         if value == .launching,let i=args.firstIndex(of:"--preview-graphics"),args.indices.contains(i+1) { previewGraphics(args[i+1]) }
         if let i=args.firstIndex(of:"--preview-sheet"),args.indices.contains(i+1),let preview=Sheet(rawValue:args[i+1]) {
             if preview == .update {
-                update = .available(AvailableUpdate(version:"1.0.1",notes:["Fixes an issue that could stop Battle.net from opening after a Blizzard update.","Smoother first matches after installing."],page:Brand.releases,download:Brand.releases,size:242_000_000,sha256:"",checksum:nil))
+                update = .available(AvailableUpdate(version:"1.0.1",notes:[L("Fixes an issue that could stop Battle.net from opening after a Blizzard update."),L("Smoother first matches after installing.")],page:Brand.releases,download:Brand.releases,size:242_000_000,sha256:"",checksum:nil))
             }
             DispatchQueue.main.async { self.sheet=preview }
         }
     }
     private func previewGraphics(_ kind:String) {
-        stage="Preparing graphics";graphics=GraphicsProgress()
+        stage=L("Preparing graphics");graphics=GraphicsProgress()
         if kind == "first" { graphics.update(["phase":"done","learned":0,"ready":0,"added":0]);return }
         // A launch since 1.3.1: the numbers, with what the last match's preparation added
         // (ready), or before any preparation has finished (unprepared).
         if kind == "ready" || kind == "unprepared" {
             let ready=kind == "ready" ? 856 : 0
             graphics.update(["phase":"learned","learned":kind == "ready" ? 17767 : 7941,"ready":ready])
-            graphics.update(["phase":"done","ready":ready,"added":kind == "ready" ? 48 : 0,"warmed":0]);stage="Opening Battle.net";return
+            graphics.update(["phase":"done","ready":ready,"added":kind == "ready" ? 48 : 0,"warmed":0]);stage=L("Opening Battle.net");return
         }
         graphics.update(["phase":"learned","learned":8168,"ready":1154])
         if kind == "warming" || kind == "warmed" {
@@ -583,7 +620,7 @@ final class AppModel {
                 [String(format:"%012llx",UInt64.random(in:0...0xffffffffffff,using:&generator)),Double.random(in:12...140),false]
             }
             graphics.update(["phase":"pipelines","items":items])
-            if kind == "warmed" { graphics.update(["phase":"done","ready":1154,"added":0,"warmed":8168]);stage="Opening Battle.net" }
+            if kind == "warmed" { graphics.update(["phase":"done","ready":1154,"added":0,"warmed":8168]);stage=L("Opening Battle.net") }
             return
         }
         graphics.update(["phase":"preparing","target":1192])
@@ -592,7 +629,7 @@ final class AppModel {
             [String(format:"%012llx",UInt64.random(in:0...0xffffffffffff,using:&generator)),i < 1154 ? Double.random(in:0.4...3) : Double.random(in:18...140),i >= 1154]
         }
         graphics.update(["phase":"pipelines","items":items])
-        if kind == "done" { graphics.update(["phase":"done","ready":1192,"added":38]);stage="Opening Battle.net" }
+        if kind == "done" { graphics.update(["phase":"done","ready":1192,"added":38]);stage=L("Opening Battle.net") }
     }
     func installRosetta() {
         guard !isPreview else { return }
@@ -606,7 +643,37 @@ final class AppModel {
             self.screen = .checking
             _ = try await self.service.run("preflight")
             try await self.refresh()
-            self.screen = .readyToInstall
+            self.screen = self.needsBattleNetChoice ? .battleNet : .readyToInstall
+        }
+    }
+    /// Choose your Battle.net's Continue. China's Battle.net first explains NetEase's sign-in and
+    /// anti-cheat (ChinaBattleNetSheet); its Continue confirms.
+    func chooseBattleNet() {
+        if battleNetRegion == .china { battleNetLanguage = .simplifiedChinese;sheet = .china;return }
+        confirmBattleNet()
+    }
+    func confirmBattleNet() { battleNetConfirmed=true;screen = .readyToInstall }
+    /// Set up Battle.net's Change: back to the choice, as it stands.
+    func editBattleNet() { guard !busy else { return };notice="";screen = .battleNet }
+    /// Settings › General › Battle.net region › Change. Accounts don't carry over between Global
+    /// and China's Battle.net, so the installation moves to the Trash (the worker's uninstall,
+    /// which closes Battle.net and refuses while Overwatch runs), and setup starts again at
+    /// Choose your Battle.net with the other region. Recall itself and its settings stay.
+    func changeRegion() {
+        guard !isPreview else { sheet=nil;battleNetRegion = installedRegion == .china ? .global : .china;screen = .battleNet;return }
+        regionChange = .working
+        Task {
+            // A launch wait is cancellable; let any other step finish first.
+            while busy { cancel(); try? await Task.sleep(for:.milliseconds(100)) }
+            busy=true; notice=""
+            defer { busy=false }
+            let next:BattleNetRegion = installedRegion == .china ? .global : .china
+            do { _ = try await service.run("uninstall",event:receive) }
+            catch { regionChange = .failed((error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message);return }
+            clientInstalled=false;gameInstalled=false;nexonBuild=false;neacBuild=false;state=[:];running=nil
+            battleNetRegion=next;battleNetLanguage = next == .china ? .simplifiedChinese : .suggested
+            battleNetConfirmed=false;sheet=nil;screen = .battleNet
+            regionChange = .idle
         }
     }
     func setup() { perform { try await self.setupSteps() } }
@@ -614,6 +681,15 @@ final class AppModel {
         guard let release else { throw SetupFailure(code:"release_unavailable") }
         _ = try await service.run("preflight")
         try await refresh()
+        if !clientInstalled {
+            // Battle.net installs as chosen on Choose your Battle.net; the worker keeps the
+            // choice, and prepare adds the fonts it needs.
+            if needsBattleNetChoice { screen = .battleNet;return }
+            if battleNetConfirmed {
+                _ = try await service.run("battlenet",["--region",battleNetRegion.rawValue,"--language",battleNetLanguage.rawValue])
+                try await refresh()
+            }
+        }
         screen = .preparing;canCancel=true
         if state["active_runtime"] as? String != release.runtimeVersion {
             _ = try await service.run("install-runtime",["--archive",resources.appendingPathComponent(release.runtimeArchive).path,"--sha256",release.runtimeSHA256,"--version",release.runtimeVersion],event:receive)
@@ -630,19 +706,23 @@ final class AppModel {
             _ = try await service.run("display",["--width",String(initial.width),"--height",String(initial.height)])
         }
         if clientInstalled { screen = .ready;return }
-        stage="Downloading Battle.net"
+        // China's Battle.net has its own installer (Blizzard's China download server).
+        let china=battleNetRegion == .china
+        let installerURL=china ? release.chinaInstallerURL : release.installerURL
+        let installerSHA256=china ? release.chinaInstallerSHA256 : release.installerSHA256
+        stage=L("Downloading Battle.net")
         let progress=Task { @MainActor in
             while !Task.isCancelled {
-                let file=self.root.appendingPathComponent("downloads/"+release.installerSHA256+".part")
+                let file=self.root.appendingPathComponent("downloads/"+installerSHA256+".part")
                 self.downloadedBytes=(try? self.fm.attributesOfItem(atPath:file.path)[.size] as? NSNumber)?.uint64Value ?? 0
                 try? await Task.sleep(for:.seconds(0.5))
             }
         }
         defer { progress.cancel() }
-        _ = try await service.run("download",["--url",release.installerURL,"--sha256",release.installerSHA256],event:receive)
+        _ = try await service.run("download",["--url",installerURL,"--sha256",installerSHA256],event:receive)
         if paused { throw SetupFailure(code:"cancelled") }
         canCancel=false
-        _ = try await service.run("install-battlenet",["--installer",root.appendingPathComponent("downloads/"+release.installerSHA256).path,"--sha256",release.installerSHA256],event:receive)
+        _ = try await service.run("install-battlenet",["--installer",root.appendingPathComponent("downloads/"+installerSHA256).path,"--sha256",installerSHA256],event:receive)
         screen = .installer
     }
     /// Closes Overwatch and Battle.net at once (wineserver -k), for a game that
@@ -651,7 +731,7 @@ final class AppModel {
         perform {
             _ = try await self.service.run("stop")
             self.screen = .ready
-            self.notice="Overwatch and Battle.net were closed."
+            self.notice=L("Overwatch and Battle.net were closed.")
         }
     }
     /// Reinstalls the game components from this app and refreshes the Windows
@@ -667,7 +747,7 @@ final class AppModel {
             _ = try await self.service.run("prepare",event:self.receive)
             try await self.refresh()
             self.screen = .ready
-            self.notice="Repair finished. Overwatch, its settings and your Battle.net sign-in were kept."
+            self.notice=L("Repair finished. Overwatch, its settings and your Battle.net sign-in were kept.")
         }
     }
     var repairing=false
@@ -685,8 +765,8 @@ final class AppModel {
     func openClient(play:Bool=false) async throws {
         screen = .launching
         // Once, before Battle.net opens: Overwatch's voice chat uses this app's permission.
-        if Microphone.undecided { stage="Asking to use your microphone for voice chat";await Microphone.ask() }
-        stage="Checking your running session";graphics=GraphicsProgress()
+        if Microphone.undecided { stage=L("Asking to use your microphone for voice chat");await Microphone.ask() }
+        stage=L("Checking your running session");graphics=GraphicsProgress()
         launchStarted=Date();stopLaunchWait=false;closeOnStop=false;canCancel=true
         // Cancelling here ends the worker, and with it the graphics preparation, before
         // Battle.net opens (the preparation keeps its finished work; the next launch resumes).
@@ -699,7 +779,7 @@ final class AppModel {
                 "--metalfx",metalFXUpscaling ? "1" : "0","--sharpening",metalFXSharpening.rawValue]+(gameMode ? [] : ["--game-mode","0"]),event:receive)
         } catch {
             guard stopLaunchWait else { throw error }
-            canCancel=false;screen = .ready;notice="Cancelled. Battle.net wasn’t opened."
+            canCancel=false;screen = .ready;notice=L("Cancelled. Battle.net wasn’t opened.")
             return
         }
         // A Cancel that arrived as Battle.net was starting.
@@ -708,16 +788,16 @@ final class AppModel {
         if let fitted=launchEvents.last(where:{ $0["stage"] as? String == "display_fitted" }),
            let width=fitted["width"] as? Int,let height=fitted["height"] as? Int {
             let chosen=(fitted["chosen_width"] as? Int).flatMap { w in (fitted["chosen_height"] as? Int).map { DisplayResolution(width:w,height:$0) } } ?? resolution
-            notice="Your main display is too small for \(chosen.label), so Overwatch uses \(width) × \(height) this time."
+            notice=L("Your main display is too small for {0}, so Overwatch uses {1} this time.",chosen.label,DisplayResolution(width:width,height:height).label)
         }
         // Battle.net was open from before a display was connected, unplugged or rearranged.
         if launchEvents.contains(where:{ $0["stage"] as? String == "displays_changed" }) {
-            notice="Your displays changed since Battle.net opened, so \(Brand.name) reopened it."
+            notice=L("Your displays changed since Battle.net opened, so {0} reopened it.",Brand.name)
         }
         canCancel=false
         _ = try await service.run("onboarded")
         state["onboarding_complete"]=true
-        stage="Waiting for the Battle.net window";canCancel=true
+        stage=L("Waiting for the Battle.net window");canCancel=true
         let result: LaunchReadiness.Result
         do {
             result=try await LaunchReadiness.wait(launchEvents:launchEvents,stopped:{ self.stopLaunchWait },session:{
@@ -750,7 +830,7 @@ final class AppModel {
             // where the window is).
             if sheet == nil && NSApp.isActive { NSRunningApplication(processIdentifier:pid)?.activate(options:[]) }
         case .timedOut:
-            notice="No Battle.net window was detected after 90 seconds. It may still be starting or be on another desktop. Check the Dock, or choose Open Battle.net to check again."
+            notice=L("No Battle.net window was detected after 90 seconds. It may still be starting or be on another desktop. Check the Dock, or choose Open Battle.net to check again.")
         case .stopped: break
         }
     }
@@ -760,12 +840,12 @@ final class AppModel {
         canCancel=false
         let opened=launchEvents.contains { $0["stage"] as? String == "battlenet_open" }
         if closeOnStop && opened {
-            stage="Closing Battle.net"
+            stage=L("Closing Battle.net")
             _ = try await service.run("close-client",event:receive)
-            screen = .ready;notice="Cancelled. Battle.net was closed."
+            screen = .ready;notice=L("Cancelled. Battle.net was closed.")
         } else {
             screen = .ready
-            notice="Battle.net has been left running. Select it in the Dock, or choose Open Battle.net to check its window again."
+            notice=L("Battle.net has been left running. Select it in the Dock, or choose Open Battle.net to check its window again.")
         }
     }
     func launch() { perform { try await self.openClient() } }
@@ -872,13 +952,13 @@ final class AppModel {
             } catch let error as SetupFailure where error.code == "close_game_before_update" {
                 running = .game
             } catch {
-                notice="Battle.net couldn’t be closed. Quit it from the Dock, then try again."
+                notice=L("Battle.net couldn’t be closed. Quit it from the Dock, then try again.")
             }
         }
     }
     /// The launching screen's Cancel.
     func cancelLaunch() { guard canCancel && screen == .launching else { return };closeOnStop=true;cancel() }
-    func cancel() { guard canCancel else { return };if screen == .launching { stopLaunchWait=true;canCancel=false;service.cancel();return };paused=true;canCancel=false;stage="Pausing safely";service.cancel() }
+    func cancel() { guard canCancel else { return };if screen == .launching { stopLaunchWait=true;canCancel=false;service.cancel();return };paused=true;canCancel=false;stage=L("Pausing safely");service.cancel() }
     /// Settings saves a resolution as soon as it is chosen. The worker records it and
     /// writes it into the game's settings, where a choice made in Overwatch's Video
     /// settings goes too; the latest of the two is what the next launch uses.
@@ -963,7 +1043,7 @@ final class AppModel {
     /// written again. Graphics quality and FPS are kept. Overwatch must be closed.
     func resetDisplay() {
         let initial=DisplayResolution.initial(for:MainDisplay.current)
-        guard !isPreview else { resolution=initial;notice="Display settings reset.";return }
+        guard !isPreview else { resolution=initial;notice=L("Display settings reset.");return }
         displaySave?.cancel()
         displaySave=Task {
             while busy { try? await Task.sleep(for:.milliseconds(200)) }
@@ -972,7 +1052,7 @@ final class AppModel {
             do {
                 _ = try await service.run("display",["--width",String(initial.width),"--height",String(initial.height)])
                 resolution=initial;displaySaved=false
-                notice="Display settings reset. Overwatch opens at \(initial.label) next time."
+                notice=L("Display settings reset. Overwatch opens at {0} next time.",initial.label)
             } catch {
                 notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
             }
@@ -1005,11 +1085,15 @@ final class AppModel {
         let size={ (size:CGSize) in "\(Int(size.width))x\(Int(size.height))" }
         let display:Any=MainDisplay.current.map { ["type":$0.builtIn ? "built_in" : "external","points":size($0.points),"drawn":size($0.drawn),
                                                     "native":$0.native.map(size) ?? "unknown","refresh_hz":Int($0.refresh.rounded())] } ?? "none"
-        let data:[String:Any]=["schema":1,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? metalFXSharpening.rawValue : "off","install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode,"shaders":ShaderRecord.read(root:root),"shader_memory":shaderMemory]
+        // Where the default web browser comes from: China's Battle.net signs in through it.
+        let browser=NSWorkspace.shared.urlForApplication(toOpen:URL(string:"https://www.battlenet.com.cn/")!).flatMap { Bundle(url:$0)?.bundleIdentifier } ?? "unknown"
+        let battleNet:[String:Any]=["region":installedRegion.rawValue,"language":state["battlenet_language"] as? String ?? (clientInstalled ? "enUS" : "not_chosen"),
+                                    "installed":clientInstalled,"path":battleNetPath.replacingOccurrences(of:"environment/drive_c/",with:""),"neac_build":neacBuild]
+        let data:[String:Any]=["schema":2,"battlenet":battleNet,"app_language":AppLanguage.current,"default_browser":browser,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? metalFXSharpening.rawValue : "off","install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode,"shaders":ShaderRecord.read(root:root),"shader_memory":shaderMemory]
         report=String(data:(try? JSONSerialization.data(withJSONObject:data,options:[.prettyPrinted,.sortedKeys])) ?? Data(),encoding:.utf8) ?? ""
     }
     func saveReport() {
-        let panel=NSSavePanel();panel.nameFieldStringValue="\(Brand.name)-support.json";panel.title="Save support report"
-        if panel.runModal() == .OK,let url=panel.url { do { try report.write(to:url,atomically:true,encoding:.utf8) } catch { notice="The report couldn’t be saved. Choose another location and try again." } }
+        let panel=NSSavePanel();panel.nameFieldStringValue="\(Brand.name)-support.json";panel.title=L("Save support report")
+        if panel.runModal() == .OK,let url=panel.url { do { try report.write(to:url,atomically:true,encoding:.utf8) } catch { notice=L("The report couldn’t be saved. Choose another location and try again.") } }
     }
 }

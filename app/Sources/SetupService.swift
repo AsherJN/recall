@@ -7,40 +7,43 @@ struct Release: Decodable {
     let runtimeSHA256: String
     let installerURL: String
     let installerSHA256: String
+    /// China's Battle.net (Battle.net-Setup-CN.exe, from Blizzard's China download server).
+    let chinaInstallerURL: String
+    let chinaInstallerSHA256: String
     let distribution: String
 }
 struct SetupFailure: Error {
     let code: String
     var message: String {
         switch code {
-        case "cancelled": return "Setup is paused. Continue when you’re ready; completed steps are saved."
-        case "apple_silicon_required": return "This version requires a Mac with Apple Silicon (M1 or later)."
-        case "macos_26_5_required": return "Overwatch needs macOS 26.5 or later. Update macOS, then check again."
-        case "rosetta_required": return "Rosetta is needed to run the game. Choose Install Rosetta and follow Apple’s instructions."
-        case "install_location_unavailable": return "The drive with your installation isn’t connected. Connect it, then try again."
-        case "unsupported_volume_format": return "This drive’s format isn’t supported. Choose a drive formatted as APFS or Mac OS Extended."
-        case "case_sensitive_volume": return "This drive is case-sensitive, which Windows games don’t support. Choose another drive."
-        case "read_only_volume": return "This location is read-only. Choose another location."
-        case "insufficient_disk_space": return "There isn’t enough free storage to finish this step. Free at least 6 GB, then retry."
-        case "close_game_before_maintenance", "close_game_before_setup", "environment_busy_retry", "environment_initialization_busy": return "Close Overwatch and Battle.net, then retry. Your current session has been left running."
-        case "setup_already_running", "pipeline_cache_busy": return "Another setup or launch is finishing. Wait a moment, then retry."
-        case "download_interrupted_retry_to_resume": return "The download was interrupted. Check your connection and retry to resume."
-        case "download_hash_mismatch", "client_installer_hash_mismatch": return "The download differs from the version this app expects. Retry once; if it happens again, check for a newer app release."
-        case "archive_hash_mismatch", "runtime_file_hash_mismatch", "runtime_missing": return "An installation component is missing or damaged. Keep your game data and reinstall the app from the original download."
-        case "close_installer_client": return "Close the Battle.net window opened by its installer, then choose Retry here. This app will reopen it with the required display settings."
-        case "battlenet_not_installed": return "Finish installing Battle.net in its installer window, then choose Continue."
-        case "retina_configuration_failed": return "The display setup couldn’t finish. Close Overwatch and Battle.net, then retry. If it happens again, open Help & FAQ to save a support report."
-        case "directory_not_owned_by_app", "invalid_ownership_marker", "existing_environment_not_owned": return "The destination contains data this app did not create. Nothing was replaced. Open Help & FAQ for installation guidance."
-        case "invalid_game_settings", "multiple_game_settings", "settings_outside_installation": return "The game’s settings could not be safely updated. They were preserved. Open Help & FAQ to save a support report."
-        case "session_check_failed", "session_membership_unknown": return "The app couldn’t verify the running session. Close Battle.net and Overwatch normally, then retry."
-        case "close_game_before_uninstall": return "Overwatch is running. Quit the game, then try again. Nothing was removed."
-        case "client_close_failed": return "Battle.net couldn’t be closed. Quit it from the Dock, then try again. Nothing was removed."
-        case "uninstall_move_failed": return "The game folder couldn’t be moved to the Trash. Nothing was deleted. Open Help & FAQ to save a support report."
-        case "run_from_installed_app", "app_move_failed": return "\(Brand.name) couldn’t move itself. Drag \(Brand.name) to Applications, eject the disk image, then open it from Applications."
-        case "app_name_taken": return "Another app named \(Brand.name) is in your Applications folders. Rename or remove that app, then try again."
-        case "release_unavailable": return "This app is missing its verified setup components. Download a complete copy from the release page."
-        case "setting_change_failed": return "This setting couldn’t be changed. Close Overwatch and Battle.net, then try again."
-        default: return "This step couldn’t finish. Retry, or open Help & FAQ to save a support report. Your game data has been kept."
+        case "cancelled": return L("Setup is paused. Continue when you’re ready; completed steps are saved.")
+        case "apple_silicon_required": return L("This version requires a Mac with Apple Silicon (M1 or later).")
+        case "macos_26_5_required": return L("Overwatch needs macOS 26.5 or later. Update macOS, then check again.")
+        case "rosetta_required": return L("Rosetta is needed to run the game. Choose Install Rosetta and follow Apple’s instructions.")
+        case "install_location_unavailable": return L("The drive with your installation isn’t connected. Connect it, then try again.")
+        case "unsupported_volume_format": return L("This drive’s format isn’t supported. Choose a drive formatted as APFS or Mac OS Extended.")
+        case "case_sensitive_volume": return L("This drive is case-sensitive, which Windows games don’t support. Choose another drive.")
+        case "read_only_volume": return L("This location is read-only. Choose another location.")
+        case "insufficient_disk_space": return L("There isn’t enough free storage to finish this step. Free at least 6 GB, then retry.")
+        case "close_game_before_maintenance", "close_game_before_setup", "environment_busy_retry", "environment_initialization_busy": return L("Close Overwatch and Battle.net, then retry. Your current session has been left running.")
+        case "setup_already_running", "pipeline_cache_busy": return L("Another setup or launch is finishing. Wait a moment, then retry.")
+        case "download_interrupted_retry_to_resume": return L("The download was interrupted. Check your connection and retry to resume.")
+        case "download_hash_mismatch", "client_installer_hash_mismatch": return L("The download differs from the version this app expects. Retry once; if it happens again, check for a newer app release.")
+        case "archive_hash_mismatch", "runtime_file_hash_mismatch", "runtime_missing": return L("An installation component is missing or damaged. Keep your game data and reinstall the app from the original download.")
+        case "close_installer_client": return L("Close the Battle.net window opened by its installer, then choose Retry here. This app will reopen it with the required display settings.")
+        case "battlenet_not_installed": return L("Finish installing Battle.net in its installer window, then choose Continue.")
+        case "retina_configuration_failed": return L("The display setup couldn’t finish. Close Overwatch and Battle.net, then retry. If it happens again, open Help & FAQ to save a support report.")
+        case "directory_not_owned_by_app", "invalid_ownership_marker", "existing_environment_not_owned": return L("The destination contains data this app did not create. Nothing was replaced. Open Help & FAQ for installation guidance.")
+        case "invalid_game_settings", "multiple_game_settings", "settings_outside_installation": return L("The game’s settings could not be safely updated. They were preserved. Open Help & FAQ to save a support report.")
+        case "session_check_failed", "session_membership_unknown": return L("The app couldn’t verify the running session. Close Battle.net and Overwatch normally, then retry.")
+        case "close_game_before_uninstall": return L("Overwatch is running. Quit the game, then try again. Nothing was removed.")
+        case "client_close_failed": return L("Battle.net couldn’t be closed. Quit it from the Dock, then try again. Nothing was removed.")
+        case "uninstall_move_failed": return L("The game folder couldn’t be moved to the Trash. Nothing was deleted. Open Help & FAQ to save a support report.")
+        case "run_from_installed_app", "app_move_failed": return L("{0} couldn’t move itself. Drag {0} to Applications, eject the disk image, then open it from Applications.",Brand.name)
+        case "app_name_taken": return L("Another app named {0} is in your Applications folders. Rename or remove that app, then try again.",Brand.name)
+        case "release_unavailable": return L("This app is missing its verified setup components. Download a complete copy from the release page.")
+        case "setting_change_failed": return L("This setting couldn’t be changed. Close Overwatch and Battle.net, then try again.")
+        default: return L("This step couldn’t finish. Retry, or open Help & FAQ to save a support report. Your game data has been kept.")
         }
     }
     /// The code as a support report shows it. Worker and app codes are fixed names like

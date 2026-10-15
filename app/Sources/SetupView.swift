@@ -25,15 +25,16 @@ struct SetupView: View {
                         if model.screen == .launching && model.graphics.phase != nil { GraphicsDetails(progress:model.graphics) }
                     }.frame(maxWidth:LauncherStyle.contentWidth).padding(.top,model.screen == .welcome ? 28 : 34)
                     Spacer(minLength:28)
-                    DiscordLink().frame(maxWidth:LauncherStyle.contentWidth).padding(.bottom,supportPlacement == nil ? 20 : 14)
+                    Group { if model.showsDiscord { DiscordLink() } else { GitHubHelpLink() } }
+                        .frame(maxWidth:LauncherStyle.contentWidth).padding(.bottom,supportPlacement == nil ? 20 : 14)
                     if let placement=supportPlacement {
                         SupportCard(placement:placement).frame(maxWidth:LauncherStyle.contentWidth).padding(.bottom,20)
                     }
                     VersionStatus(model:model).padding(.bottom,12)
                     HStack(spacing:12) {
-                        FooterTile(title:"Settings",symbol:"gearshape") { model.sheet = .settings }.disabled(model.screen == .moveApp)
-                        FooterTile(title:"Help & FAQ",symbol:"questionmark.circle") { model.openHelp() }
-                        FooterTile(title:"About",symbol:"info.circle") { model.sheet = .about }
+                        FooterTile(title:L("Settings"),symbol:"gearshape") { model.sheet = .settings }.disabled(model.screen == .moveApp)
+                        FooterTile(title:L("Help & FAQ"),symbol:"questionmark.circle") { model.openHelp() }
+                        FooterTile(title:L("About"),symbol:"info.circle") { model.sheet = .about }
                     }.frame(maxWidth:LauncherStyle.contentWidth).padding(.bottom,24)
                 }.padding(.horizontal,36).frame(maxWidth:.infinity).frame(minHeight:geometry.size.height)
             }.scrollIndicators(.hidden)
@@ -51,6 +52,8 @@ struct SetupView: View {
                 .onDisappear { model.updateSheetClosed() }
             case .whatsNew: WhatsNewSheet().onDisappear { model.whatsNewClosed() }
             case .shaderUpdate: ShaderUpdateSheet(model:model)
+            case .china: ChinaBattleNetSheet(confirm:model.confirmBattleNet)
+            case .changeRegion: ChangeRegionSheet(model:model).interactiveDismissDisabled(model.regionChange == .working)
             }
         }
         .task { model.startup() }
@@ -75,18 +78,19 @@ struct SetupView: View {
     }
     private var subtitle:String {
         switch model.screen {
-        case .welcome: return "Set up Battle.net, then install Overwatch."
+        case .welcome: return L("Set up Battle.net, then install Overwatch.")
         case .moveApp:
-            if let copy=model.installedCopy { return "Version \(copy.version) is in your Applications folder. Open it from there; this disk image is ejected for you." }
-            return "\(Brand.name) runs from your Applications folder. It copies itself there, ejects this disk image and opens again."
-        case .checking: return "Checking your installation and available storage."
-        case .readyToInstall: return model.clientInstalled ? "Finish preparing your installation. Your game files and sign-in will be kept." : "Install the game components, then continue in Blizzard’s installer."
-        case .preparing: return model.stage.isEmpty ? "Preparing your game environment." : model.stage
-        case .launching: return model.stage == "Opening Battle.net" ? "Waiting for its window to appear." : model.stage
-        case .installer: return "Complete setup in the Battle.net installer."
-        case .running: return model.existingName == "Overwatch" ? "Can’t find the game window? Choose Show Overwatch or check your other desktops." : "Play from the Battle.net window. Can’t find it? Choose Show Battle.net."
-        case .ready: return model.gameInstalled ? (AppModel.playEnabled ? "Battle.net opens and starts Overwatch for you." : "Open Battle.net, select Overwatch and click Play.") : "Sign in to Battle.net and install Overwatch."
-        case .driveMissing: return "Overwatch is installed on “\(model.driveName)”. Connect the drive and this app picks up where it left off."
+            if let copy=model.installedCopy { return L("Version {0} is in your Applications folder. Open it from there; this disk image is ejected for you.",copy.version) }
+            return L("{0} runs from your Applications folder. It copies itself there, ejects this disk image and opens again.",Brand.name)
+        case .checking: return L("Checking your installation and available storage.")
+        case .battleNet: return L("{0} installs the Battle.net that matches your account.",Brand.name)
+        case .readyToInstall: return model.clientInstalled ? L("Finish preparing your installation. Your game files and sign-in will be kept.") : L("Install the game components, then continue in Blizzard’s installer.")
+        case .preparing: return model.stage.isEmpty ? L("Preparing your game environment.") : model.stage
+        case .launching: return model.stage == L("Opening Battle.net") ? L("Waiting for its window to appear.") : model.stage
+        case .installer: return L("Complete setup in the Battle.net installer.")
+        case .running: return model.existingName == "Overwatch" ? L("Can’t find the game window? Choose Show Overwatch or check your other desktops.") : L("Play from the Battle.net window. Can’t find it? Choose Show Battle.net.")
+        case .ready: return model.gameInstalled ? (AppModel.playEnabled ? L("Battle.net opens and starts Overwatch for you.") : L("Open Battle.net, select Overwatch and click Play.")) : L("Sign in to Battle.net and install Overwatch.")
+        case .driveMissing: return L("Overwatch is installed on “{0}”. Connect the drive and this app picks up where it left off.",model.driveName)
         case .failure: return model.failure.message
         }
     }
@@ -95,17 +99,17 @@ struct SetupView: View {
         case .welcome:
             LauncherPanel {
                 VStack(alignment:.leading,spacing:12) {
-                    Text("Requirements").font(LauncherStyle.font(14,.semibold))
+                    Text(L("Requirements")).font(LauncherStyle.font(14,.semibold))
                     VStack(alignment:.leading,spacing:8) {
-                        requirement("Mac", "Apple Silicon · macOS 26.5 or later")
-                        requirement("Memory", "16 GB recommended")
-                        requirement("Storage", "85–95 GB free, on this Mac or an external SSD")
-                        requirement("Also", "Blizzard account, internet and Rosetta")
+                        requirement(L("Mac"), L("Apple Silicon · macOS 26.5 or later"))
+                        requirement(L("Memory"), L("16 GB recommended"))
+                        requirement(L("Storage"), L("85–95 GB free, on this Mac or an external SSD"))
+                        requirement(L("Also"), L("Blizzard account, internet and Rosetta"))
                     }
                     Divider()
                     VStack(alignment:.leading,spacing:5) {
-                        Text("Recommended · tested setup").font(LauncherStyle.font(13,.semibold))
-                        Text("M1 Pro with 16 GB memory. Other Apple Silicon Macs may perform differently.")
+                        Text(L("Recommended · tested setup")).font(LauncherStyle.font(13,.semibold))
+                        Text(L("M1 Pro with 16 GB memory. Other Apple Silicon Macs may perform differently."))
                             .font(LauncherStyle.font(13)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                 }
@@ -113,19 +117,21 @@ struct SetupView: View {
         case .moveApp:
             if model.busy {
                 HStack(spacing:12) {
-                    ProgressView().controlSize(.small).accessibilityLabel("Moving")
+                    ProgressView().controlSize(.small).accessibilityLabel(L("Moving"))
                     Text(model.stage).foregroundStyle(.secondary)
                 }
             } else if model.installedCopy == nil && !model.moveReplaces.isEmpty {
-                LauncherNotice(text:"This replaces \(model.moveReplaces.joined(separator:" and ")), which moves to the Trash. Your game, settings and Battle.net sign-in are kept.")
+                LauncherNotice(text:L("This replaces {0}, which moves to the Trash. Your game, settings and Battle.net sign-in are kept.",model.moveReplaces.formatted(.list(type:.and))))
             }
         case .checking:
-            ProgressView().controlSize(.small).accessibilityLabel("Checking your Mac")
+            ProgressView().controlSize(.small).accessibilityLabel(L("Checking your Mac"))
+        case .battleNet:
+            battleNetPanel
         case .preparing:
             HStack(spacing:12) {
-                ProgressView().controlSize(.small).accessibilityLabel("Setup in progress")
+                ProgressView().controlSize(.small).accessibilityLabel(L("Setup in progress"))
                 if model.downloadedBytes>0 {
-                    Text(ByteCountFormatter.string(fromByteCount:Int64(model.downloadedBytes),countStyle:.file)+" downloaded")
+                    Text(L("{0} downloaded",ByteCountFormatter.string(fromByteCount:Int64(model.downloadedBytes),countStyle:.file)))
                         .monospacedDigit().foregroundStyle(.secondary)
                 }
             }
@@ -134,12 +140,12 @@ struct SetupView: View {
                 let seconds=max(0,Int(context.date.timeIntervalSince(model.launchStarted)))
                 VStack(spacing:20) {
                     HStack(spacing:12) {
-                        ProgressView().controlSize(.small).accessibilityLabel("Opening Battle.net")
-                        Text("\(seconds / 60):\(String(format:"%02d",seconds % 60)) elapsed")
+                        ProgressView().controlSize(.small).accessibilityLabel(L("Opening Battle.net"))
+                        Text(L("{0} elapsed",String(format:"%d:%02d",seconds / 60,seconds % 60)))
                             .font(LauncherStyle.font(14,.medium)).monospacedDigit().foregroundStyle(.secondary)
                     }
                     if seconds >= 30 {
-                        Text("Taking longer than usual. Check the Dock for a Battle.net window.")
+                        Text(L("Taking longer than usual. Check the Dock for a Battle.net window."))
                             .font(LauncherStyle.font(13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     }
                     PerformanceTip()
@@ -149,25 +155,26 @@ struct SetupView: View {
             }
         case .readyToInstall:
             VStack(spacing:16) {
+                if !model.clientInstalled { battleNetSummary }
                 if model.canChangeLocation { locationPanel }
                 if model.lowStorage { storageWarning }
-                else if !model.gameInstalled && !model.canChangeLocation { Text("A new installation needs about 85–95 GB of free space.").foregroundStyle(.secondary).font(LauncherStyle.font(13)) }
+                else if !model.gameInstalled && !model.canChangeLocation { Text(L("A new installation needs about 85–95 GB of free space.")).foregroundStyle(.secondary).font(LauncherStyle.font(13)) }
                 if model.lowMemory && !model.gameInstalled { memoryWarning }
             }
         case .installer:
             // Blizzard's installer opens Battle.net without this app's renderer
             // settings, so its sign-in window can load blank until reopened here.
-            LauncherNotice(text:"When setup finishes, close any Battle.net window it opens. Then choose Continue here.\n\nIf the Battle.net sign-in window is blank or white, that’s expected at this step. Close it and choose Continue. This app reopens Battle.net with the right display settings, and you can sign in there.")
+            LauncherNotice(text:L("When setup finishes, close any Battle.net window it opens. Then choose Continue here.\n\nIf the Battle.net sign-in window is blank or white, that’s expected at this step. Close it and choose Continue. This app reopens Battle.net with the right display settings, and you can sign in there."))
         case .failure:
             if model.failure.code == "rosetta_required" {
-                Text("macOS will guide you through Apple’s installation.").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                Text(L("macOS will guide you through Apple’s installation.")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
             }
         case .ready:
             VStack(spacing:16) {
                 if model.lowStorage { storageWarning }
                 if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) } else { PerformanceTip() }
                 if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
-                if !model.gameInstalled { XboxSignInNote(model:model) }
+                if !model.gameInstalled { SignInNote(model:model) }
                 if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
             }
         case .running:
@@ -175,10 +182,70 @@ struct SetupView: View {
                 if model.existingName == "Overwatch" && model.gameWindowHidden { GameClosingNote() }
                 if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) } else { PerformanceTip() }
                 if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
-                if !model.gameInstalled { XboxSignInNote(model:model) }
+                if !model.gameInstalled { SignInNote(model:model) }
                 if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
             }
         case .driveMissing: EmptyView()
+        }
+    }
+    /// Choose your Battle.net: the region and the language Battle.net installs in, both filled in
+    /// from the Mac (BattleNetChoice.swift) and confirmed with Continue. China's Battle.net is
+    /// Simplified Chinese only; going back to Global goes back to the Mac's language.
+    private var battleNetPanel:some View {
+        LauncherPanel {
+            VStack(alignment:.leading,spacing:14) {
+                Text(L("Which Battle.net do you play on?")).font(LauncherStyle.font(14,.semibold))
+                VStack(spacing:8) { ForEach(BattleNetRegion.allCases) { regionOption($0) } }
+                Divider()
+                HStack(alignment:.center,spacing:12) {
+                    VStack(alignment:.leading,spacing:2) {
+                        Text(L("Battle.net language")).font(LauncherStyle.font(14,.semibold))
+                        Text(model.battleNetRegion == .china ? L("China’s Battle.net is in Simplified Chinese.") : L("Battle.net installs in this language. You can change it later in Battle.net’s settings."))
+                            .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Spacer(minLength:8)
+                    Picker(L("Battle.net language"),selection:$model.battleNetLanguage) {
+                        ForEach(BattleNetLanguage.allCases) { Text(verbatim:$0.name).tag($0) }
+                    }.labelsHidden().pickerStyle(.menu).fixedSize().disabled(model.battleNetRegion == .china || model.busy)
+                }
+                Text(L("Accounts don’t carry over between Global and China’s Battle.net."))
+                    .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            }
+        }
+    }
+    private func regionOption(_ region:BattleNetRegion) -> some View {
+        let selected=model.battleNetRegion == region
+        let shape=RoundedRectangle(cornerRadius:14,style:.continuous)
+        return Button {
+            guard region != model.battleNetRegion else { return }
+            model.battleNetRegion=region
+            model.battleNetLanguage = region == .china ? .simplifiedChinese : .suggested
+        } label: {
+            HStack(alignment:.top,spacing:12) {
+                Image(systemName:selected ? "checkmark.circle.fill" : "circle").font(.system(size:18))
+                    .foregroundStyle(selected ? AnyShapeStyle(LauncherStyle.accent) : AnyShapeStyle(.secondary)).accessibilityHidden(true)
+                VStack(alignment:.leading,spacing:2) {
+                    Text(region.title).font(LauncherStyle.font(14,.semibold))
+                    Text(region.detail).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                }
+                Spacer(minLength:0)
+            }.padding(12).frame(maxWidth:.infinity,alignment:.leading)
+                .background(selected ? AnyShapeStyle(LauncherStyle.accent.opacity(0.10)) : AnyShapeStyle(.primary.opacity(0.04)),in:shape)
+                .overlay { shape.strokeBorder(selected ? LauncherStyle.accent.opacity(0.6) : .clear,lineWidth:1.5) }
+                .contentShape(shape)
+        }.buttonStyle(.plain).disabled(model.busy).accessibilityAddTraits(selected ? .isSelected : [])
+    }
+    /// The Battle.net setup installs, as chosen on the screen before; Change goes back to it.
+    private var battleNetSummary:some View {
+        LauncherPanel(inset:16) {
+            HStack(alignment:.center,spacing:12) {
+                VStack(alignment:.leading,spacing:2) {
+                    Text(L("Battle.net")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                    Text(L("{0} · {1}",model.battleNetRegion.title,model.battleNetLanguage.name)).font(LauncherStyle.font(14,.semibold))
+                }
+                Spacer(minLength:8)
+                Button(L("Change"),action:model.editBattleNet).buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(model.busy)
+            }
         }
     }
     // Already filled in with the internal default: an optional change, not a
@@ -197,31 +264,33 @@ struct SetupView: View {
         return LauncherPanel {
             VStack(alignment:.leading,spacing:8) {
                 HStack(spacing:12) {
-                    Text("Install location").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                    Text(L("Install location")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
                     Spacer(minLength:8)
-                    Picker("Install location",selection:choice) {
+                    Picker(L("Install location"),selection:choice) {
                         Label(InstallLocation.title(InstallLocation.standard),systemImage:"internaldrive").tag(LocationChoice.standard)
                         if !InstallLocation.isStandard(model.root) {
-                            Label(InstallLocation.title(model.root),systemImage:InstallLocation.isInternal(model.root) ? "folder" : "externaldrive").tag(LocationChoice.current)
+                            Label(InstallLocation.title(model.root),systemImage:InstallLocation.symbol(model.root)).tag(LocationChoice.current)
                         }
                         Divider()
-                        Text("Choose Another Location…").tag(LocationChoice.other)
+                        Text(L("Choose Another Location…")).tag(LocationChoice.other)
                     }.labelsHidden().pickerStyle(.menu).fixedSize().disabled(model.busy)
                         .help(model.root.path)
                 }
-                Text("Needs about 85–95 GB · \(ByteCountFormatter.string(fromByteCount:Int64(model.freeBytes),countStyle:.file)) available")
+                Text(L("Needs about 85–95 GB · {0} available",ByteCountFormatter.string(fromByteCount:Int64(model.freeBytes),countStyle:.file)))
                     .font(LauncherStyle.font(13)).foregroundStyle(.secondary).monospacedDigit()
             }
         }
     }
     private var storageWarning:some View {
         let free=ByteCountFormatter.string(fromByteCount:Int64(model.freeBytes),countStyle:.file)
-        let drive=InstallLocation.isStandard(model.root) ? "Your Mac has" : "“\(model.driveName)” has"
-        let fix=InstallLocation.isInternal(model.root) ? "Free up space in System Settings › General › Storage" : "Free up space on the drive"
-        return LauncherNotice(text:"\(drive) \(free) free. We recommend 85–95 GB for Overwatch and its updates. You can continue, but the download may stop if storage runs out. \(fix)\(model.canChangeLocation ? ", or choose another install location." : ".")",symbol:"exclamationmark.triangle")
+        let has=InstallLocation.isStandard(model.root) ? L("Your Mac has {0} free.",free) : L("“{0}” has {1} free.",model.driveName,free)
+        let fix=InstallLocation.isInternal(model.root)
+            ? (model.canChangeLocation ? L("Free up space in System Settings › General › Storage, or choose another install location.") : L("Free up space in System Settings › General › Storage."))
+            : (model.canChangeLocation ? L("Free up space on the drive, or choose another install location.") : L("Free up space on the drive."))
+        return LauncherNotice(text:sentences(has,L("We recommend 85–95 GB for Overwatch and its updates. You can continue, but the download may stop if storage runs out."),fix),symbol:"exclamationmark.triangle")
     }
     private var memoryWarning:some View {
-        LauncherNotice(text:"Your Mac has \(model.memoryBytes>>30) GB of memory. We recommend 16 GB. You can continue, but Overwatch may load slowly or stutter. Quitting other apps before you play helps.",symbol:"exclamationmark.triangle")
+        LauncherNotice(text:L("Your Mac has {0} GB of memory. We recommend 16 GB. You can continue, but Overwatch may load slowly or stutter. Quitting other apps before you play helps.",String(model.memoryBytes>>30)),symbol:"exclamationmark.triangle")
     }
     private func requirement(_ title:String,_ value:String)->some View {
         HStack(alignment:.top,spacing:12) {
@@ -232,45 +301,47 @@ struct SetupView: View {
     @ViewBuilder private var actions:some View {
         switch model.screen {
         case .welcome:
-            LauncherPrimaryAction(title:"Get Started",action:model.check).keyboardShortcut(.defaultAction).disabled(model.busy)
+            LauncherPrimaryAction(title:L("Get Started"),action:model.check).keyboardShortcut(.defaultAction).disabled(model.busy)
+        case .battleNet:
+            LauncherPrimaryAction(title:L("Continue"),action:model.chooseBattleNet).keyboardShortcut(.defaultAction).disabled(model.busy)
         case .moveApp:
             if model.installedCopy != nil {
-                LauncherPrimaryAction(title:"Open \(Brand.name)",action:model.openInstalledCopy).keyboardShortcut(.defaultAction).disabled(model.busy)
+                LauncherPrimaryAction(title:L("Open {0}",Brand.name),action:model.openInstalledCopy).keyboardShortcut(.defaultAction).disabled(model.busy)
             } else {
-                LauncherPrimaryAction(title:"Move to Applications",action:model.moveToApplications).keyboardShortcut(.defaultAction).disabled(model.busy)
+                LauncherPrimaryAction(title:L("Move to Applications"),action:model.moveToApplications).keyboardShortcut(.defaultAction).disabled(model.busy)
             }
-            Button("Quit") { model.quit() }.buttonStyle(.borderless).disabled(model.busy)
+            Button(L("Quit")) { model.quit() }.buttonStyle(.borderless).disabled(model.busy)
         case .readyToInstall:
-            LauncherPrimaryAction(title:model.clientInstalled ? "Finish Setup" : "Install Battle.net",action:model.setup).keyboardShortcut(.defaultAction).disabled(model.busy)
+            LauncherPrimaryAction(title:model.clientInstalled ? L("Finish Setup") : L("Install Battle.net"),action:model.setup).keyboardShortcut(.defaultAction).disabled(model.busy)
         case .checking: EmptyView()
         case .preparing:
-            if model.canCancel { Button("Pause Setup",action:model.cancel).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction) }
+            if model.canCancel { Button(L("Pause Setup"),action:model.cancel).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction) }
         case .launching:
-            LauncherCancelAction(title:"Cancel",action:model.cancelLaunch).keyboardShortcut(.cancelAction).disabled(!model.canCancel)
+            LauncherCancelAction(title:L("Cancel"),action:model.cancelLaunch).keyboardShortcut(.cancelAction).disabled(!model.canCancel)
         case .installer:
-            LauncherPrimaryAction(title:"Continue",action:model.finishInstaller).keyboardShortcut(.defaultAction).disabled(model.busy)
+            LauncherPrimaryAction(title:L("Continue"),action:model.finishInstaller).keyboardShortcut(.defaultAction).disabled(model.busy)
         case .running:
             if model.existingName == "Battle.net" {
-                BattleNetAction(title:"Show Battle.net",executable:model.battleNetExecutable,action:model.launch).keyboardShortcut(.defaultAction).disabled(model.busy)
+                BattleNetAction(title:L("Show Battle.net"),executable:model.battleNetExecutable,action:model.launch).keyboardShortcut(.defaultAction).disabled(model.busy)
             } else {
-                LauncherPrimaryAction(title:"Show \(model.existingName)",action:model.launch).keyboardShortcut(.defaultAction).disabled(model.busy)
+                LauncherPrimaryAction(title:L("Show {0}",L(model.existingName)),action:model.launch).keyboardShortcut(.defaultAction).disabled(model.busy)
             }
         case .ready:
             if AppModel.playEnabled && model.gameInstalled {
-                LauncherPrimaryAction(title:"Play Overwatch",action:model.play).keyboardShortcut(.defaultAction).disabled(model.busy)
-                Button("Open Battle.net",action:model.launch).buttonStyle(.borderless).disabled(model.busy)
+                LauncherPrimaryAction(title:L("Play Overwatch"),action:model.play).keyboardShortcut(.defaultAction).disabled(model.busy)
+                Button(L("Open Battle.net"),action:model.launch).buttonStyle(.borderless).disabled(model.busy)
             } else {
-                BattleNetAction(title:"Open Battle.net",executable:model.battleNetExecutable,action:model.launch).keyboardShortcut(.defaultAction).disabled(model.busy)
+                BattleNetAction(title:L("Open Battle.net"),executable:model.battleNetExecutable,action:model.launch).keyboardShortcut(.defaultAction).disabled(model.busy)
             }
         case .driveMissing:
-            LauncherPrimaryAction(title:"Try Again",action:model.recheck).keyboardShortcut(.defaultAction).disabled(model.busy)
-            Button("Set Up on This Mac Instead",action:model.useThisMac).buttonStyle(.borderless).disabled(model.busy)
+            LauncherPrimaryAction(title:L("Try Again"),action:model.recheck).keyboardShortcut(.defaultAction).disabled(model.busy)
+            Button(L("Set Up on This Mac Instead"),action:model.useThisMac).buttonStyle(.borderless).disabled(model.busy)
         case .failure:
             if model.failure.code == "rosetta_required" {
-                LauncherPrimaryAction(title:"Install Rosetta",action:model.installRosetta).keyboardShortcut(.defaultAction).disabled(model.busy)
-                Button("Check Again",action:retry).buttonStyle(.borderless).disabled(model.busy)
+                LauncherPrimaryAction(title:L("Install Rosetta"),action:model.installRosetta).keyboardShortcut(.defaultAction).disabled(model.busy)
+                Button(L("Check Again"),action:retry).buttonStyle(.borderless).disabled(model.busy)
             } else {
-                LauncherPrimaryAction(title:model.failure.code == "cancelled" ? "Resume Setup" : "Try Again",action:retry).keyboardShortcut(.defaultAction).disabled(model.busy)
+                LauncherPrimaryAction(title:model.failure.code == "cancelled" ? L("Resume Setup") : L("Try Again"),action:retry).keyboardShortcut(.defaultAction).disabled(model.busy)
             }
         }
     }
@@ -291,22 +362,22 @@ struct VersionStatus: View {
     @Bindable var model:AppModel
     var body:some View {
         HStack(spacing:6) {
-            Text("Version \(UpdateCheck.installed)")
+            Text(L("Version {0}",UpdateCheck.installed))
             switch model.update {
             case .available(let item):
                 Text("·")
                 Button { model.sheet = .update } label: {
-                    Label { Text("Update to \(item.version)").fontWeight(.semibold) } icon: { Image(systemName:"arrow.down.circle.fill").foregroundStyle(LauncherStyle.accent) }
-                }.buttonStyle(.borderless).foregroundStyle(.primary).help("See what’s new and install the update")
+                    Label { Text(L("Update to {0}",item.version)).fontWeight(.semibold) } icon: { Image(systemName:"arrow.down.circle.fill").foregroundStyle(LauncherStyle.accent) }
+                }.buttonStyle(.borderless).foregroundStyle(.primary).help(L("See what’s new and install the update"))
             case .downloading, .installing:
                 Text("·")
-                Button("Updating…") { model.sheet = .update }.buttonStyle(.borderless)
+                Button(L("Updating…")) { model.sheet = .update }.buttonStyle(.borderless)
             case .upToDate:
-                Text("·");Text("Up to date")
+                Text("·");Text(L("Up to date"))
             default: EmptyView()
             }
             Text("·")
-            Button("What’s New") { model.sheet = .whatsNew }.buttonStyle(.borderless)
+            Button(L("What’s New")) { model.sheet = .whatsNew }.buttonStyle(.borderless)
         }.font(LauncherStyle.font(12)).foregroundStyle(.secondary)
     }
 }
@@ -314,7 +385,7 @@ struct VersionStatus: View {
 // who kept theirs open reported stutters.
 struct PerformanceTip: View {
     var body:some View {
-        Label("For the best performance, close other apps while you play.",systemImage:"bolt")
+        Label(L("For the best performance, close other apps while you play."),systemImage:"bolt")
             .font(LauncherStyle.font(13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
             .fixedSize(horizontal:false,vertical:true)
     }
@@ -332,20 +403,20 @@ struct FirstMatchTip: View {
         HStack(alignment:.top,spacing:10) {
             Label {
                 VStack(alignment:.leading,spacing:10) {
-                    Text("Your first matches can stutter briefly while your Mac prepares Overwatch’s graphics. To get ahead of it, play Workshop code \(Self.workshopCode) once from Custom Games before you queue.")
+                    Text(L("Your first matches can stutter briefly while your Mac prepares Overwatch’s graphics. To get ahead of it, play Workshop code {0} once from Custom Games before you queue.",Self.workshopCode))
                         .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
                     HStack(spacing:10) {
-                        Button(copied ? "Copied" : "Copy Code") {
+                        Button(copied ? L("Copied") : L("Copy Code")) {
                             NSPasteboard.general.clearContents();NSPasteboard.general.setString(Self.workshopCode,forType:.string);copied=true
                         }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
-                            .accessibilityLabel(copied ? "Copied" : "Copy Workshop code \(Self.workshopCode)")
-                        Text("Shader warm-up by u/Working_Dealer_5102").font(LauncherStyle.font(12)).foregroundStyle(.tertiary)
+                            .accessibilityLabel(copied ? L("Copied") : L("Copy Workshop code {0}",Self.workshopCode))
+                        Text(L("Shader warm-up by u/Working_Dealer_5102")).font(LauncherStyle.font(12)).foregroundStyle(.tertiary)
                     }
                 }
             } icon: { Image(systemName:"sparkles") }
             Spacer(minLength:0)
             Button(action:dismiss) { Image(systemName:"xmark").font(.system(size:11,weight:.bold)).frame(width:22,height:22).contentShape(Rectangle()) }
-                .buttonStyle(.borderless).foregroundStyle(.secondary).help("Dismiss this tip").accessibilityLabel("Dismiss tip")
+                .buttonStyle(.borderless).foregroundStyle(.secondary).help(L("Dismiss this tip")).accessibilityLabel(L("Dismiss tip"))
         }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
             .padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
@@ -356,22 +427,28 @@ struct FirstMatchTip: View {
 // still closing after Exit to Desktop. Force Quit asks first (AppDelegate.forceQuit).
 struct GameClosingNote: View {
     var body:some View {
-        LauncherNotice(text:"Just exited Overwatch? It can take up to a minute to close after its window goes away. If it doesn’t, choose Force Quit.",
-                       symbol:"hourglass",action:("Force Quit…",{ NSApp.sendAction(#selector(AppDelegate.forceQuit),to:nil,from:nil) }))
+        LauncherNotice(text:L("Just exited Overwatch? It can take up to a minute to close after its window goes away. If it doesn’t, choose Force Quit."),
+                       symbol:"hourglass",action:(L("Force Quit…"),{ NSApp.sendAction(#selector(AppDelegate.forceQuit),to:nil,from:nil) }))
     }
 }
-// Before Overwatch is installed, while the player signs in to Battle.net (issue #33).
-struct XboxSignInNote: View {
+// Before Overwatch is installed, while the player signs in to Battle.net (issue #33). China's
+// Battle.net signs in with a NetEase account through the browser, with the same hand-off back.
+struct SignInNote: View {
     let model:AppModel
     var body:some View {
-        LauncherNotice(text:"Signing in with Xbox? If Battle.net keeps waiting after your browser says to return, see Help › Troubleshooting.",
-                       symbol:"person.badge.key",action:("Open Help",{ model.openHelp(.troubleshooting,topic:"xbox") }))
+        if model.battleNetRegion == .china {
+            LauncherNotice(text:L("Signing in with NetEase? If Battle.net keeps waiting after your browser says to return, see Help › Troubleshooting."),
+                           symbol:"person.badge.key",action:(L("Open Help"),{ model.openHelp(.troubleshooting,topic:"netease") }))
+        } else {
+            LauncherNotice(text:L("Signing in with Xbox? If Battle.net keeps waiting after your browser says to return, see Help › Troubleshooting."),
+                           symbol:"person.badge.key",action:(L("Open Help"),{ model.openHelp(.troubleshooting,topic:"xbox") }))
+        }
     }
 }
 // Korean accounts linked to Nexon need Korean account support (Settings › Advanced). Shown
 // on the Play, opening and running screens once the game folder holds Nexon's files and the
-// option is off, until dismissed; the option itself stays in Settings either way. In English
-// and Korean, since Recall is otherwise English-only.
+// option is off, until dismissed; the option itself stays in Settings either way. In Korean
+// too, since Recall has no Korean interface yet.
 struct KoreanAccountTip: View {
     let open:()->Void
     let dismiss:()->Void
@@ -379,16 +456,16 @@ struct KoreanAccountTip: View {
         HStack(alignment:.top,spacing:10) {
             Label {
                 VStack(alignment:.leading,spacing:10) {
-                    Text("Playing on a Korean account linked to Nexon? Turn on Korean account support in Settings › Advanced.")
+                    Text(L("Playing on a Korean account linked to Nexon? Turn on Korean account support in Settings › Advanced."))
                         .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
                     Text("넥슨과 연동된 한국 계정으로 플레이하시나요? 설정 › 고급에서 한국 계정 지원을 켜세요.")
                         .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
-                    Button("Open Settings 설정 열기",action:open).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                    Button(L("Open Settings 설정 열기"),action:open).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
                 }
             } icon: { Image(systemName:"person.crop.circle.badge.questionmark") }
             Spacer(minLength:0)
             Button(action:dismiss) { Image(systemName:"xmark").font(.system(size:11,weight:.bold)).frame(width:22,height:22).contentShape(Rectangle()) }
-                .buttonStyle(.borderless).foregroundStyle(.secondary).help("Dismiss this tip").accessibilityLabel("Dismiss tip")
+                .buttonStyle(.borderless).foregroundStyle(.secondary).help(L("Dismiss this tip")).accessibilityLabel(L("Dismiss tip"))
         }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
             .padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))

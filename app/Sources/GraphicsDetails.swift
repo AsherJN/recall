@@ -47,27 +47,27 @@ struct GraphicsProgress {
     mutating func skipped() { if phase != nil && phase != .done { phase = .skipped } }
     var summary:String {
         switch phase {
-        case .kept, .learned, .checking: return learned > 0 ? "Checking \(learned.formatted()) learned shaders" : "Checking learned shaders"
-        case .warming: return "Warming up \(warmDone.formatted()) of \(warmTarget.formatted()) shaders"
-        case .preparing: return "Prepared \(prepared.formatted()) of \(target.formatted())"+(fresh > 0 ? " · \(fresh.formatted()) new" : "")
-        case .verifying: return "Checking \(target.formatted()) prepared shaders"
+        case .kept, .learned, .checking: return learned > 0 ? L("Checking {0} learned shaders",learned.formatted()) : L("Checking learned shaders")
+        case .warming: return L("Warming up {0} of {1} shaders",warmDone.formatted(),warmTarget.formatted())
+        case .preparing: return fresh > 0 ? L("Prepared {0} of {1} · {2} new",prepared.formatted(),target.formatted(),fresh.formatted()) : L("Prepared {0} of {1}",prepared.formatted(),target.formatted())
+        case .verifying: return L("Checking {0} prepared shaders",target.formatted())
         case .done:
-            if learned == 0 && ready == 0 { return "No shaders learned yet" }
-            if warmed > 0 { return "\(warmed.formatted()) shaders warmed up" }
-            if ready == 0 { return "\(learned.formatted()) learned · ready after your next match" }
-            if ready < learned { return "\(ready.formatted()) of \(learned.formatted()) shaders ready" }
-            return "\(ready.formatted()) shaders ready"+(added > 0 ? " · \(added.formatted()) new" : "")
-        case .skipped: return "Skipped this time · prepared shaders kept"
+            if learned == 0 && ready == 0 { return L("No shaders learned yet") }
+            if warmed > 0 { return L("{0} shaders warmed up",warmed.formatted()) }
+            if ready == 0 { return L("{0} learned · ready after your next match",learned.formatted()) }
+            if ready < learned { return L("{0} of {1} shaders ready",ready.formatted(),learned.formatted()) }
+            return added > 0 ? L("{0} shaders ready · {1} new",ready.formatted(),added.formatted()) : L("{0} shaders ready",ready.formatted())
+        case .skipped: return L("Skipped this time · prepared shaders kept")
         case nil: return ""
         }
     }
     /// Why the warm-up runs, under its list.
     var warmingNote:String? {
-        phase == .warming || warmed > 0 ? "After a macOS update, \(Brand.name) builds the shaders you’ve already used again. This can take a few minutes." : nil
+        phase == .warming || warmed > 0 ? L("After a macOS update, {0} builds the shaders you’ve already used again. This can take a few minutes.",Brand.name) : nil
     }
     /// Shown in place of the numbers before anything was learned.
     var explanation:String {
-        "\(Brand.name) learns each shader the first time Overwatch uses it on this Mac. After you quit Overwatch, it prepares them for your next match."
+        L("{0} learns each shader the first time Overwatch uses it on this Mac. After you quit Overwatch, it prepares them for your next match.",Brand.name)
     }
 }
 
@@ -88,11 +88,11 @@ struct GraphicsDetails: View {
                                 .foregroundStyle(progress.phase == .done ? AnyShapeStyle(LauncherStyle.accent) : AnyShapeStyle(.secondary)).frame(width:18)
                             Text(progress.summary).font(LauncherStyle.font(13,.medium)).monospacedDigit().lineLimit(1)
                             Spacer(minLength:8)
-                            Text(expanded ? "Hide" : "Details").font(LauncherStyle.font(12)).foregroundStyle(.secondary)
+                            Text(expanded ? L("Hide") : L("Details")).font(LauncherStyle.font(12)).foregroundStyle(.secondary)
                             Image(systemName:"chevron.down").font(.system(size:11,weight:.semibold)).foregroundStyle(.secondary)
                                 .rotationEffect(.degrees(expanded ? 180 : 0))
                         }.contentShape(Rectangle())
-                    }.buttonStyle(.plain).accessibilityLabel(progress.summary).accessibilityHint(expanded ? "Hides the details" : "Shows what the numbers mean")
+                    }.buttonStyle(.plain).accessibilityLabel(progress.summary).accessibilityHint(expanded ? L("Hides the details") : L("Shows what the numbers mean"))
                     ShaderInfoButton(isPresented:$info)
                 }
                 if expanded {
@@ -100,12 +100,12 @@ struct GraphicsDetails: View {
                     else if progress.phase == .done && progress.learned == 0 && progress.ready == 0 {
                         Text(progress.explanation).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     } else if progress.phase == .done || progress.learned > 0 { numbers }
-                    else { Text("Shaders appear here as they’re prepared.").font(LauncherStyle.font(12)).foregroundStyle(.secondary) }
+                    else { Text(L("Shaders appear here as they’re prepared.")).font(LauncherStyle.font(12)).foregroundStyle(.secondary) }
                     if let note=progress.warmingNote {
                         Text(note).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                     if progress.keptFolders > 0 {
-                        Text("Includes shaders kept from before your Mac restarted.").font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                        Text(L("Includes shaders kept from before your Mac restarted.")).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                 }
             }
@@ -114,15 +114,15 @@ struct GraphicsDetails: View {
     /// The two numbers, each with what it counts.
     private var numbers:some View {
         Grid(alignment:.topLeading,horizontalSpacing:14,verticalSpacing:10) {
-            number(progress.ready,"Ready",readyDetail)
-            number(progress.learned,"Learned",ShaderInfo.learnedShort)
+            number(progress.ready,L("Ready"),readyDetail)
+            number(progress.learned,L("Learned"),ShaderInfo.learnedShort)
         }
     }
     private var readyDetail:String {
-        if progress.ready == 0 { return "None yet. They’re built after you quit Overwatch and load from your next match." }
-        let added=progress.added == 1 ? " 1 was added after your last match." : progress.added > 1 ? " \(progress.added.formatted()) were added after your last match." : ""
-        let rest=progress.learned > progress.ready ? " The other \((progress.learned-progress.ready).formatted()) are built after your next match." : ""
-        return ShaderInfo.readyShort+added+rest
+        if progress.ready == 0 { return L("None yet. They’re built after you quit Overwatch and load from your next match.") }
+        let added=progress.added == 1 ? L("1 was added after your last match.") : progress.added > 1 ? L("{0} were added after your last match.",progress.added.formatted()) : ""
+        let rest=progress.learned > progress.ready ? L("The other {0} are built after your next match.",(progress.learned-progress.ready).formatted()) : ""
+        return sentences(ShaderInfo.readyShort,added,rest)
     }
     private func number(_ value:Int,_ title:String,_ detail:String)->some View {
         GridRow {
@@ -140,7 +140,7 @@ struct GraphicsDetails: View {
                     ForEach(progress.items) { item in
                         HStack(spacing:8) {
                             Text(item.key).font(.system(size:12,design:.monospaced)).foregroundStyle(.secondary)
-                            if item.new { Text("new").font(LauncherStyle.font(11,.semibold)).foregroundStyle(LauncherStyle.accent) }
+                            if item.new { Text(L("new")).font(LauncherStyle.font(11,.semibold)).foregroundStyle(LauncherStyle.accent) }
                             Spacer(minLength:8)
                             Text(item.ms < 10 ? String(format:"%.1f ms",item.ms) : "\(Int(item.ms.rounded())) ms")
                                 .font(.system(size:12,design:.monospaced)).foregroundStyle(.secondary)
@@ -150,7 +150,7 @@ struct GraphicsDetails: View {
             }.frame(height:168).scrollIndicators(.automatic)
                 .onChange(of:progress.items.last?.id) { _,last in if let last { reader.scrollTo(last,anchor:.bottom) } }
                 .onAppear { if let last=progress.items.last?.id { reader.scrollTo(last,anchor:.bottom) } }
-                .accessibilityLabel("Prepared shaders")
+                .accessibilityLabel(L("Prepared shaders"))
         }
     }
 }
@@ -158,15 +158,15 @@ struct GraphicsDetails: View {
 /// What shaders are and how Recall learns and prepares them, in plain words. Shared by the
 /// info button (launch screen, after-match status) and Help's FAQ.
 enum ShaderInfo {
-    static let what="Shaders are small programs your Mac’s graphics chip runs to draw each part of a scene, such as a hero, a wall or an explosion. Overwatch uses thousands of them."
-    static let stutter="Overwatch’s shaders are written for Windows. The first time the game uses one, it’s translated for Apple’s Metal and built for your Mac’s graphics chip. When that takes longer than a frame, you see a brief stutter."
-    static let learned="Every shader Overwatch has used on this Mac. The number grows as you see new maps, heroes, skins and effects; there’s no fixed total."
-    static let ready="Learned shaders \(Brand.name) has already built. After you quit Overwatch, \(Brand.name) builds the ones that aren’t ready yet, slowest first. Overwatch loads them all when it starts, unless you choose less under Shader memory in Settings, and any it doesn’t load still come quickly from macOS’s own shader cache."
-    static let interrupted="Preparing keeps going if you quit \(Brand.name). If your Mac shuts down or sleeps, or you play again before it’s done, what’s finished is kept and the rest is prepared after your next match."
-    static let update="After a macOS update, \(Brand.name) builds your learned shaders again. It starts before Battle.net opens and finishes after your next match."
-    static let local="Shaders stay on this Mac; nothing is uploaded."
-    static let learnedShort="Every shader Overwatch has used on this Mac."
-    static let readyShort="Built after you quit Overwatch and loaded when the game starts."
+    static var what:String { L("Shaders are small programs your Mac’s graphics chip runs to draw each part of a scene, such as a hero, a wall or an explosion. Overwatch uses thousands of them.") }
+    static var stutter:String { L("Overwatch’s shaders are written for Windows. The first time the game uses one, it’s translated for Apple’s Metal and built for your Mac’s graphics chip. When that takes longer than a frame, you see a brief stutter.") }
+    static var learned:String { L("Every shader Overwatch has used on this Mac. The number grows as you see new maps, heroes, skins and effects; there’s no fixed total.") }
+    static var ready:String { L("Learned shaders {0} has already built. After you quit Overwatch, {0} builds the ones that aren’t ready yet, slowest first. Overwatch loads them all when it starts, unless you choose less under Shader memory in Settings, and any it doesn’t load still come quickly from macOS’s own shader cache.",Brand.name) }
+    static var interrupted:String { L("Preparing keeps going if you quit {0}. If your Mac shuts down or sleeps, or you play again before it’s done, what’s finished is kept and the rest is prepared after your next match.",Brand.name) }
+    static var update:String { L("After a macOS update, {0} builds your learned shaders again. It starts before Battle.net opens and finishes after your next match.",Brand.name) }
+    static var local:String { L("Shaders stay on this Mac; nothing is uploaded.") }
+    static var learnedShort:String { L("Every shader Overwatch has used on this Mac.") }
+    static var readyShort:String { L("Built after you quit Overwatch and loaded when the game starts.") }
 }
 /// The info button beside shader numbers and status.
 struct ShaderInfoButton:View {
@@ -174,25 +174,25 @@ struct ShaderInfoButton:View {
     var body:some View {
         Button { isPresented=true } label: { Image(systemName:"info.circle").font(.system(size:14)) }
             .buttonStyle(.borderless).foregroundStyle(.secondary)
-            .help("About shaders").accessibilityLabel("About shaders")
+            .help(L("About shaders")).accessibilityLabel(L("About shaders"))
             .popover(isPresented:$isPresented,arrowEdge:.bottom) { ShaderInfoView() }
     }
 }
 struct ShaderInfoView:View {
     var body:some View {
         VStack(alignment:.leading,spacing:12) {
-            Text("Shaders").font(LauncherStyle.font(15,.semibold)).accessibilityAddTraits(.isHeader)
-            paragraph("What they are.",ShaderInfo.what)
-            paragraph("Why the first time stutters.",ShaderInfo.stutter)
-            paragraph("Learned.",ShaderInfo.learned)
-            paragraph("Ready.",ShaderInfo.ready)
-            paragraph("If preparing is cut short.",ShaderInfo.interrupted)
-            paragraph("After an update.",ShaderInfo.update)
+            Text(L("Shaders")).font(LauncherStyle.font(15,.semibold)).accessibilityAddTraits(.isHeader)
+            paragraph(L("What they are."),ShaderInfo.what)
+            paragraph(L("Why the first time stutters."),ShaderInfo.stutter)
+            paragraph(L("Learned."),ShaderInfo.learned)
+            paragraph(L("Ready."),ShaderInfo.ready)
+            paragraph(L("If preparing is cut short."),ShaderInfo.interrupted)
+            paragraph(L("After an update."),ShaderInfo.update)
             Text(ShaderInfo.local).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
         }.font(LauncherStyle.font(13)).padding(20).frame(width:420,alignment:.leading)
     }
     private func paragraph(_ lead:String,_ text:String) -> some View {
-        Text("\(Text(lead).fontWeight(.semibold).foregroundStyle(.primary)) \(Text(text).foregroundStyle(.secondary))")
+        Text("\(Text(lead).fontWeight(.semibold).foregroundStyle(.primary))\(AppLanguage.gap)\(Text(text).foregroundStyle(.secondary))")
             .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
     }
 }
@@ -211,9 +211,11 @@ struct AfterMatchStatus:View {
             if let fraction { ProgressRing(fraction:fraction).accessibilityHidden(true) }
             else { ProgressView().controlSize(.small).accessibilityHidden(true) }
             VStack(alignment:.leading,spacing:2) {
-                Text((updating ? "Updating your shader cache" : "Preparing shaders from your last match")+(fraction.map { $0 >= 1 ? " · Finishing up" : " · \(Int($0*100))%" } ?? ""))
+                Text((updating ? L("Updating your shader cache") : L("Preparing shaders from your last match"))+(fraction.map { " · "+($0 >= 1 ? L("Finishing up") : "\(Int($0*100))%") } ?? ""))
                     .font(LauncherStyle.font(13,.semibold)).monospacedDigit()
-                Text((progress.map { "\($0.ready.formatted()) of \($0.learned.formatted()) ready. " } ?? "")+(updating ? "This one-time update keeps going if you quit \(Brand.name)." : "This keeps going if you quit \(Brand.name).")+" Keep your Mac awake until it’s done.")
+                Text(sentences(progress.map { L("{0} of {1} ready.",$0.ready.formatted(),$0.learned.formatted()) } ?? "",
+                               updating ? L("This one-time update keeps going if you quit {0}.",Brand.name) : L("This keeps going if you quit {0}.",Brand.name),
+                               L("Keep your Mac awake until it’s done.")))
                     .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             }.accessibilityElement(children:.combine)
             Spacer(minLength:4)

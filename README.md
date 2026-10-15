@@ -2,6 +2,8 @@
   <img src="app/Resources/Banner.png" width="640" alt="Recall">
 </h1>
 
+<p align="center"><sub>English · <a href="README.zh-CN.md">简体中文</a></sub></p>
+
 <h3 align="center">Play Overwatch on your Mac.</h3>
 
 <p align="center">Recall is a free, open-source app for playing Overwatch on Apple Silicon.</p>
@@ -85,7 +87,7 @@ CrossOver is the right tool if you play many Windows games. If Overwatch is your
 | macOS | macOS Tahoe 26.5 or later |
 | Memory | 16 GB recommended |
 | Storage | 85–95 GB free, on your Mac or an external SSD |
-| Also | A free Blizzard account, an internet connection, and Rosetta (Recall checks for it during setup) |
+| Also | A free Blizzard account (a NetEase account for China's Battle.net), an internet connection, and Rosetta (Recall checks for it during setup) |
 
 The [installation guide](docs/INSTALLATION.md) has more detail, including installing the game on an external drive.
 

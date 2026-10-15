@@ -6,7 +6,15 @@ import AppKit
 enum SettingsTab:String, CaseIterable, Identifiable {
     case general, display, graphics, audio, advanced
     var id:String { rawValue }
-    var title:String { rawValue.capitalized }
+    var title:String {
+        switch self {
+        case .general: return L("General")
+        case .display: return L("Display")
+        case .graphics: return L("Graphics")
+        case .audio: return L("Audio")
+        case .advanced: return L("Advanced")
+        }
+    }
     var symbol:String {
         switch self {
         case .general: return "gearshape"
@@ -36,7 +44,7 @@ struct SettingsSheet:View {
     @State private var microphoneAccess=Microphone.access
     var body:some View {
         VStack(spacing:16) {
-            LauncherHeading(title:"Settings",subtitle:"",compact:true)
+            LauncherHeading(title:L("Settings"),subtitle:"",compact:true)
             LauncherTabs(tabs:SettingsTab.allCases,selection:$model.settingsTab,title:\.title,symbol:\.symbol)
             // One size on every tab, so the tabs, Done and Uninstall never move. The page sits
             // under the tabs; a page (or a page and a notice) taller than the room scrolls.
@@ -50,11 +58,11 @@ struct SettingsSheet:View {
                 // Uninstall lives here, always visible and apart from the
                 // everyday settings; it opens its own confirmation.
                 Button(role:.destructive) { model.sheet = .uninstall } label: {
-                    Label("Uninstall \(Brand.name)…",systemImage:"trash").font(LauncherStyle.font(13,.medium))
+                    Label(L("Uninstall {0}…",Brand.name),systemImage:"trash").font(LauncherStyle.font(13,.medium))
                 }.buttonStyle(.borderless).foregroundStyle(.red).disabled(model.uninstall == .working)
-                    .help("Move \(Brand.name), Battle.net and Overwatch to the Trash")
+                    .help(L("Move {0}, Battle.net and Overwatch to the Trash",Brand.name))
                 Spacer()
-                Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
+                Button(L("Done")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
             }
         }.font(LauncherStyle.font(14)).padding(.horizontal,32).padding(.vertical,28)
             .frame(width:LauncherStyle.sheetWidth,height:LauncherStyle.largeSheetHeight)
@@ -69,19 +77,20 @@ struct SettingsSheet:View {
             .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in
                 model.checkRunning();microphoneAccess=Microphone.access
             }
-            .alert("Force quit Overwatch and Battle.net?",isPresented:$confirmForceQuit) {
-                Button("Cancel",role:.cancel) {}
-                Button("Force Quit",role:.destructive,action:model.forceQuit)
-            } message: { Text("Use this when the game stops responding. If you’re in a match, you’ll leave it.") }
-            .alert("Repair game files?",isPresented:$confirmRepair) {
-                Button("Cancel",role:.cancel) {}
-                Button("Repair",action:model.repair)
-            } message: { Text("Overwatch and Battle.net must be closed. This reinstalls the files this app adds and refreshes the Windows environment. Overwatch, its settings and your Battle.net sign-in are kept.") }
+            .alert(L("Force quit Overwatch and Battle.net?"),isPresented:$confirmForceQuit) {
+                Button(L("Cancel"),role:.cancel) {}
+                Button(L("Force Quit"),role:.destructive,action:model.forceQuit)
+            } message: { Text(L("Use this when the game stops responding. If you’re in a match, you’ll leave it.")) }
+            .alert(L("Repair game files?"),isPresented:$confirmRepair) {
+                Button(L("Cancel"),role:.cancel) {}
+                Button(L("Repair"),action:model.repair)
+            } message: { Text(L("Overwatch and Battle.net must be closed. This reinstalls the files this app adds and refreshes the Windows environment. Overwatch, its settings and your Battle.net sign-in are kept.")) }
             .sheet(isPresented:$confirmKorean) { KoreanSupportSheet { model.setAdvanced(.koreanSupport,true) } }
-            .alert("Reset display settings?",isPresented:$confirmResetDisplay) {
-                Button("Cancel",role:.cancel) {}
-                Button("Reset",action:model.resetDisplay)
-            } message: { Text("Overwatch will open full screen at \(DisplayResolution.initial(for:main).label)\(model.rememberEachDisplay ? " on this display" : "") the next time it starts. Your graphics quality and FPS settings stay as they are.") }
+            .alert(L("Reset display settings?"),isPresented:$confirmResetDisplay) {
+                Button(L("Cancel"),role:.cancel) {}
+                Button(L("Reset"),action:model.resetDisplay)
+            } message: { Text(model.rememberEachDisplay ? L("Overwatch will open full screen at {0} on this display the next time it starts. Your graphics quality and FPS settings stay as they are.",DisplayResolution.initial(for:main).label)
+                                                         : L("Overwatch will open full screen at {0} the next time it starts. Your graphics quality and FPS settings stay as they are.",DisplayResolution.initial(for:main).label)) }
     }
     @ViewBuilder private var page:some View {
         switch model.settingsTab {
@@ -108,39 +117,52 @@ struct SettingsSheet:View {
             VStack(alignment:.leading,spacing:6) {
                 HStack(alignment:.center,spacing:12) {
                     VStack(alignment:.leading,spacing:2) {
-                        Text("Updates").font(LauncherStyle.font(14,.semibold))
-                        Text("\(status) · Nothing about you or your Mac is sent.").font(LauncherStyle.font(12))
+                        Text(L("Updates")).font(LauncherStyle.font(14,.semibold))
+                        Text(L("{0} · Nothing about you or your Mac is sent.",status)).font(LauncherStyle.font(12))
                             .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                     Spacer(minLength:12)
                     if case .available=model.update {
-                        Button("Update…") { model.sheet = .update }.buttonStyle(.borderedProminent).buttonBorderShape(.capsule).tint(LauncherStyle.accent)
+                        Button(L("Update…")) { model.sheet = .update }.buttonStyle(.borderedProminent).buttonBorderShape(.capsule).tint(LauncherStyle.accent)
                             .foregroundStyle(LauncherStyle.ink)
                     } else {
-                        Button("Check Now") { model.checkForUpdates(manual:true,present:false) }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                        Button(L("Check Now")) { model.checkForUpdates(manual:true,present:false) }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                             .disabled(model.update == .checking || model.update == .installing)
                     }
                 }
                 Divider().padding(.vertical,6)
-                SettingSwitch(title:"Check for updates automatically",isOn:$model.automaticUpdates)
+                SettingSwitch(title:L("Check for updates automatically"),isOn:$model.automaticUpdates)
             }
         }
     }
     private var status:String {
         switch model.update {
-        case .available(let item): return "Version \(item.version) is available"
-        case .upToDate: return "Version \(UpdateCheck.installed) · up to date"
-        case .checking: return "Checking…"
-        case .downloading, .installing: return "Updating…"
-        case .failed: return "Couldn’t reach GitHub; check your connection"
-        default: return "Version \(UpdateCheck.installed)"
+        case .available(let item): return L("Version {0} is available",item.version)
+        case .upToDate: return L("Version {0} · up to date",UpdateCheck.installed)
+        case .checking: return L("Checking…")
+        case .downloading, .installing: return L("Updating…")
+        case .failed: return L("Couldn’t reach GitHub; check your connection")
+        default: return L("Version {0}",UpdateCheck.installed)
         }
     }
     private var battleNet:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
-                SettingSwitch(title:"Open Battle.net when \(Brand.name) opens",detail:"Turn off to start Battle.net yourself with Open Battle.net.",
+                SettingSwitch(title:L("Open Battle.net when {0} opens",Brand.name),detail:L("Turn off to start Battle.net yourself with Open Battle.net."),
                               isOn:$model.autoOpenBattleNet)
+                // Global or China's Battle.net (BattleNetChoice.swift); changing it sets up again.
+                if model.clientInstalled {
+                    Divider().padding(.vertical,6)
+                    HStack(alignment:.center,spacing:12) {
+                        VStack(alignment:.leading,spacing:2) {
+                            Text(L("Battle.net region")).font(LauncherStyle.font(14,.semibold))
+                            Text(model.installedRegion.title).font(LauncherStyle.font(12)).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength:12)
+                        Button(L("Change…")) { model.regionChange = .idle;model.sheet = .changeRegion }
+                            .buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(model.busy || model.uninstall == .working)
+                    }
+                }
             }
         }
     }
@@ -151,8 +173,8 @@ struct SettingsSheet:View {
             VStack(alignment:.leading,spacing:12) {
                 HStack(alignment:.center,spacing:12) {
                     VStack(alignment:.leading,spacing:2) {
-                        Text("Fullscreen resolution").font(LauncherStyle.font(14,.semibold))
-                        Text("Set it in game under Options › Video, or here.")
+                        Text(L("Fullscreen resolution")).font(LauncherStyle.font(14,.semibold))
+                        Text(L("Set it in game under Options › Video, or here."))
                             .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                     Spacer(minLength:8)
@@ -171,31 +193,31 @@ struct SettingsSheet:View {
             if let main {
                 mainDisplay(main)
                 if let note=main.scalingNote {
-                    LauncherNotice(text:note,symbol:"exclamationmark.triangle",action:("Open Display Settings",Self.openDisplaySettings))
+                    LauncherNotice(text:note,symbol:"exclamationmark.triangle",action:(L("Open Display Settings"),Self.openDisplaySettings))
                 }
             }
-            Text("Overwatch opens on the main display, the one with the menu bar. To use another, choose Displays… and set it as the main display.")
+            Text(L("Overwatch opens on the main display, the one with the menu bar. To use another, choose Displays… and set it as the main display."))
                 .font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             Grid(alignment:.leading,horizontalSpacing:12,verticalSpacing:10) {
                 GridRow {
-                    Text("Shape").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                    Text(L("Shape")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
                     HStack(spacing:8) {
-                        choice("16:10 · MacBook",selected:current.isSupported && current.shape == .macBook) {
+                        choice(L("16:10 · MacBook"),selected:current.isSupported && current.shape == .macBook) {
                             model.chooseResolution(DisplayResolution(shape:.macBook,size:current.size))
                         }
-                        choice("16:9 · Monitor & TV",selected:current.isSupported && current.shape == .monitor) {
+                        choice(L("16:9 · Monitor & TV"),selected:current.isSupported && current.shape == .monitor) {
                             model.chooseResolution(DisplayResolution(shape:.monitor,size:current.size))
                         }
                     }
                 }
                 GridRow {
-                    Text("Size").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                    Text(L("Size")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
                     HStack(spacing:8) {
                         ForEach(DisplayResolution.Size.allCases,id:\.self) { size in
                             let option=DisplayResolution(shape:shape,size:size)
                             choice(option.label,selected:current == option,dimmed:main.map { !$0.fits(option) } ?? false) {
                                 model.chooseResolution(option)
-                            }.help(main.map { $0.fits(option) } ?? true ? "" : "Larger than your main display can show")
+                            }.help(main.map { $0.fits(option) } ?? true ? "" : L("Larger than your main display can show"))
                         }
                     }
                 }
@@ -204,14 +226,14 @@ struct SettingsSheet:View {
             HStack(spacing:6) {
                 if model.displaySaved {
                     Image(systemName:"checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
-                    Text("Saved").font(LauncherStyle.font(12,.medium))
+                    Text(L("Saved")).font(LauncherStyle.font(12,.medium))
                     Text("·").foregroundStyle(.secondary)
                 }
-                Text(model.rememberEachDisplay ? "Changes save for this display and apply the next time Overwatch starts." : "Changes save as you choose and apply the next time Overwatch starts.")
+                Text(model.rememberEachDisplay ? L("Changes save for this display and apply the next time Overwatch starts.") : L("Changes save as you choose and apply the next time Overwatch starts."))
                     .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             }.font(LauncherStyle.font(12)).animation(.easeOut(duration:0.15),value:model.displaySaved)
             Divider().padding(.vertical,2)
-            SettingSwitch(title:"Remember a resolution for each display",detail:"Your MacBook screen and each monitor open at the resolution you last used on them.",
+            SettingSwitch(title:L("Remember a resolution for each display"),detail:L("Your MacBook screen and each monitor open at the resolution you last used on them."),
                           isOn:Binding(get:{ model.rememberEachDisplay },set:{ model.setRememberEachDisplay($0) }),disabled:model.busy)
         }
     }
@@ -220,10 +242,10 @@ struct SettingsSheet:View {
             Image(systemName:main.builtIn ? "laptopcomputer" : "display").font(.system(size:20)).foregroundStyle(.secondary).frame(width:30)
             VStack(alignment:.leading,spacing:2) {
                 Text(main.name).font(LauncherStyle.font(14,.medium)).lineLimit(1)
-                Text("Main display · \(main.size) · \(main.aspect)").font(LauncherStyle.font(12)).foregroundStyle(.secondary).monospacedDigit()
+                Text(L("Main display · {0} · {1}",main.size,main.aspect)).font(LauncherStyle.font(12)).foregroundStyle(.secondary).monospacedDigit()
             }
             Spacer(minLength:8)
-            Button("Displays…",action:Self.openDisplaySettings).buttonStyle(.bordered).buttonBorderShape(.capsule).help("Open System Settings › Displays")
+            Button(L("Displays…"),action:Self.openDisplaySettings).buttonStyle(.bordered).buttonBorderShape(.capsule).help(L("Open System Settings › Displays"))
         }.padding(12).background(.primary.opacity(0.04),in:RoundedRectangle(cornerRadius:14,style:.continuous))
             .accessibilityElement(children:.combine)
     }
@@ -242,13 +264,13 @@ struct SettingsSheet:View {
     /// What the player will see with the current resolution on the main display.
     private var caption:String {
         let choice=model.resolution
-        let source=choice.isSupported ? "" : "\(choice.label) was chosen in Overwatch. "
-        guard let main else { return source+"Larger sizes look sharper and lower your frame rate." }
-        return source+main.caption(for:choice)
+        let source=choice.isSupported ? "" : L("{0} was chosen in Overwatch.",choice.label)
+        guard let main else { return sentences(source,L("Larger sizes look sharper and lower your frame rate.")) }
+        return sentences(source,main.caption(for:choice))
     }
     private var resetDisplay:some View {
         LauncherPanel(inset:16) {
-            action("Reset Display Settings…",detail:"If Overwatch opens to a black screen or at the wrong size.",button:"Reset") { confirmResetDisplay=true }
+            action(L("Reset Display Settings…"),detail:L("If Overwatch opens to a black screen or at the wrong size."),button:L("Reset")) { confirmResetDisplay=true }
         }
     }
     /// MetalFX upscaling and its sharpening. Battle.net carries both from when it opens, like
@@ -256,32 +278,32 @@ struct SettingsSheet:View {
     private var upscaling:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
-                SettingSwitch(title:"MetalFX upscaling",detail:"Adds NVIDIA DLSS to Overwatch’s Video options. Recall runs it on Apple’s MetalFX.",
+                SettingSwitch(title:L("MetalFX upscaling"),detail:L("Adds NVIDIA DLSS to Overwatch’s Video options. Recall runs it on Apple’s MetalFX."),
                               isOn:$model.metalFXUpscaling,disabled:model.running != nil) {
-                    Text("New").font(LauncherStyle.font(12,.semibold)).foregroundStyle(LauncherStyle.accent)
+                    Text(L("New")).font(LauncherStyle.font(12,.semibold)).foregroundStyle(LauncherStyle.accent)
                     Button { aboutUpscaling=true } label: {
                         Image(systemName:"info.circle").font(.system(size:14))
                     }.buttonStyle(.borderless).foregroundStyle(.secondary)
-                        .help("About MetalFX upscaling").accessibilityLabel("About MetalFX upscaling")
+                        .help(L("About MetalFX upscaling")).accessibilityLabel(L("About MetalFX upscaling"))
                         .popover(isPresented:$aboutUpscaling,arrowEdge:.bottom) { MetalFXInfo() }
                 }
                 Divider().padding(.vertical,6)
                 HStack(alignment:.center,spacing:12) {
                     VStack(alignment:.leading,spacing:2) {
-                        Text("Sharpening").font(LauncherStyle.font(14,.semibold))
+                        Text(L("Sharpening")).font(LauncherStyle.font(14,.semibold))
                             .foregroundStyle(model.metalFXUpscaling ? .primary : .secondary)
-                        Text(model.metalFXUpscaling ? "Makes the upscaled picture crisper." : "Available with MetalFX upscaling on.")
+                        Text(model.metalFXUpscaling ? L("Makes the upscaled picture crisper.") : L("Available with MetalFX upscaling on."))
                             .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                     Spacer(minLength:12)
-                    Picker("Sharpening",selection:$model.metalFXSharpening) {
-                        Text("Off").tag(AppModel.Sharpening.off)
-                        Text("Low").tag(AppModel.Sharpening.low)
-                        Text("High").tag(AppModel.Sharpening.high)
+                    Picker(L("Sharpening"),selection:$model.metalFXSharpening) {
+                        Text(L("Off")).tag(AppModel.Sharpening.off)
+                        Text(L("Low")).tag(AppModel.Sharpening.low)
+                        Text(L("High")).tag(AppModel.Sharpening.high)
                     }.pickerStyle(.segmented).labelsHidden().fixedSize()
                         .disabled(!model.metalFXUpscaling || model.running != nil)
                 }
-                if let running=model.running { closeFirst(running,"these") }
+                if let running=model.running { closeFirst(running,several:true) }
             }
         }
     }
@@ -290,10 +312,10 @@ struct SettingsSheet:View {
     private var metalHUD:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
-                SettingSwitch(title:"Metal Performance HUD",
-                              detail:"Shows Apple’s performance overlay in Overwatch: FPS, frame times, and when your Mac is compiling shaders, the cause of first-match stutters.",
+                SettingSwitch(title:L("Metal Performance HUD"),
+                              detail:L("Shows Apple’s performance overlay in Overwatch: FPS, frame times, and when your Mac is compiling shaders, the cause of first-match stutters."),
                               isOn:$model.metalHUD,disabled:model.running != nil)
-                if let running=model.running { closeFirst(running,"this") }
+                if let running=model.running { closeFirst(running,several:false) }
             }
         }
     }
@@ -306,16 +328,16 @@ struct SettingsSheet:View {
         let loaded=parts.prefix(count),total=parts.reduce(0) { $0+$1.shaders }
         let shaders=loaded.reduce(0) { $0+$1.shaders }
         let bytes=loaded.reduce(Int64(0)) { $0+$1.bytes }
-        let caption=parts.isEmpty ? "\(Brand.name) builds your shader cache after your first match."
-            : count >= parts.count ? "Loads all \(total.formatted()) shaders."
-            : count == 1 ? "Loads the \(shaders.formatted()) slowest shaders, as earlier versions did. The rest come from macOS’s shader cache."
-            : "Loads \(shaders.formatted()) of \(total.formatted()) shaders, slowest first. The rest come from macOS’s shader cache."
+        let caption=parts.isEmpty ? L("{0} builds your shader cache after your first match.",Brand.name)
+            : count >= parts.count ? L("Loads all {0} shaders.",total.formatted())
+            : count == 1 ? L("Loads the {0} slowest shaders, as earlier versions did. The rest come from macOS’s shader cache.",shaders.formatted())
+            : L("Loads {0} of {1} shaders, slowest first. The rest come from macOS’s shader cache.",shaders.formatted(),total.formatted())
         return LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:10) {
                 HStack(alignment:.center,spacing:12) {
                     VStack(alignment:.leading,spacing:2) {
-                        Text("Shader memory").font(LauncherStyle.font(14,.semibold))
-                        Text("How much of your shader cache Overwatch loads when it starts. All of it means the fewest stutters.")
+                        Text(L("Shader memory")).font(LauncherStyle.font(14,.semibold))
+                        Text(L("How much of your shader cache Overwatch loads when it starts. All of it means the fewest stutters."))
                             .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                     Spacer(minLength:12)
@@ -325,18 +347,18 @@ struct SettingsSheet:View {
                 }.accessibilityElement(children:.combine)
                 if parts.count > 1 {
                     HStack(spacing:10) {
-                        Text("Slowest only").font(LauncherStyle.font(12)).foregroundStyle(.secondary).accessibilityHidden(true)
+                        Text(L("Slowest only")).font(LauncherStyle.font(12)).foregroundStyle(.secondary).accessibilityHidden(true)
                         Slider(value:$shaderParts,in:1...Double(parts.count),step:1) {
-                            Text("Shader memory")
+                            Text(L("Shader memory"))
                         } onEditingChanged: { editing in
                             if !editing { model.chooseShaderMemory(ShaderMemory.choice(loading:Int(shaderParts),of:parts)) }
                         }.labelsHidden().tint(LauncherStyle.accent).accessibilityValue(caption)
-                        Text("All").font(LauncherStyle.font(12)).foregroundStyle(.secondary).accessibilityHidden(true)
+                        Text(L("All")).font(LauncherStyle.font(12)).foregroundStyle(.secondary).accessibilityHidden(true)
                     }
                 }
                 Text(caption).font(LauncherStyle.font(13)).lineSpacing(3).fixedSize(horizontal:false,vertical:true)
-                Text(model.running == .game ? "Applies the next time Overwatch starts. Only lower this if your Mac runs short of memory during matches; it’s meant for Macs with 8 GB."
-                     : "Only lower this if your Mac runs short of memory during matches; it’s meant for Macs with 8 GB.")
+                Text(sentences(model.running == .game ? L("Applies the next time Overwatch starts.") : "",
+                               L("Only lower this if your Mac runs short of memory during matches; it’s meant for Macs with 8 GB.")))
                     .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             }
         }.onAppear {
@@ -345,13 +367,14 @@ struct SettingsSheet:View {
         }
     }
     /// A setting Battle.net carries from when it opens: change it once it's closed.
-    private func closeFirst(_ running:AppModel.Running, _ what:String) -> some View {
+    private func closeFirst(_ running:AppModel.Running, several:Bool) -> some View {
         HStack(spacing:12) {
-            Text(running == .game ? "Quit Overwatch to change \(what)." : "Close Battle.net to change \(what).")
+            Text(running == .game ? (several ? L("Quit Overwatch to change these.") : L("Quit Overwatch to change this."))
+                                  : (several ? L("Close Battle.net to change these.") : L("Close Battle.net to change this.")))
                 .font(LauncherStyle.font(12,.medium)).fixedSize(horizontal:false,vertical:true)
             Spacer(minLength:8)
             if running == .client {
-                Button("Close Battle.net",action:model.closeBattleNet).buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(model.busy)
+                Button(L("Close Battle.net"),action:model.closeBattleNet).buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(model.busy)
             }
         }.padding(.top,6)
     }
@@ -364,32 +387,32 @@ struct SettingsSheet:View {
             VStack(alignment:.leading,spacing:6) {
                 HStack(alignment:.center,spacing:12) {
                     VStack(alignment:.leading,spacing:2) {
-                        Text("Microphone").font(LauncherStyle.font(14,.semibold))
+                        Text(L("Microphone")).font(LauncherStyle.font(14,.semibold))
                         Text(microphoneDetail).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                     Spacer(minLength:12)
-                    Button(microphoneAccess == .allowed ? "Turn Off…" : microphoneAccess == .denied ? "Turn On…" : "Allow…") {
+                    Button(microphoneAccess == .allowed ? L("Turn Off…") : microphoneAccess == .denied ? L("Turn On…") : L("Allow…")) {
                         guard microphoneAccess == .undecided else { NSWorkspace.shared.open(Microphone.privacySettings);return }
                         Task { await Microphone.ask();microphoneAccess=Microphone.access }
                     }.buttonStyle(.bordered).buttonBorderShape(.capsule)
-                        .help(microphoneAccess == .undecided ? "Shows macOS’s microphone prompt" : "Opens Privacy & Security › Microphone in System Settings")
+                        .help(microphoneAccess == .undecided ? L("Shows macOS’s microphone prompt") : L("Opens Privacy & Security › Microphone in System Settings"))
                 }
                 Divider().padding(.vertical,6)
-                note("Bluetooth headphones","With AirPods or other Bluetooth headphones, voice chat uses your Mac’s built-in microphone when it’s available. Their own microphone would switch them to a lower-quality mode for all sound.")
+                note(L("Bluetooth headphones"),L("With AirPods or other Bluetooth headphones, voice chat uses your Mac’s built-in microphone when it’s available. Their own microphone would switch them to a lower-quality mode for all sound."))
             }
         }
     }
     private var microphoneDetail:String {
         switch microphoneAccess {
-        case .allowed: return "On. Your team can hear you in voice chat."
-        case .denied: return "Off. Your team can’t hear you in voice chat."
-        case .undecided: return "Lets your team hear you in voice chat."
+        case .allowed: return L("On. Your team can hear you in voice chat.")
+        case .denied: return L("Off. Your team can’t hear you in voice chat.")
+        case .undecided: return L("Lets your team hear you in voice chat.")
         }
     }
     /// Wine picks the sound output once, as Overwatch starts, and keeps it.
     private var sound:some View {
         LauncherPanel(inset:16) {
-            note("Speakers and headphones","Overwatch keeps the sound output that was selected when it started. Connect your headphones and select them on your Mac before you press Play; to switch later, quit Overwatch and play again.")
+            note(L("Speakers and headphones"),L("Overwatch keeps the sound output that was selected when it started. Connect your headphones and select them on your Mac before you press Play; to switch later, quit Overwatch and play again."))
         }
     }
     private func note(_ title:String,_ text:String) -> some View {
@@ -401,9 +424,9 @@ struct SettingsSheet:View {
     private var troubleshooting:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:10) {
-                Text("Troubleshooting").font(LauncherStyle.font(14,.semibold))
-                action("Force Quit Overwatch & Battle.net",detail:"If the game stops responding.",button:"Force Quit") { confirmForceQuit=true }
-                action("Repair Game Files…",detail:"If Overwatch won’t start. Takes a minute or two.",button:"Repair") { confirmRepair=true }
+                Text(L("Troubleshooting")).font(LauncherStyle.font(14,.semibold))
+                action(L("Force Quit Overwatch & Battle.net"),detail:L("If the game stops responding."),button:L("Force Quit")) { confirmForceQuit=true }
+                action(L("Repair Game Files…"),detail:L("If Overwatch won’t start. Takes a minute or two."),button:L("Repair")) { confirmRepair=true }
             }
         }
     }
@@ -425,15 +448,15 @@ struct SettingsSheet:View {
         let locked=model.running != nil || !model.canChangeAdvanced
         return LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
-                SettingSwitch(title:"Detect network proxy automatically",detail:"Only needed on some work or school networks.",
+                SettingSwitch(title:L("Detect network proxy automatically"),detail:L("Only needed on some work or school networks."),
                               isOn:Binding(get:{ model.proxyAutoDetect },set:{ model.setAdvanced(.proxyAutoDetect,$0) }),disabled:locked)
                 Divider().padding(.vertical,6)
                 // Turning it on asks first (account risk); turning it off doesn't.
-                SettingSwitch(title:"Korean account support (한국 계정 지원)",detail:"For Korean accounts linked to Nexon. Experimental.",
+                SettingSwitch(title:L("Korean account support (한국 계정 지원)"),detail:L("For Korean accounts linked to Nexon. Experimental."),
                               isOn:Binding(get:{ model.koreanSupport },set:{ on in
                                   if on { confirmKorean=true } else { model.setAdvanced(.koreanSupport,false) }
                               }),disabled:locked)
-                if let running=model.running { closeFirst(running,"these") }
+                if let running=model.running { closeFirst(running,several:true) }
             }
         }
     }
@@ -471,17 +494,17 @@ extension SettingSwitch where Accessory == EmptyView {
 /// Settings › Graphics' info button: what MetalFX upscaling is, how Recall provides it, and
 /// how to use it in Overwatch.
 struct MetalFXInfo:View {
-    private let steps=["Close Battle.net, turn on MetalFX upscaling, then press Play.",
-                       "In Overwatch’s Video settings, choose NVIDIA DLSS.",
-                       "Choose a mode. Quality looks closest to full resolution; Performance and Ultra Performance give the most FPS."]
+    private let steps=[L("Close Battle.net, turn on MetalFX upscaling, then press Play."),
+                       L("In Overwatch’s Video settings, choose NVIDIA DLSS."),
+                       L("Choose a mode. Quality looks closest to full resolution; Performance and Ultra Performance give the most FPS.")]
     var body:some View {
         VStack(alignment:.leading,spacing:12) {
-            Text("MetalFX upscaling").font(LauncherStyle.font(15,.semibold)).accessibilityAddTraits(.isHeader)
-            paragraph("What it is.","MetalFX is Apple’s upscaling technology, built into macOS. It runs on your Mac’s GPU.")
-            paragraph("How it works.","Overwatch renders each frame at a lower resolution, which takes less work. MetalFX then rebuilds the frame at full resolution, using detail from earlier frames and how things have moved since. You get a higher frame rate with a picture close to full resolution. Sharpening, if you turn it on, runs after MetalFX.")
-            paragraph("How Recall does it.","Overwatch offers this kind of upscaling as NVIDIA DLSS, and only on NVIDIA graphics cards. With this setting on, Recall presents your Mac to Overwatch as an NVIDIA card, so the DLSS option appears. Overwatch only loads a signed DLSS component, so Recall includes a signed stand-in from the open-source DXMT project, which hands each frame to MetalFX. NVIDIA’s DLSS isn’t used; your Mac does all the work.")
+            Text(L("MetalFX upscaling")).font(LauncherStyle.font(15,.semibold)).accessibilityAddTraits(.isHeader)
+            paragraph(L("What it is."),L("MetalFX is Apple’s upscaling technology, built into macOS. It runs on your Mac’s GPU."))
+            paragraph(L("How it works."),L("Overwatch renders each frame at a lower resolution, which takes less work. MetalFX then rebuilds the frame at full resolution, using detail from earlier frames and how things have moved since. You get a higher frame rate with a picture close to full resolution. Sharpening, if you turn it on, runs after MetalFX."))
+            paragraph(L("How Recall does it."),L("Overwatch offers this kind of upscaling as NVIDIA DLSS, and only on NVIDIA graphics cards. With this setting on, Recall presents your Mac to Overwatch as an NVIDIA card, so the DLSS option appears. Overwatch only loads a signed DLSS component, so Recall includes a signed stand-in from the open-source DXMT project, which hands each frame to MetalFX. NVIDIA’s DLSS isn’t used; your Mac does all the work."))
             VStack(alignment:.leading,spacing:4) {
-                Text("Turning it on.").fontWeight(.semibold)
+                Text(L("Turning it on.")).fontWeight(.semibold)
                 ForEach(steps.indices,id:\.self) { index in
                     HStack(alignment:.firstTextBaseline,spacing:6) {
                         Text("\(index+1).").monospacedDigit()
@@ -489,28 +512,28 @@ struct MetalFXInfo:View {
                     }
                 }
             }.lineSpacing(3)
-            paragraph("Good to know.","While it’s on, Overwatch lists your graphics card as an NVIDIA GeForce RTX 4090, and NVIDIA Reflex has no effect. Turning it off puts your Mac’s GPU back and keeps your other video settings.")
+            paragraph(L("Good to know."),L("While it’s on, Overwatch lists your graphics card as an NVIDIA GeForce RTX 4090, and NVIDIA Reflex has no effect. Turning it off puts your Mac’s GPU back and keeps your other video settings."))
         }.font(LauncherStyle.font(13)).padding(20).frame(width:420,alignment:.leading)
     }
     private func paragraph(_ lead:String,_ text:String) -> some View {
-        Text("\(Text(lead).fontWeight(.semibold).foregroundStyle(.primary)) \(Text(text).foregroundStyle(.secondary))")
+        Text("\(Text(lead).fontWeight(.semibold).foregroundStyle(.primary))\(AppLanguage.gap)\(Text(text).foregroundStyle(.secondary))")
             .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
     }
 }
 /// Asked before Korean account support turns on: what it changes and the account risk, in
-/// English and Korean (Recall is otherwise English-only). Return doesn't confirm.
+/// Recall's language and in Korean (Recall has no Korean interface yet). Return doesn't confirm.
 struct KoreanSupportSheet:View {
     let turnOn:()->Void
     @Environment(\.dismiss) private var dismiss
-    static let english=[
-        "This experimental option lets Overwatch run on Korean accounts linked to Nexon. Recall adds a security certificate the game checks when it starts. Nexon’s anti-cheat also takes screenshots of the game now and then, which Wine on a Mac can’t take, so the game crashes. Recall hands the anti-cheat a blank image instead.",
-        "This doesn’t turn off Nexon’s anti-cheat, but Nexon doesn’t support playing on a Mac, so using it could affect your account."]
+    static var english:[String] { [
+        L("This experimental option lets Overwatch run on Korean accounts linked to Nexon. Recall adds a security certificate the game checks when it starts. Nexon’s anti-cheat also takes screenshots of the game now and then, which Wine on a Mac can’t take, so the game crashes. Recall hands the anti-cheat a blank image instead."),
+        L("This doesn’t turn off Nexon’s anti-cheat, but Nexon doesn’t support playing on a Mac, so using it could affect your account.")] }
     static let korean=[
         "이 실험적 기능을 켜면 넥슨과 연동된 한국 계정으로 오버워치를 플레이할 수 있습니다. Recall은 게임이 시작할 때 확인하는 보안 인증서를 추가합니다. 또한 넥슨의 안티치트는 가끔 게임 화면을 캡처하는데, Mac의 Wine에서는 이 캡처를 할 수 없어 게임이 강제 종료됩니다. 그래서 Recall은 대신 빈 이미지를 전달합니다.",
         "이 기능은 넥슨의 안티치트를 끄지 않습니다. 하지만 넥슨은 Mac에서의 플레이를 지원하지 않으므로, 이 기능을 사용하면 계정에 영향이 있을 수 있습니다."]
     var body:some View {
         VStack(spacing:24) {
-            SheetHero(symbol:"exclamationmark.shield",title:"Turn on Korean account support?",subtitle:"한국 계정 지원을 켜시겠습니까?")
+            SheetHero(symbol:"exclamationmark.shield",title:L("Turn on Korean account support?"),subtitle:"한국 계정 지원을 켜시겠습니까?")
             LauncherPanel(inset:20) {
                 VStack(alignment:.leading,spacing:12) {
                     ForEach(Self.english,id:\.self,content:paragraph)
@@ -519,10 +542,10 @@ struct KoreanSupportSheet:View {
                 }
             }
             HStack(spacing:16) {
-                Button("Cancel 취소") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                Button(L("Cancel 취소")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                     .controlSize(.large).keyboardShortcut(.cancelAction)
                 Spacer()
-                Button { turnOn();dismiss() } label: { Text("Turn On 켜기").font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
+                Button { turnOn();dismiss() } label: { Text(L("Turn On 켜기")).font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
                     .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)
                     .tint(LauncherStyle.accent).foregroundStyle(LauncherStyle.ink)
             }
@@ -534,13 +557,82 @@ struct KoreanSupportSheet:View {
             .frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
     }
 }
+/// Shown when China's Battle.net is chosen (Choose your Battle.net's Continue): how signing in
+/// works and the account risk, as Korean account support asks. Return doesn't confirm.
+struct ChinaBattleNetSheet:View {
+    let confirm:()->Void
+    @Environment(\.dismiss) private var dismiss
+    var body:some View {
+        VStack(spacing:24) {
+            SheetHero(symbol:"exclamationmark.shield",title:L("Set up China’s Battle.net?"),subtitle:L("Battle.net for mainland China, run by NetEase."))
+            LauncherPanel(inset:20) {
+                VStack(alignment:.leading,spacing:12) {
+                    paragraph(L("Signing in."),L("You sign in with your NetEase account in your web browser. If Safari doesn’t take you back to Battle.net, use Chrome or Firefox."))
+                    paragraph(L("Your account."),L("Overwatch in China includes NetEase’s anti-cheat. Recall doesn’t turn it off, but NetEase doesn’t support playing on a Mac, so playing this way could affect your account."))
+                    paragraph(L("Switching later."),L("Accounts don’t carry over between Global and China’s Battle.net. To switch, choose Settings › General › Battle.net region."))
+                }
+            }
+            HStack(spacing:16) {
+                Button(L("Cancel")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                    .controlSize(.large).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button { confirm();dismiss() } label: { Text(L("Continue")).font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
+                    .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)
+                    .tint(LauncherStyle.accent).foregroundStyle(LauncherStyle.ink)
+            }
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
+            .tint(.primary).background { LauncherBackground() }
+    }
+    private func paragraph(_ lead:String,_ text:String) -> some View {
+        Text("\(Text(lead).fontWeight(.semibold).foregroundStyle(.primary))\(AppLanguage.gap)\(Text(text).foregroundStyle(.secondary))")
+            .font(LauncherStyle.font(13)).lineSpacing(3).frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
+    }
+}
+/// Settings › General › Battle.net region › Change: what switching does, then the installation
+/// going to the Trash (AppModel.changeRegion), after which setup starts at Choose your Battle.net
+/// with the other region. Return never switches.
+struct ChangeRegionSheet:View {
+    @Bindable var model:AppModel
+    @Environment(\.dismiss) private var dismiss
+    private var target:BattleNetRegion { model.installedRegion == .china ? .global : .china }
+    var body:some View {
+        VStack(spacing:24) {
+            switch model.regionChange {
+            case .idle, .failed:
+                SheetHero(symbol:"globe",title:target == .china ? L("Switch to China’s Battle.net?") : L("Switch to Global Battle.net?"),
+                          subtitle:L("Accounts don’t carry over between Global and China’s Battle.net, so each needs its own installation."))
+                LauncherPanel {
+                    VStack(alignment:.leading,spacing:10) {
+                        Text(L("{0} moves Overwatch, Battle.net and their settings to the Trash, then sets up again. Overwatch downloads again in Battle.net.",Brand.name))
+                        Text(L("Your Blizzard or NetEase account isn’t affected. Empty the Trash to free the storage."))
+                    }.font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                }
+                if case .failed(let message)=model.regionChange { LauncherNotice(text:message) }
+                else { LauncherNotice(text:L("Battle.net is closed for you if it’s open. Overwatch itself must be quit first.")) }
+                HStack(spacing:16) {
+                    Button(L("Cancel")) { model.regionChange = .idle;dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                        .controlSize(.large).keyboardShortcut(.cancelAction)
+                    Spacer()
+                    // Deliberately not the default action: Return never switches.
+                    Button(role:.destructive) { model.changeRegion() } label: { Text(L("Switch")).font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
+                        .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large).tint(.red)
+                }
+            case .working:
+                SheetHero(symbol:"globe",title:L("Switching Battle.net"),
+                          subtitle:model.stage == L("Closing Battle.net") ? L("Closing Battle.net first.") : L("Moving Overwatch and Battle.net to the Trash."))
+                ProgressView().controlSize(.small).accessibilityLabel(L("Switching Battle.net"))
+            }
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
+            .tint(.primary).background { LauncherBackground() }
+    }
+}
 struct AboutSheet:View {
     @Bindable var model:AppModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     @State private var licenses=false
     private var version:String {
-        "Version \(UpdateCheck.installed) · Build \(UpdateCheck.build)" + (model.release?.distribution == "private-preview" ? " · Private alpha" : "")
+        L("Version {0} · Build {1}",UpdateCheck.installed,String(UpdateCheck.build)) + (model.release?.distribution == "private-preview" ? " · "+L("Private alpha") : "")
     }
     var body:some View {
         VStack(alignment:.leading,spacing:22) {
@@ -555,9 +647,9 @@ struct AboutSheet:View {
             HStack(spacing:12) {
                 RepositoryLink(compact:true)
                 VStack(alignment:.leading,spacing:3) {
-                    Text("Open source. Contributions welcome.").foregroundStyle(.secondary)
-                    Button("Licenses") { licenses=true }.buttonStyle(.plain).underline()
-                        .foregroundStyle(.secondary).help("Show \(Brand.name)’s license and notices")
+                    Text(L("Open source. Contributions welcome.")).foregroundStyle(.secondary)
+                    Button(L("Licenses")) { licenses=true }.buttonStyle(.plain).underline()
+                        .foregroundStyle(.secondary).help(L("Show {0}’s license and notices",Brand.name))
                 }.font(LauncherStyle.font(12))
             }
             // The heading, the repository row and the bottom row stay put; the letter and the
@@ -568,21 +660,21 @@ struct AboutSheet:View {
                     HStack(alignment:.center,spacing:16) {
                         AuthorPhoto(size:64)
                         HStack(spacing:8) {
-                            Text("Author:").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                            Text(L("Author:")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
                             LinkedInLink()
                         }
                     }
                     // The owner's own words (final draft, October 1, 2026).
                     VStack(alignment:.leading,spacing:10) {
-                        Text("Hey there!").font(LauncherStyle.font(13,.semibold))
-                        Text("I’m Josh, I’m a graduate of UCSB’s Master of Technology Management Program and love building tech products! I have also been a part of the PC Overwatch community for 4+ years now and have always been fascinated by the idea of having Overwatch run on Apple Silicon. Mac has historically been known as a terrible place for gamers for many different reasons, but with the introduction of Apple Silicon in 2020, I feel like the tides have shifted and there is no better time than now for developers to refocus attention towards building native games for this platform. Especially with an immense Mac userbase waiting to be captured, I would love to see a day where Blizzard builds a native Overwatch port for Mac, but in the meantime, I hope \(Brand.name) can fill that place. I hope you enjoy :)")
+                        Text(L("Hey there!")).font(LauncherStyle.font(13,.semibold))
+                        Text(L("I’m Josh, I’m a graduate of UCSB’s Master of Technology Management Program and love building tech products! I have also been a part of the PC Overwatch community for 4+ years now and have always been fascinated by the idea of having Overwatch run on Apple Silicon. Mac has historically been known as a terrible place for gamers for many different reasons, but with the introduction of Apple Silicon in 2020, I feel like the tides have shifted and there is no better time than now for developers to refocus attention towards building native games for this platform. Especially with an immense Mac userbase waiting to be captured, I would love to see a day where Blizzard builds a native Overwatch port for Mac, but in the meantime, I hope {0} can fill that place. I hope you enjoy :)",Brand.name))
                             .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
-                        Text("Best,\nJosh").fixedSize(horizontal:false,vertical:true)
+                        Text(L("Best,\nJosh")).fixedSize(horizontal:false,vertical:true)
                     }.font(LauncherStyle.font(13)).accessibilityElement(children:.combine)
                     Divider()
                     VStack(alignment:.leading,spacing:8) {
-                        Text("Support my work").font(LauncherStyle.font(15,.semibold)).accessibilityAddTraits(.isHeader)
-                        Text("If \(Brand.name) has helped you, you can support my work by trying Mosaic News, another free project of mine that shows how different outlets cover the same story, or by buying me a coffee.")
+                        Text(L("Support my work")).font(LauncherStyle.font(15,.semibold)).accessibilityAddTraits(.isHeader)
+                        Text(L("If {0} has helped you, you can support my work by trying Mosaic News, another free project of mine that shows how different outlets cover the same story, or by buying me a coffee.",Brand.name))
                             .font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                     HStack(spacing:10) {
@@ -595,7 +687,7 @@ struct AboutSheet:View {
             HStack(alignment:.bottom,spacing:20) {
                 Text(Brand.trademarks).font(LauncherStyle.font(10.5)).lineSpacing(1).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                 Spacer(minLength:0)
-                Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                Button(L("Done")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                     .controlSize(.large).keyboardShortcut(.defaultAction).closesOnEscape { dismiss() }
             }
         }.padding(28).frame(width:LauncherStyle.sheetWidth,height:LauncherStyle.largeSheetHeight,alignment:.top).tint(.primary)
@@ -614,23 +706,23 @@ struct LicensesSheet:View {
     private var thirdParty:URL? { Bundle.main.url(forResource:"Licenses",withExtension:nil) }
     var body:some View {
         VStack(spacing:24) {
-            SheetHero(symbol:"doc.text",title:"Licenses",
-                      subtitle:"\(Brand.name) is open source under the Apache License 2.0. Wine, DXMT and the other components it includes keep their own licenses.")
+            SheetHero(symbol:"doc.text",title:L("Licenses"),
+                      subtitle:L("{0} is open source under the Apache License 2.0. Wine, DXMT and the other components it includes keep their own licenses.",Brand.name))
             LauncherPanel {
                 ScrollView {
-                    Text(text.isEmpty ? "The license files are missing from this copy of \(Brand.name)." : text)
+                    Text(text.isEmpty ? L("The license files are missing from this copy of {0}.",Brand.name) : text)
                         .font(.system(size:10.5,design:.monospaced)).lineSpacing(2).textSelection(.enabled)
                         .frame(maxWidth:.infinity,alignment:.leading)
                 }.frame(maxHeight:.infinity)
             }.frame(maxHeight:.infinity)
             HStack(spacing:16) {
                 if let thirdParty {
-                    Button("Third-Party Licenses") { NSWorkspace.shared.activateFileViewerSelecting([thirdParty]) }
+                    Button(L("Third-Party Licenses")) { NSWorkspace.shared.activateFileViewerSelecting([thirdParty]) }
                         .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large)
-                        .help("Show the bundled third-party license files in Finder")
+                        .help(L("Show the bundled third-party license files in Finder"))
                 }
                 Spacer()
-                Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                Button(L("Done")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                     .controlSize(.large).keyboardShortcut(.defaultAction).closesOnEscape { dismiss() }
             }
         }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth,height:LauncherStyle.largeSheetHeight)
@@ -644,37 +736,37 @@ struct UninstallSheet:View {
         VStack(spacing:24) {
             switch model.uninstall {
             case .idle, .failed:
-                SheetHero(symbol:"trash",title:"Uninstall \(Brand.name)?",subtitle:"This removes the game, Battle.net and \(Brand.name) from your Mac.")
+                SheetHero(symbol:"trash",title:L("Uninstall {0}?",Brand.name),subtitle:L("This removes the game, Battle.net and {0} from your Mac.",Brand.name))
                 LauncherPanel {
                     VStack(alignment:.leading,spacing:14) {
-                        Text("What will be moved to the Trash").font(LauncherStyle.font(14,.semibold))
+                        Text(L("What will be moved to the Trash")).font(LauncherStyle.font(14,.semibold))
                         VStack(alignment:.leading,spacing:8) {
-                            row("Overwatch", "The installed game and its settings")
-                            row("Battle.net", "The Battle.net app set up by this app")
-                            row(Brand.name, "This app and its setup files")
+                            row(L("Overwatch"), L("The installed game and its settings"))
+                            row(L("Battle.net"), L("The Battle.net app set up by this app"))
+                            row(Brand.name, L("This app and its setup files"))
                         }
                         Divider()
-                        Text("Your Blizzard account and any other Blizzard software on this Mac are not touched. Everything goes to the Trash, so you can put it back from Finder. Storage is freed once you empty the Trash.")
+                        Text(L("Your Blizzard account and any other Blizzard software on this Mac are not touched. Everything goes to the Trash, so you can put it back from Finder. Storage is freed once you empty the Trash."))
                             .font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                     }
                 }
                 if case .failed(let message)=model.uninstall { LauncherNotice(text:message) }
-                else { LauncherNotice(text:"Battle.net is closed for you if it’s open. Overwatch itself must be quit first. Nothing is removed until you choose Uninstall.") }
+                else { LauncherNotice(text:L("Battle.net is closed for you if it’s open. Overwatch itself must be quit first. Nothing is removed until you choose Uninstall.")) }
                 HStack(spacing:16) {
-                    Button("Cancel") { model.uninstall = .idle;dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                    Button(L("Cancel")) { model.uninstall = .idle;dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                         .controlSize(.large).keyboardShortcut(.cancelAction)
                     Spacer()
                     // Deliberately not the default action: Return never uninstalls.
-                    Button(role:.destructive) { model.uninstallEverything() } label: { Text("Uninstall").font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
+                    Button(role:.destructive) { model.uninstallEverything() } label: { Text(L("Uninstall")).font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
                         .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large).tint(.red)
                 }
             case .working:
-                SheetHero(symbol:"trash",title:"Uninstalling",subtitle:model.stage == "Closing Battle.net" ? "Closing Battle.net first." : "Moving Overwatch, Battle.net and this app to the Trash.")
-                ProgressView().controlSize(.small).accessibilityLabel("Uninstalling")
+                SheetHero(symbol:"trash",title:L("Uninstalling"),subtitle:model.stage == L("Closing Battle.net") ? L("Closing Battle.net first.") : L("Moving Overwatch, Battle.net and this app to the Trash."))
+                ProgressView().controlSize(.small).accessibilityLabel(L("Uninstalling"))
             case .done(let appRemoved):
-                SheetHero(symbol:"checkmark",title:"Uninstalled",subtitle:appRemoved ? "Overwatch, Battle.net and this app are in the Trash." : "Overwatch and Battle.net are in the Trash.")
-                LauncherNotice(text:appRemoved ? "Empty the Trash to free the storage. Quit to finish." : "\(Brand.name) couldn’t move itself to the Trash. Quit, then drag \(Brand.name) from Applications to the Trash and empty it.")
-                Button("Quit") { model.quit() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                SheetHero(symbol:"checkmark",title:L("Uninstalled"),subtitle:appRemoved ? L("Overwatch, Battle.net and this app are in the Trash.") : L("Overwatch and Battle.net are in the Trash."))
+                LauncherNotice(text:appRemoved ? L("Empty the Trash to free the storage. Quit to finish.") : L("{0} couldn’t move itself to the Trash. Quit, then drag {0} from Applications to the Trash and empty it.",Brand.name))
+                Button(L("Quit")) { model.quit() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                     .controlSize(.large).keyboardShortcut(.defaultAction)
             }
         }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
@@ -696,12 +788,12 @@ struct UpdateSheet:View {
         VStack(spacing:24) {
             switch model.update {
             case .available(let item):
-                SheetHero(symbol:"arrow.down.circle",title:"Update available",subtitle:"\(Brand.name) \(item.version) is ready to install. You have \(UpdateCheck.installed).")
+                SheetHero(symbol:"arrow.down.circle",title:L("Update available"),subtitle:L("{0} {1} is ready to install. You have {2}.",Brand.name,item.version,UpdateCheck.installed))
                 LauncherPanel {
                     VStack(alignment:.leading,spacing:10) {
-                        Text("What’s new").font(LauncherStyle.font(14,.semibold))
+                        Text(L("What’s new")).font(LauncherStyle.font(14,.semibold))
                         if item.notes.isEmpty {
-                            Text("See the release notes for details.").font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                            Text(L("See the release notes for details.")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
                         }
                         ForEach(item.notes.indices,id:\.self) { index in
                             HStack(alignment:.firstTextBaseline,spacing:8) {
@@ -712,36 +804,36 @@ struct UpdateSheet:View {
                     }
                 }
                 if !model.updateNotice.isEmpty { LauncherNotice(text:model.updateNotice,symbol:"exclamationmark.triangle") }
-                Text("Your game, settings and Battle.net sign-in are kept. The app reopens when it’s done.")
+                Text(L("Your game, settings and Battle.net sign-in are kept. The app reopens when it’s done."))
                     .font(LauncherStyle.font(12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 HStack(spacing:16) {
-                    Button("Later") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
-                    Link("Release Notes",destination:item.page).font(LauncherStyle.font(13))
+                    Button(L("Later")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
+                    Link(L("Release Notes"),destination:item.page).font(LauncherStyle.font(13))
                     Spacer()
-                    LauncherPrimaryAction(title:"Update Now",action:model.installUpdate).keyboardShortcut(.defaultAction).disabled(model.busy)
+                    LauncherPrimaryAction(title:L("Update Now"),action:model.installUpdate).keyboardShortcut(.defaultAction).disabled(model.busy)
                 }
             case .downloading(let fraction):
-                SheetHero(symbol:"arrow.down.circle",title:"Downloading the update",subtitle:"\(Int(fraction*100))% · The app reopens when it’s done.")
-                ProgressView(value:fraction).frame(maxWidth:360).accessibilityLabel("Download progress")
-                Button("Cancel",action:model.cancelUpdateDownload).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large)
+                SheetHero(symbol:"arrow.down.circle",title:L("Downloading the update"),subtitle:L("{0}% · The app reopens when it’s done.",String(Int(fraction*100))))
+                ProgressView(value:fraction).frame(maxWidth:360).accessibilityLabel(L("Download progress"))
+                Button(L("Cancel"),action:model.cancelUpdateDownload).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large)
             case .installing:
-                SheetHero(symbol:"arrow.down.circle",title:"Installing the update",subtitle:"The app will reopen in a moment.")
-                ProgressView().controlSize(.small).accessibilityLabel("Installing")
+                SheetHero(symbol:"arrow.down.circle",title:L("Installing the update"),subtitle:L("The app will reopen in a moment."))
+                ProgressView().controlSize(.small).accessibilityLabel(L("Installing"))
             case .upToDate:
-                SheetHero(symbol:"checkmark",title:"You’re up to date",subtitle:"\(Brand.name) \(UpdateCheck.installed) is the latest version.")
-                Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.defaultAction)
+                SheetHero(symbol:"checkmark",title:L("You’re up to date"),subtitle:L("{0} {1} is the latest version.",Brand.name,UpdateCheck.installed))
+                Button(L("Done")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.defaultAction)
                     .closesOnEscape { dismiss() }
             case .failed(let message):
-                SheetHero(symbol:"exclamationmark",title:"Couldn’t check for updates",subtitle:message)
+                SheetHero(symbol:"exclamationmark",title:L("Couldn’t check for updates"),subtitle:message)
                 HStack(spacing:16) {
-                    Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
+                    Button(L("Done")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
                     Spacer()
-                    LauncherPrimaryAction(title:"Try Again") { model.checkForUpdates(manual:true) }.keyboardShortcut(.defaultAction)
+                    LauncherPrimaryAction(title:L("Try Again")) { model.checkForUpdates(manual:true) }.keyboardShortcut(.defaultAction)
                 }
             case .checking, .idle:
-                SheetHero(symbol:"arrow.triangle.2.circlepath",title:"Checking for updates",subtitle:"Asking GitHub for the latest version.")
-                ProgressView().controlSize(.small).accessibilityLabel("Checking for updates")
-                Button("Cancel") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
+                SheetHero(symbol:"arrow.triangle.2.circlepath",title:L("Checking for updates"),subtitle:L("Asking GitHub for the latest version."))
+                ProgressView().controlSize(.small).accessibilityLabel(L("Checking for updates"))
+                Button(L("Cancel")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
             }
         }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
             .tint(.primary).background { LauncherBackground() }
@@ -763,19 +855,19 @@ struct ShaderUpdateSheet:View {
                     .frame(width:72,height:72)
                     .background(LauncherStyle.accent.opacity(0.14),in:RoundedRectangle(cornerRadius:22,style:.continuous))
                     .accessibilityHidden(true)
-                LauncherHeading(title:"Update your shader cache",
-                                subtitle:"\(Brand.name) 1.4 compiles and loads shaders more efficiently. Update your shader cache once and you’re set.",compact:true)
+                LauncherHeading(title:L("Update your shader cache"),
+                                subtitle:L("{0} 1.4 compiles and loads shaders more efficiently. Update your shader cache once and you’re set.",Brand.name),compact:true)
             }
             LauncherPanel {
                 VStack(alignment:.leading,spacing:14) {
-                    if model.shaderUpdatePending > 0 { fact("bolt.fill","\(model.shaderUpdatePending.formatted()) of your shaders to upgrade") }
-                    fact("clock.fill","About 5–15 minutes, one time only")
-                    fact("laptopcomputer","Keep using your Mac while it runs")
+                    if model.shaderUpdatePending > 0 { fact("bolt.fill",L("{0} of your shaders to upgrade",model.shaderUpdatePending.formatted())) }
+                    fact("clock.fill",L("About 5–15 minutes, one time only"))
+                    fact("laptopcomputer",L("Keep using your Mac while it runs"))
                 }
             }
             VStack(spacing:12) {
-                LauncherPrimaryAction(title:"Update Now",wide:true) { model.updateShaderCache() }.keyboardShortcut(.defaultAction)
-                Button("Maybe later") { dismiss() }.buttonStyle(.borderless).font(LauncherStyle.font(14,.medium))
+                LauncherPrimaryAction(title:L("Update Now"),wide:true) { model.updateShaderCache() }.keyboardShortcut(.defaultAction)
+                Button(L("Maybe later")) { dismiss() }.buttonStyle(.borderless).font(LauncherStyle.font(14,.medium))
                     .foregroundStyle(.secondary).keyboardShortcut(.cancelAction)
             }
         }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
@@ -793,7 +885,7 @@ struct WhatsNewSheet:View {
     @Environment(\.dismiss) private var dismiss
     var body:some View {
         VStack(spacing:24) {
-            SheetHero(symbol:"sparkles",title:"What’s new in \(WhatsNew.version)",subtitle:"\(Brand.name) \(UpdateCheck.installed)")
+            SheetHero(symbol:"sparkles",title:L("What’s new in {0}",WhatsNew.version),subtitle:"\(Brand.name) \(UpdateCheck.installed)")
             LauncherPanel {
                 VStack(alignment:.leading,spacing:16) {
                     ForEach(WhatsNew.items.indices,id:\.self) { index in
@@ -810,9 +902,9 @@ struct WhatsNewSheet:View {
                 }
             }
             HStack(spacing:16) {
-                Link("Release Notes",destination:Brand.releases).font(LauncherStyle.font(13))
+                Link(L("Release Notes"),destination:Brand.releases).font(LauncherStyle.font(13))
                 Spacer()
-                LauncherPrimaryAction(title:"Continue") { dismiss() }.keyboardShortcut(.defaultAction).closesOnEscape { dismiss() }
+                LauncherPrimaryAction(title:L("Continue")) { dismiss() }.keyboardShortcut(.defaultAction).closesOnEscape { dismiss() }
             }
         }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
             .tint(.primary).background { LauncherBackground() }

@@ -30,6 +30,7 @@ EXCLUDE = {
 }
 DOCS = {
     'docs/public-readme.md': 'README.md',
+    'docs/public-readme-zh-CN.md': 'README.zh-CN.md',
     'docs/public-gitignore.md': '.gitignore',
     'docs/public-precommit.md': '.githooks/pre-commit',
     'docs/public-prepush.md': '.githooks/pre-push',
@@ -80,7 +81,11 @@ README_REPLACEMENTS = [
     ('(public-notices.md)', '(THIRD_PARTY_NOTICES.md)'),
     ('(../licenses/PROJECT-APACHE-2.0)', '(LICENSE)'),
     ('(../licenses/PROJECT-NOTICE)', '(NOTICE)'),
+    # The English and Simplified Chinese READMEs link to each other.
+    ('href="public-readme-zh-CN.md"', 'href="README.zh-CN.md"'),
+    ('href="public-readme.md"', 'href="README.md"'),
 ]
+READMES = ('docs/public-readme.md', 'docs/public-readme-zh-CN.md')
 
 
 def tracked():
@@ -112,7 +117,7 @@ def main():
             text = data.decode('utf-8')
             kept = [r for r in previous.get(source, {}).get('replacements', [])
                     if text.count(r['find']) == r['count']]
-            if source == 'docs/public-readme.md':
+            if source in READMES:
                 kept = [{'find': f, 'replace': t, 'count': text.count(f)}
                         for f, t in README_REPLACEMENTS if text.count(f)]
                 todo = [line for line in text.splitlines() if line.startswith('<!-- TODO')]

@@ -30,8 +30,10 @@ enum InstallLocation {
     static func driveName(_ root:URL)->String {
         if let name=try? existing(root).resourceValues(forKeys:[.volumeLocalizedNameKey]).volumeLocalizedName,isAvailable(root) { return name }
         let parts=root.standardizedFileURL.pathComponents
-        return parts.count>2 && parts[1] == "Volumes" ? parts[2] : "your drive"
+        return parts.count>2 && parts[1] == "Volumes" ? parts[2] : L("your drive")
     }
+    /// The location dropdown's icon for a folder on this Mac or on another drive.
+    static func symbol(_ root:URL)->String { isInternal(root) ? "folder" : "externaldrive" }
     static func isInternal(_ root:URL)->Bool {
         (try? existing(root).resourceValues(forKeys:[.volumeIsInternalKey]).volumeIsInternal) ?? true
     }
@@ -47,22 +49,22 @@ enum InstallLocation {
     static func problem(for root:URL)->String? {
         let folder=root.deletingLastPathComponent()
         let keys:Set<URLResourceKey>=[.volumeIsReadOnlyKey,.volumeIsLocalKey,.volumeTypeNameKey,.volumeLocalizedFormatDescriptionKey,.volumeSupportsCaseSensitiveNamesKey,.volumeLocalizedNameKey,.isUbiquitousItemKey]
-        guard let values=try? folder.resourceValues(forKeys:keys) else { return "That folder can’t be read. Choose another location." }
-        let drive=values.volumeLocalizedName ?? "This drive"
-        if values.volumeIsLocal == false { return "Network drives aren’t supported. Choose a drive connected to this Mac." }
-        if values.volumeIsReadOnly == true { return "“\(drive)” is read-only. Choose another location." }
+        guard let values=try? folder.resourceValues(forKeys:keys) else { return L("That folder can’t be read. Choose another location.") }
+        let drive=values.volumeLocalizedName ?? L("This drive")
+        if values.volumeIsLocal == false { return L("Network drives aren’t supported. Choose a drive connected to this Mac.") }
+        if values.volumeIsReadOnly == true { return L("“{0}” is read-only. Choose another location.",drive) }
         if !["apfs","hfs"].contains((values.volumeTypeName ?? "").lowercased()) {
-            return "“\(drive)” is formatted as \(values.volumeLocalizedFormatDescription ?? "an unsupported format"). Choose a drive formatted as APFS or Mac OS Extended. Reformatting a drive in Disk Utility erases it."
+            return L("“{0}” is formatted as {1}. Choose a drive formatted as APFS or Mac OS Extended. Reformatting a drive in Disk Utility erases it.",drive,values.volumeLocalizedFormatDescription ?? L("an unsupported format"))
         }
-        if values.volumeSupportsCaseSensitiveNames == true { return "“\(drive)” is case-sensitive, which Windows games don’t support. Choose another drive." }
+        if values.volumeSupportsCaseSensitiveNames == true { return L("“{0}” is case-sensitive, which Windows games don’t support. Choose another drive.",drive) }
         let path=folder.path
         if values.isUbiquitousItem == true || path.contains("/Library/Mobile Documents/") || path.contains("/Library/CloudStorage/") {
-            return "Folders synced to iCloud Drive or other cloud storage aren’t supported. Choose a folder that isn’t synced."
+            return L("Folders synced to iCloud Drive or other cloud storage aren’t supported. Choose a folder that isn’t synced.")
         }
         let fm=FileManager.default
         if fm.fileExists(atPath:root.path),!fm.fileExists(atPath:root.appendingPathComponent(".overwatch-2-mac-owner").path),
            (try? fm.contentsOfDirectory(atPath:root.path))?.isEmpty == false {
-            return "That “\(folderName)” folder already contains other files. Choose another location."
+            return L("That “{0}” folder already contains other files. Choose another location.",folderName)
         }
         return nil
     }

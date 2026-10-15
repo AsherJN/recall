@@ -20,16 +20,38 @@ ROOT=Path(__file__).resolve().parents[1]
 # The bundle and executable name players see; Brand.swift holds the in-app
 # copy. The bundle identifier keeps its original value so updates carry over.
 APP_NAME='Recall'
-APP_BUILD='66'
+APP_BUILD='67'
 # Overwatch's voice chat runs under this app's microphone permission (Microphone.swift); the
 # hardened runtime gives an app signed without the entitlement silence, with no prompt.
 ENTITLEMENTS={'com.apple.security.device.audio-input':True}
 MICROPHONE_USAGE='Voice chat in Overwatch uses your microphone.'
+COPYRIGHT='Independent community project. Not affiliated with or endorsed by Blizzard Entertainment or Apple.'
+# Recall's languages besides English (Localization.swift): app/Resources/Localizations/<language>.json
+# holds the translations of the app's strings (Localizable) and of these Info.plist strings.
+LOCALIZATIONS=ROOT/'app/Resources/Localizations'
+INFO_STRINGS={'NSMicrophoneUsageDescription':MICROPHONE_USAGE,'NSHumanReadableCopyright':COPYRIGHT}
 RESOURCES=('MosaicLogo.png','LinkedInMark.png','AuthorPhoto.jpg','Wordmark.png','WordmarkDark.png')
 def run(*args):subprocess.run([str(a) for a in args],check=True)
+def localize(resources):
+    """English (the strings in the code), then each translation as <language>.lproj with
+    Localizable.strings and InfoPlist.strings, binary property lists as Xcode writes them.
+    Returns the languages, for CFBundleLocalizations."""
+    languages=['en']
+    (resources/'en.lproj').mkdir()
+    (resources/'en.lproj/Localizable.strings').write_bytes(plistlib.dumps({},fmt=plistlib.FMT_BINARY))
+    for source in sorted(LOCALIZATIONS.glob('*.json')):
+        table=json.loads(source.read_text())
+        folder=resources/(source.stem+'.lproj');folder.mkdir()
+        (folder/'Localizable.strings').write_bytes(plistlib.dumps(table['Localizable'],fmt=plistlib.FMT_BINARY))
+        info={key:table['InfoPlist'][english] for key,english in INFO_STRINGS.items() if english in table['InfoPlist']}
+        (folder/'InfoPlist.strings').write_bytes(plistlib.dumps(info,fmt=plistlib.FMT_BINARY))
+        languages.append(source.stem)
+    return languages
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
-def build(output,workspace,runtime_archive,icon=None,identity=None):
+def build(output,workspace,runtime_archive,icon=None,identity=None,preview=False):
     release=json.loads((ROOT/'app/Resources/release.json').read_text())
+    # A preview build (never released) accepts --preview-state and the other preview arguments.
+    if preview:release['distribution']='private-preview'
     if sha(runtime_archive)!=release['runtimeSHA256']:raise ValueError('Unqualified runtime archive')
     # The worker rejects any file its manifest does not list, so check before shipping.
     if check_archive(runtime_archive)['version']!=release['runtimeVersion']:raise ValueError('Runtime archive names a different version')
@@ -60,7 +82,7 @@ def build(output,workspace,runtime_archive,icon=None,identity=None):
     run('/usr/bin/clang','-ffile-prefix-map='+str(ROOT)+'=/ow2-source','-arch','x86_64','-mmacosx-version-min='+MINIMUM_MACOS,source,'-o',rosetta/'MacOS/RosettaCheck')
     (rosetta/'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'org.overwatch2mac.rosetta-check','CFBundleExecutable':'RosettaCheck','CFBundleName':'Rosetta Check','CFBundlePackageType':'APPL','LSUIElement':True,'LSMinimumSystemVersion':MINIMUM_MACOS}))
     run('/bin/cp','-c',runtime_archive,resources/release['runtimeArchive'])
-    shutil.copy2(ROOT/'app/Resources/release.json',resources/'release.json')
+    (resources/'release.json').write_text(json.dumps(release,indent=2,ensure_ascii=False)+'\n')
     shutil.copy2(ROOT/'docs/candidate-parity-contract.json',resources/'candidate-parity-contract.json')
     # Notices from the actual reviewed runtime; kept readable without extraction.
     runtime_dir=runtime_archive.with_suffix('').with_suffix('')
@@ -71,12 +93,13 @@ def build(output,workspace,runtime_archive,icon=None,identity=None):
     shutil.copy2(ROOT/'licenses/PROJECT-LINKS-NOTICE.txt',resources/'PROJECT-LINKS-NOTICE.txt')
     for name in RESOURCES:
         shutil.copy2(ROOT/'app/Resources'/name,resources/name)
+    languages=localize(resources)
     if icon:shutil.copy2(icon,resources/'AppIcon.icns')
     else:
         iconset=output.parent/'AppIcon.iconset'
         run('/usr/bin/swift',ROOT/'scripts/app_icon.swift',ROOT/'app/Resources/AppIcon.png',iconset)
         run('/usr/bin/iconutil','-c','icns',iconset,'-o',resources/'AppIcon.icns')
-    (output/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'org.overwatch2mac.launcher','CFBundleExecutable':APP_NAME,'CFBundleName':APP_NAME,'CFBundleDisplayName':APP_NAME,'CFBundlePackageType':'APPL','CFBundleShortVersionString':release['appVersion'],'CFBundleVersion':APP_BUILD,'CFBundleIconFile':'AppIcon','LSMinimumSystemVersion':MINIMUM_MACOS,'NSHighResolutionCapable':True,'LSMultipleInstancesProhibited':True,'NSPrincipalClass':'NSApplication','NSMicrophoneUsageDescription':MICROPHONE_USAGE,'NSHumanReadableCopyright':'Independent community project. Not affiliated with or endorsed by Blizzard Entertainment or Apple.'}))
+    (output/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'org.overwatch2mac.launcher','CFBundleExecutable':APP_NAME,'CFBundleName':APP_NAME,'CFBundleDisplayName':APP_NAME,'CFBundlePackageType':'APPL','CFBundleShortVersionString':release['appVersion'],'CFBundleVersion':APP_BUILD,'CFBundleIconFile':'AppIcon','LSMinimumSystemVersion':MINIMUM_MACOS,'NSHighResolutionCapable':True,'LSMultipleInstancesProhibited':True,'NSPrincipalClass':'NSApplication','NSMicrophoneUsageDescription':MICROPHONE_USAGE,'NSHumanReadableCopyright':COPYRIGHT,'CFBundleDevelopmentRegion':'en','CFBundleLocalizations':languages}))
     for binary in (helpers/'libpipeline_prepare.dylib',helpers/'pipeline-prepare',helpers/'pipeline-warm'):
         run('/usr/bin/strip','-S','-x',binary)
     if identity:
@@ -86,8 +109,9 @@ def build(output,workspace,runtime_archive,icon=None,identity=None):
             entitlements=Path(folder)/'app.entitlements';entitlements.write_bytes(plistlib.dumps(ENTITLEMENTS))
             run('/usr/bin/codesign','--force','--options','runtime','--timestamp','--entitlements',entitlements,'--sign',identity,output)
         run('/usr/bin/codesign','--verify','--deep','--strict',output)
-    proof={'app_version':release['appVersion'],'app_build':APP_BUILD,'candidate_contract_sha256':sha(resources/'candidate-parity-contract.json'),'runtime_sha256':sha(resources/release['runtimeArchive']),'pipeline_sources':{name:sha(native/name) for name in sources},'source_files':{str(p.relative_to(ROOT)):sha(p) for p in sorted((ROOT/'app').rglob('*')) if p.is_file()},'signed':bool(identity),'files':{str(p.relative_to(output)):sha(p) for p in output.rglob('*') if p.is_file()}}
+    proof={'app_version':release['appVersion'],'app_build':APP_BUILD,'distribution':release['distribution'],'languages':languages,'candidate_contract_sha256':sha(resources/'candidate-parity-contract.json'),'runtime_sha256':sha(resources/release['runtimeArchive']),'pipeline_sources':{name:sha(native/name) for name in sources},'source_files':{str(p.relative_to(ROOT)):sha(p) for p in sorted((ROOT/'app').rglob('*')) if p.is_file()},'signed':bool(identity),'files':{str(p.relative_to(output)):sha(p) for p in output.rglob('*') if p.is_file()}}
     output.with_suffix('.build.json').write_text(json.dumps(proof,indent=2)+'\n')
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',type=Path,required=True);p.add_argument('--workspace',type=Path,default=ROOT/'runtime/phase-2');p.add_argument('--runtime-archive',type=Path,default=ROOT/'runtime/phase-2/artifacts/phase2-20260927.1.tar.gz');p.add_argument('--icon',type=Path);p.add_argument('--identity')
-    a=p.parse_args();build(a.output.resolve(),a.workspace.resolve(),a.runtime_archive.resolve(),a.icon,a.identity)
+    p.add_argument('--preview',action='store_true',help='private-preview build: accepts --preview-state; never release it')
+    a=p.parse_args();build(a.output.resolve(),a.workspace.resolve(),a.runtime_archive.resolve(),a.icon,a.identity,a.preview)

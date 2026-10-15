@@ -21,7 +21,8 @@ CONNECTIONS = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings\Conn
 CERTIFICATE_KEY = r'Software\Microsoft\SystemCertificates\Root\Certificates\A99D5B79E9F1CDA59CDAB6373169D5353F5874C6'
 DIRECT = bytes.fromhex('460000000100000001000000' + '00' * 24)
 
-# Wine's reg.exe, as far as Recall uses it: add a binary value, delete a value or a key.
+# Wine's reg.exe, as far as Recall uses it: add a binary value, delete a value or a key, and
+# import a REGEDIT4 file of REG_MULTI_SZ values (saved as Wine saves them: str(7):"a\0b\0").
 FAKE_REG = r'''import json, os, re, sys
 from pathlib import Path
 prefix=Path(os.environ['WINEPREFIX'])
@@ -29,12 +30,36 @@ with open(prefix.parent/'reg-calls.json','a') as log: log.write(json.dumps(sys.a
 if sys.argv[1]!='reg.exe': sys.exit(0)  # the Battle.net installer
 if (prefix.parent/'reg-fails').exists(): sys.exit(1)
 args=sys.argv[2:]
-action,key=args[0],args[1]
-assert key.startswith('HKCU\\'), key
-key=key[5:]
 path=prefix/'user.reg'
 text=path.read_text()
 sections=re.split(r'\n(?=\[)',text)
+if args[0]=='import':
+    source=Path(args[1][2:].replace('\\','/'))
+    with open(prefix.parent/'reg-imports.txt','ab') as log: log.write(source.read_bytes())
+    key,values=None,{}
+    for line in source.read_text().splitlines():
+        if line.startswith('['):
+            assert line.startswith('[HKEY_CURRENT_USER\\'), line
+            key=line[len('[HKEY_CURRENT_USER\\'):-1]
+        elif line.startswith('"'):
+            name,data=line[1:].split('"=',1)
+            assert data.startswith('hex(7):'), data
+            # A REGEDIT4 file's hex(7) data is its own single-byte text, as Wine reads it.
+            raw=bytes.fromhex(data[7:].replace(',',''))
+            assert raw.endswith(b'\0\0'), raw
+            values[name]='str(7):"'+''.join(n+'\\0' for n in raw.decode('ascii').split('\0') if n)+'"'
+    header='['+key.replace('\\','\\\\')+']'
+    for i,s in enumerate(sections):
+        if s.lower().startswith(header.lower()+' '):
+            body=[l for l in s.split('\n') if not any(l.startswith('"%s"='%n) for n in values)]
+            sections[i]='\n'.join(body).rstrip('\n')+'\n'+''.join('"%s"=%s\n'%item for item in values.items())
+            break
+    else: sections.append(header+' 1\n#time=1\n'+''.join('"%s"=%s\n'%item for item in values.items()))
+    path.write_text('\n'.join(s.rstrip('\n')+'\n' for s in sections))
+    sys.exit(0)
+action,key=args[0],args[1]
+assert key.startswith('HKCU\\'), key
+key=key[5:]
 header='['+key.replace('\\','\\\\')+']'
 def ours(section): return section.lower().startswith(header.lower()+' ') or section.lower().startswith(header.lower()+'\n')
 def below(section): return section.lower().startswith(header[:-1].lower()+'\\\\')

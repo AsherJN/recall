@@ -90,6 +90,6 @@ static BOOL configureKoreanCertificate(NSString *engine, BOOL enabled, BOOL keep
 }
 // The Korean build installs Nexon's anti-cheat beside the game (grap64.dll and grap\).
 static BOOL nexonBuild(void) {
-    NSString *game=join(root,@"environment/drive_c/Program Files (x86)/Overwatch/_retail_");
+    NSString *game=gameFolder();
     return [fm fileExistsAtPath:join(game,@"grap64.dll")] || [fm fileExistsAtPath:join(game,@"grap")];
 }

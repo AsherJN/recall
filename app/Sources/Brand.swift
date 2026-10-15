@@ -7,7 +7,7 @@ import Foundation
 // and keep their original values, so installations and updates carry over.
 enum Brand {
     static let name="Recall"
-    static let tagline="Making Overwatch playable on Apple Silicon."
+    static var tagline:String { L("Making Overwatch playable on Apple Silicon.") }
     static let repositoryPath="AsherJN/recall"
     static let repository=URL(string:"https://github.com/\(repositoryPath)")!
     static let releases=URL(string:"https://github.com/\(repositoryPath)/releases")!
@@ -20,7 +20,7 @@ enum Brand {
     /// The community server's permanent invite (unlimited uses); it lands in #start-here.
     /// Opens in the browser, which hands it to the Discord app when one is installed.
     static let discord=URL(string:"https://discord.gg/pexasKezCn")!
-    static let trademarks="Not affiliated with or endorsed by Blizzard Entertainment or Apple. Overwatch is a trademark of Blizzard Entertainment, Inc. Mac is a trademark of Apple Inc."
+    static var trademarks:String { L("Not affiliated with or endorsed by Blizzard Entertainment or Apple. Overwatch is a trademark of Blizzard Entertainment, Inc. Mac is a trademark of Apple Inc.") }
 
     // The author's links. Mosaic News opens on the App Store, where every Mac that runs
     // Recall can install it. Each placement keeps its own call, so App Store Connect

@@ -32,7 +32,7 @@ def build(output, headers, defines=()):
         '-Wno-deprecated-declarations','-ffile-prefix-map='+str(ROOT)+'=/ow2-source','-mmacosx-version-min='+MINIMUM_MACOS,'-I',str(headers),*('-D'+d for d in defines),
         str(ROOT/'scripts/portable_setup.m'),'-framework','Foundation','-framework','AppKit','-framework','CoreAudio','-framework','IOKit','-framework','Metal','-larchive','-o',str(output)],check=True)
     output.with_suffix('.build.json').write_text(json.dumps({'headers':HEADERS,
-        'sources':{name:hashlib.sha256((ROOT/'scripts'/name).read_bytes()).hexdigest() for name in ('portable_setup.m','portable_session.h','portable_preferences.h','portable_retina.h','portable_voice.h','portable_network.h','portable_korea.h','portable_metalfx.h','portable_diagnostics.h','candidate_contract.generated.h')},
+        'sources':{name:hashlib.sha256((ROOT/'scripts'/name).read_bytes()).hexdigest() for name in ('portable_setup.m','portable_session.h','portable_preferences.h','portable_retina.h','portable_voice.h','portable_network.h','portable_region.h','portable_korea.h','portable_metalfx.h','portable_diagnostics.h','candidate_contract.generated.h')},
         'binary_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),
         'links':'System Foundation, CoreAudio, IOKit, Metal, CommonCrypto and libarchive; no bundled Python'},indent=2)+'\n')
 
