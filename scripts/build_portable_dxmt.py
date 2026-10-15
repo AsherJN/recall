@@ -60,6 +60,14 @@ def build(work,tools,jobs,signing=SIGNING):
     check=subprocess.run(['git','apply','--check',str(metalfx)],cwd=source,capture_output=True)
     if check.returncode==0:run('git','apply',metalfx,cwd=source)
     else:run('git','apply','--reverse','--check',metalfx,cwd=source)
+    # 1.4: the shader pack holds every learned pipeline. Its archives are hashed in pieces instead
+    # of read whole, have no total size limit, and can be prepared in batches that each add one
+    # (DXMT_PIPELINE_CACHE_APPEND); learning goes on until the disk is nearly full.
+    shader_pack=ROOT/'patches/dxmt-shader-pack.patch'
+    if hashlib.sha256(shader_pack.read_bytes()).hexdigest()!='26b64c19f499e4e7fbccfa9402ab0bdd5a0e383af2d5098aa00c9abcd7182773':raise ValueError('Accepted shader pack patch changed')
+    check=subprocess.run(['git','apply','--check',str(shader_pack)],cwd=source,capture_output=True)
+    if check.returncode==0:run('git','apply',shader_pack,cwd=source)
+    else:run('git','apply','--reverse','--check',shader_pack,cwd=source)
     wrapper=source/'portable_metal.py'
     shutil.copy2(ROOT/'scripts/portable_metal.py',wrapper);wrapper.chmod(0o755)
     env=os.environ.copy();env.pop('DESTDIR',None)
@@ -83,6 +91,7 @@ def build(work,tools,jobs,signing=SIGNING):
         'patch_sha256':hashlib.sha256(patch.read_bytes()).hexdigest(),'files':files,
         'performance_patch_sha256':hashlib.sha256(performance.read_bytes()).hexdigest(),
         'metalfx_patch_sha256':hashlib.sha256(metalfx.read_bytes()).hexdigest(),'nvapi':NVAPI,
+        'shader_pack_patch_sha256':hashlib.sha256(shader_pack.read_bytes()).hexdigest(),
         'nvngx_certificate_sha256':hashlib.sha256((signing/sign_pe.LEAF).read_bytes()).hexdigest(),
         'portable_metal_patch_sha256':hashlib.sha256(portable_patch.read_bytes()).hexdigest(),
         'portable_metal_wrapper_sha256':hashlib.sha256(wrapper.read_bytes()).hexdigest(),

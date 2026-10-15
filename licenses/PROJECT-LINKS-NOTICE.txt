@@ -78,3 +78,15 @@ the project's own measurements.
 MetalFXResults.png SHA-256: 6134cbfa9676bc38e5e6bfe2c2f5fc3228e75370c2caf1ee4acb1bc7431a34c3
 MetalFXPixels.png SHA-256: 9d82b2c18c24b2a7e5f517ae4321c740e854a6576725289316bd56b36dcaaa94
 MetalFXChain.png SHA-256: 6f41debaf566b679dd1f9d0a4b1834d6e410a94cb446bb783a9593c429983528
+
+Discord community-link mark
+
+The vector in app/Sources/ProjectLinks.swift is transcribed from the Discord
+symbol ("Clyde") on Discord's brand page, used only to link to the project's
+Discord server, as Discord's Brand Guidelines permit.
+Source: https://discord.com/branding
+Retrieved: 2026-10-14
+Source SHA-256: 5ba72d750bae7120e9b4d5dc0ec13b227e496a20df38944a607c1408c57d2891
+DISCORD and the Clyde logo are trademarks of Discord Inc. No affiliation or
+endorsement is implied. Trademark rights are not granted under this project's
+source-code license.

@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Ask on Discord
+    url: https://discord.gg/pexasKezCn
+    about: Get help, compare setups, and find other Mac Overwatch players.
   - name: Fix a common problem
     url: https://github.com/AsherJN/recall/blob/main/docs/SUPPORT.md#if-something-goes-wrong
     about: Quick fixes for black screens, displays, Battle.net and more.

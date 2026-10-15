@@ -6,6 +6,7 @@ import Darwin
     let model=AppModel()
     var window:NSWindow!
     var lockFD:Int32 = -1
+    var outsideClicks:Any?
     func applicationDidFinishLaunching(_ notification:Notification) {
         // NSWorkspace normally routes repeat opens to this process. The file lock
         // also covers explicit `open -n` and copies of the same app bundle.
@@ -22,8 +23,23 @@ import Darwin
         NSAppleEventManager.shared().setEventHandler(self,andSelector:#selector(quitEvent(_:withReplyEvent:)),forEventClass:AEEventClass(kCoreEventClass),andEventID:AEEventID(kAEQuitApplication))
         window=NSWindow(contentRect:NSRect(x:0,y:0,width:600,height:800),styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
         window.title=Brand.name;window.isReleasedWhenClosed=false
-        window.titlebarAppearsTransparent=true;window.minSize=NSSize(width:540,height:620)
-        window.contentView=NSHostingView(rootView:SetupView(model:model));window.center();window.makeKeyAndOrderFront(nil)
+        // The hosting view sets the window's minimum from its SwiftUI content's, which a scroll
+        // view puts near zero (it replaced minSize with 0 × 32), so the content states it too.
+        let minimum=LauncherStyle.windowMinimum
+        window.titlebarAppearsTransparent=true;window.minSize=minimum
+        window.contentView=NSHostingView(rootView:SetupView(model:model).frame(minWidth:minimum.width,minHeight:minimum.height))
+        window.center();window.makeKeyAndOrderFront(nil)
+        // A click on the window outside its open pop-up closes it, as Esc would
+        // (AppModel.closeSheetFromOutside), and goes no further. Only in the content area (the
+        // title bar still drags the window), not while something sits on the pop-up (a nested
+        // sheet or an alert), and not while an info popover is open: that click closes it.
+        outsideClicks=NSEvent.addLocalMonitorForEvents(matching:.leftMouseDown) { [weak self] event in
+            guard let self,let window=self.window,event.window === window,let sheet=window.attachedSheet,
+                  sheet.attachedSheet == nil,window.contentLayoutRect.contains(event.locationInWindow),
+                  !NSApp.windows.contains(where:{ $0.isVisible && NSStringFromClass(type(of:$0)).contains("Popover") })
+            else { return event }
+            return self.model.closeSheetFromOutside() ? nil : event
+        }
         NSApp.mainMenu=menu();NSApp.activate(ignoringOtherApps:true)
     }
     func menu()->NSMenu {
@@ -88,7 +104,7 @@ import Darwin
     @objc func checkForUpdates() { show();model.checkForUpdates(manual:true) }
     @objc func whatsNew() { show();model.sheet = .whatsNew }
     @objc func releaseNotes() { NSWorkspace.shared.open(Brand.releases) }
-    @objc func reportProblem() { NSWorkspace.shared.open(Brand.issues) }
+    @objc func reportProblem() { show();model.openHelp(.support) }
     @objc func repository() { NSWorkspace.shared.open(Brand.repository) }
     @objc func forceQuit() {
         show()
@@ -109,10 +125,16 @@ import Darwin
     @objc func settings() { show();model.sheet = .settings }
     @objc func about() { show();model.sheet = .about }
     @objc func uninstall() { show();model.sheet = .uninstall }
-    @objc func help() { show();model.makeReport();model.sheet = .help }
+    @objc func help() { show();model.openHelp() }
     func show() { window?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true) }
-    func applicationDidBecomeActive(_ notification:Notification) { model.syncSession();model.checkIfDue() }
-    func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows:Bool)->Bool { show();model.reopen();return false }
+    func applicationDidBecomeActive(_ notification:Notification) { model.syncSession();model.checkIfDue();model.checkAfterMatch() }
+    /// A Dock click. With the window closed it reopens Recall, as opening the app does, so
+    /// Battle.net opens if that's set. A window that was only behind other apps or minimized
+    /// just comes forward: a player there may have closed Battle.net on purpose.
+    func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows:Bool)->Bool {
+        let reopening = !hasVisibleWindows && window?.isMiniaturized != true
+        show();model.reopen(openingBattleNet:reopening);return false
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication)->Bool { false }
     func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply {
         if model.quitsNow { return .terminateNow }

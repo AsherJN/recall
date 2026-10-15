@@ -55,6 +55,98 @@ struct RepositoryLink:View {
     }
 }
 
+// Offline vector from the Discord symbol on Discord's brand page. See PROJECT-LINKS-NOTICE.txt.
+private struct DiscordMark:Shape {
+    func path(in rect:CGRect)->Path {
+        var p=Path()
+        p.move(to:CGPoint(x:37.1937,y:0))
+        p.addCurve(to:CGPoint(x:35.6541,y:3.1139),control1:CGPoint(x:36.6265,y:1.0071),control2:CGPoint(x:36.1172,y:2.0489))
+        p.addCurve(to:CGPoint(x:22.365,y:3.1139),control1:CGPoint(x:31.2553,y:2.4541),control2:CGPoint(x:26.7754,y:2.4541))
+        p.addCurve(to:CGPoint(x:20.8254,y:0),control1:CGPoint(x:21.9136,y:2.0489),control2:CGPoint(x:21.3926,y:1.0071))
+        p.addCurve(to:CGPoint(x:8.8444,y:3.6927),control1:CGPoint(x:16.6928,y:0.7061),control2:CGPoint(x:12.6644,y:1.9447))
+        p.addCurve(to:CGPoint(x:0.2435,y:36.6146),control1:CGPoint(x:1.2737,y:14.9098),control2:CGPoint(x:-0.7752,y:25.8374))
+        p.addCurve(to:CGPoint(x:14.9333,y:43.9884),control1:CGPoint(x:4.677,y:39.8906),control2:CGPoint(x:9.6431,y:42.391))
+        p.addCurve(to:CGPoint(x:18.0819,y:38.9182),control1:CGPoint(x:16.1256,y:42.391),control2:CGPoint(x:17.179,y:40.6893))
+        p.addCurve(to:CGPoint(x:13.1274,y:36.5567),control1:CGPoint(x:16.3687,y:38.2815),control2:CGPoint(x:14.7133,y:37.4828))
+        p.addCurve(to:CGPoint(x:14.3429,y:35.6422),control1:CGPoint(x:13.5442,y:36.2557),control2:CGPoint(x:13.9493,y:35.9432))
+        p.addCurve(to:CGPoint(x:43.711,y:35.6422),control1:CGPoint(x:23.6384,y:40.0179),control2:CGPoint(x:34.4039,y:40.0179))
+        p.addCurve(to:CGPoint(x:44.9264,y:36.5567),control1:CGPoint(x:44.1046,y:35.9663),control2:CGPoint(x:44.5097,y:36.2789))
+        p.addCurve(to:CGPoint(x:39.9604,y:38.9298),control1:CGPoint(x:43.3405,y:37.4943),control2:CGPoint(x:41.6852,y:38.2815))
+        p.addCurve(to:CGPoint(x:43.109,y:44),control1:CGPoint(x:40.8633,y:40.7009),control2:CGPoint(x:41.9167,y:42.4025))
+        p.addCurve(to:CGPoint(x:57.7988,y:36.6377),control1:CGPoint(x:48.3992,y:42.4025),control2:CGPoint(x:53.3653,y:39.9137))
+        p.addCurve(to:CGPoint(x:49.1748,y:3.7043),control1:CGPoint(x:59.0027,y:24.1358),control2:CGPoint(x:55.7383,y:13.3007))
+        p.addCurve(to:CGPoint(x:37.2053,y:0.0232),control1:CGPoint(x:45.3663,y:1.9563),control2:CGPoint(x:41.3379,y:0.7177))
+        p.addLine(to:CGPoint(x:37.1937,y:0))
+        p.closeSubpath()
+        p.move(to:CGPoint(x:19.3784,y:29.9816))
+        p.addCurve(to:CGPoint(x:14.1461,y:24.1821),control1:CGPoint(x:16.5192,y:29.9816),control2:CGPoint(x:14.1461,y:27.3886))
+        p.addCurve(to:CGPoint(x:19.3669,y:18.371),control1:CGPoint(x:14.1461,y:20.9755),control2:CGPoint(x:16.4266,y:18.371))
+        p.addCurve(to:CGPoint(x:24.5992,y:24.1821),control1:CGPoint(x:22.3071,y:18.371),control2:CGPoint(x:24.6455,y:20.9871))
+        p.addCurve(to:CGPoint(x:19.3784,y:29.9816),control1:CGPoint(x:24.5529,y:27.377),control2:CGPoint(x:22.2956,y:29.9816))
+        p.closeSubpath()
+        p.move(to:CGPoint(x:38.6639,y:29.9816))
+        p.addCurve(to:CGPoint(x:33.4431,y:24.1821),control1:CGPoint(x:35.7931,y:29.9816),control2:CGPoint(x:33.4431,y:27.3886))
+        p.addCurve(to:CGPoint(x:38.6639,y:18.371),control1:CGPoint(x:33.4431,y:20.9755),control2:CGPoint(x:35.7236,y:18.371))
+        p.addCurve(to:CGPoint(x:43.8846,y:24.1821),control1:CGPoint(x:41.6042,y:18.371),control2:CGPoint(x:43.9309,y:20.9871))
+        p.addCurve(to:CGPoint(x:38.6639,y:29.9816),control1:CGPoint(x:43.8383,y:27.377),control2:CGPoint(x:41.581,y:29.9816))
+        p.closeSubpath()
+        let scale=min(rect.width/59,rect.height/44)
+        return p.applying(CGAffineTransform(scaleX:scale,y:scale))
+    }
+}
+/// The community server, in Discord's own blurple with its mark, so it is clear where it
+/// leads. On every main-window screen, above the support card; a link, never a pop-up.
+struct DiscordLink:View {
+    static let blurple=Color(red:0x58/255,green:0x65/255,blue:0xF2/255)  // #5865F2, Discord's brand colour; white text 4.6:1
+    static let hover=Color(red:0x47/255,green:0x52/255,blue:0xC4/255)  // #4752C4, Discord's own hover shade
+    @Environment(\.openURL) private var openURL
+    var body:some View {
+        Button { openURL(Brand.discord) } label: {
+            HStack(spacing:14) {
+                DiscordMark().fill(.white).frame(width:30,height:23).accessibilityHidden(true)
+                VStack(alignment:.leading,spacing:3) {
+                    Text("Join the \(Brand.name) Discord").font(LauncherStyle.font(15,.semibold))
+                    Text("Get help, compare setups, and find other Mac Overwatch players.")
+                        .font(LauncherStyle.font(12)).fixedSize(horizontal:false,vertical:true)
+                }
+                Spacer(minLength:0)
+                Image(systemName:"arrow.up.right").font(.system(size:12,weight:.semibold)).accessibilityHidden(true)
+            }.foregroundStyle(.white).multilineTextAlignment(.leading)
+                .padding(.horizontal,18).padding(.vertical,13).frame(maxWidth:.infinity,minHeight:60,alignment:.leading)
+        }.buttonStyle(DiscordLinkStyle())
+            .accessibilityLabel("Join the \(Brand.name) Discord").accessibilityHint("Opens the invite in your browser")
+            .help("Open the \(Brand.name) Discord invite in your browser")
+    }
+}
+/// Help's footer, beside Report a Problem: questions go to the community, bugs to GitHub.
+struct DiscordHelpLink:View {
+    var body:some View {
+        Link(destination:Brand.discord) {
+            Label {
+                Text("Ask on Discord").font(LauncherStyle.font(13,.medium))
+            } icon: {
+                DiscordMark().fill(DiscordLink.blurple).frame(width:17,height:13).accessibilityHidden(true)
+            }
+        }.buttonStyle(.borderless).help("Open the \(Brand.name) Discord invite in your browser")
+    }
+}
+private struct DiscordLinkStyle:ButtonStyle {
+    func makeBody(configuration:Configuration)->some View { DiscordLinkBody(configuration:configuration) }
+}
+private struct DiscordLinkBody:View {
+    let configuration:ButtonStyleConfiguration
+    @Environment(\.isFocused) private var focused
+    @State private var hovering=false
+    var body:some View {
+        let shape=RoundedRectangle(cornerRadius:16,style:.continuous)
+        configuration.label
+            .background(hovering ? DiscordLink.hover : DiscordLink.blurple,in:shape)
+            .overlay { shape.strokeBorder(focused ? Color.primary.opacity(0.8) : .white.opacity(0.18),lineWidth:focused ? 2 : 1) }
+            .contentShape(shape)
+            .opacity(configuration.isPressed ? 0.75 : 1)
+            .onHover { hovering=$0 }
+    }
+}
 // Loaded once, offline; progress timer updates never decode these assets again.
 private enum ProjectArtwork {
     static let mosaic=load("MosaicLogo","png")
@@ -104,7 +196,7 @@ struct MosaicButton:View {
     var body:some View {
         Link(destination:Brand.mosaic(placement)) {
             HStack(spacing:8) {
-                Text("Try").font(LauncherStyle.font(13,.semibold))
+                Text("Get").font(LauncherStyle.font(13,.semibold))
                 Image(nsImage:ProjectArtwork.mosaic).renderingMode(.original).resizable().scaledToFit()
                     .frame(width:100,height:19).accessibilityHidden(true)
                 Image(systemName:"arrow.up.right").font(.system(size:9,weight:.semibold)).accessibilityHidden(true)
@@ -113,7 +205,7 @@ struct MosaicButton:View {
                 .overlay { Capsule().strokeBorder(.white.opacity(0.18),lineWidth:1) }
                 .contentShape(Capsule())
         }.buttonStyle(.plain).environment(\.colorScheme,.light)
-            .accessibilityLabel("Try Mosaic News, free").help("Open Mosaic News in your browser. It’s free; no account needed.")
+            .accessibilityLabel("Get Mosaic News, free on the App Store").help("Open Mosaic News on the App Store. It’s free.")
     }
 }
 struct CoffeeButton:View {
@@ -159,15 +251,13 @@ struct SupportCard:View {
         VStack(alignment:.leading,spacing:12) {
             HStack(alignment:.top,spacing:12) {
                 AuthorPhoto(size:40)
-                Text("Hey there! I’m Josh, the creator of \(Brand.name). If you’re enjoying it and want to support my continued work, here are two ways to help :)")
+                Text("Hey there! I’m Josh, the creator of \(Brand.name). If you’re enjoying it, you can support my work by trying Mosaic News, my free news app, or buying me a coffee :)")
                     .font(LauncherStyle.font(13)).lineSpacing(3).fixedSize(horizontal:false,vertical:true)
             }
             HStack(spacing:10) {
                 MosaicButton(placement:placement)
                 CoffeeButton()
             }
-            Text("Mosaic News is another free project of mine: a news app designed to be the most transparent, customizable, and privacy-focused way to follow the news, aggregating reporting from 850+ publishers across the political spectrum to help readers “see the whole picture.”")
-                .font(LauncherStyle.font(12)).lineSpacing(2).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
         }.padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.surface(scheme),in:RoundedRectangle(cornerRadius:LauncherStyle.radius,style:.continuous))
             .overlay { RoundedRectangle(cornerRadius:LauncherStyle.radius,style:.continuous).strokeBorder(.primary.opacity(0.06),lineWidth:1) }

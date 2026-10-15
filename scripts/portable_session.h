@@ -52,15 +52,26 @@ static BOOL focusSession(NSArray *processes) {
     return NO;
 }
 static void prepareAfterSession(void);
+static NSString *monitorPath(void);
+static pid_t setupProcess(NSString *file);
 static void watchClient(void) {
     // The monitor has its own lock. It never holds setup.lock during a match. A launch
     // may still be stopping the last session's monitor (stopAfterSession).
     int fd=open(join(root,@"launch-monitor.lock").fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
     if(fd<0)fail(@"monitor_lock_failed");
     flock(lockFD,LOCK_UN);close(lockFD);lockFD=-1;
-    BOOL locked=NO;for(int i=0;i<200 && !(locked=flock(fd,LOCK_EX|LOCK_NB)==0);i++)[NSThread sleepForTimeInterval:0.1];
+    // One started by prepare-shaders waits out a monitor from before 1.4 (stopMonitor).
+    BOOL locked=NO;for(int i=0;i<(monitorPrepareNow ? 1800 : 200) && !cancelRequested && !(locked=flock(fd,LOCK_EX|LOCK_NB)==0);i++)[NSThread sleepForTimeInterval:0.1];
     if(!locked){close(fd);return;}
-    NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:1800],*seen=nil,*clientSeen=[NSDate date];BOOL played=NO;
+    [[NSString stringWithFormat:@"%d",getpid()] writeToFile:monitorPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // The app names this preparation the one-time shader cache update while the marker is there.
+    if(monitorPrepareNow && !cancelRequested) {
+        [@"" writeToFile:join(root,@"cache/shader-update") atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        prepareAfterSession();
+    }
+    // It waits for a match as long as Battle.net stays open (until two minutes after it
+    // closes), up to half a day, so a match started late is still prepared after.
+    NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:12*3600],*seen=nil,*clientSeen=[NSDate date];BOOL played=NO;
     while(deadline.timeIntervalSinceNow>0 && !cancelRequested) {
         NSArray *rows=sessionProcesses();NSMutableArray *clients=[NSMutableArray array];BOOL game=NO;
         for(NSDictionary *p in rows) {if([p[@"kind"] isEqual:@"game"])game=YES;else[clients addObject:p];}
@@ -78,6 +89,7 @@ static void watchClient(void) {
         [NSThread sleepForTimeInterval:2];
     }
     if(played && !cancelRequested)prepareAfterSession();
+    if(setupProcess(monitorPath())==0)[fm removeItemAtPath:monitorPath() error:nil];
     close(fd);
 }
 /* The displays as Wine takes them in when its session starts: each online display, which

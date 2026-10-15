@@ -5,7 +5,7 @@ import Observation
 @MainActor @Observable
 final class AppModel {
     enum Screen: String, CaseIterable { case welcome, moveApp, checking, readyToInstall, preparing, launching, installer, ready, running, driveMissing, failure }
-    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew; var id: String { rawValue } }
+    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate; var id: String { rawValue } }
     enum UninstallState: Equatable { case idle, working, done(appRemoved: Bool), failed(String) }
     enum UpdateState: Equatable { case idle, checking, upToDate, available(AvailableUpdate), downloading(Double), installing, failed(String) }
     var uninstall: UninstallState = .idle
@@ -62,6 +62,96 @@ final class AppModel {
     var settingsTab=SettingsTab(rawValue:UserDefaults.standard.string(forKey:"settingsTab") ?? "") ?? .general {
         didSet { UserDefaults.standard.set(settingsTab.rawValue,forKey:"settingsTab") }
     }
+    /// Recall is preparing what the last match learned (AfterMatch). Checked when the player
+    /// comes back to the window, then every few seconds while it lasts (SetupView).
+    var preparingAfterMatch=false
+    var afterMatchProgress:AfterMatch.Progress?
+    /// What's preparing is the one-time shader cache update (Update Now) rather than a match's.
+    var updatingShaderCache=false
+    /// Update Now was chosen: its monitor starts within seconds, or once one from before 1.4
+    /// has ended (up to three minutes; portable_session.h), and the status shows meanwhile.
+    private var shaderUpdateRequested:Date?
+    /// The ready screen, or the running screen with only Battle.net open: the match is over.
+    var showsAfterMatch:Bool { preparingAfterMatch && (screen == .ready || (screen == .running && existingName != "Overwatch")) }
+    func checkAfterMatch() {
+        guard !isPreview && clientInstalled else { return }
+        let running=AfterMatch.running(root:root)
+        if running || shaderUpdateRequested.map({ Date().timeIntervalSince($0) > 240 }) == true { shaderUpdateRequested=nil }
+        preparingAfterMatch=running || shaderUpdateRequested != nil
+        updatingShaderCache=preparingAfterMatch && (shaderUpdateRequested != nil || AfterMatch.updating(root:root))
+        afterMatchProgress=preparingAfterMatch ? AfterMatch.progress(root:root) : nil
+    }
+    /// After updating to 1.4, once, following What's New: shaders Overwatch has used that aren't
+    /// prepared yet get a one-time update now, or after the next match (ShaderUpdateSheet).
+    var shaderUpdatePending=0
+    /// A click on the main window outside the open pop-up (Main.swift): closes it where Esc
+    /// does, the way its own button does, so onDisappear hooks still run. Never during an
+    /// update's download or install, or once uninstalling has started.
+    func closeSheetFromOutside()->Bool {
+        guard let open=sheet else { return false }
+        switch open {
+        case .update:
+            if case .downloading=update { return false }
+            if update == .installing { return false }
+        case .uninstall:
+            switch uninstall { case .idle, .failed: uninstall = .idle; default: return false }
+        default: break
+        }
+        sheet=nil
+        return true
+    }
+    func whatsNewClosed() {
+        guard !isPreview,clientInstalled,UserDefaults.standard.string(forKey:"shaderUpdateOffered") == nil else { return }
+        UserDefaults.standard.set(WhatsNew.version,forKey:"shaderUpdateOffered")
+        let record=ShaderRecord.read(root:root)
+        guard let learned=record["learned"] as? Int,let ready=record["ready"] as? Int,learned > ready,!AfterMatch.running(root:root) else { return }
+        shaderUpdatePending=learned-ready
+        DispatchQueue.main.async { self.sheet = .shaderUpdate }
+    }
+    func updateShaderCache() {
+        sheet=nil
+        guard !isPreview else { return }
+        shaderUpdateRequested=Date();checkAfterMatch()
+        Task {
+            while busy { try? await Task.sleep(for:.milliseconds(200)) }
+            busy=true
+            defer { busy=false }
+            do {
+                let gameMode=UserDefaults.standard.object(forKey:"gameMode") as? Bool ?? true
+                _ = try await service.run("prepare-shaders",gameMode ? [] : ["--game-mode","0"])
+            } catch {
+                shaderUpdateRequested=nil;checkAfterMatch()
+                notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
+            }
+        }
+    }
+    /// Settings › Graphics › Shader memory (ShaderMemory): the worker's choice, or the default.
+    var shaderMemory:String {
+        if let saved=state["shader_memory"] as? String,ShaderMemory.valid(saved) { return saved }
+        return ShaderMemory.defaultChoice
+    }
+    /// The shader cache's parts, read when Settings shows them.
+    var shaderPack=[ShaderMemory.Part]()
+    func loadShaderPack() {
+        guard !isPreview else { return }
+        shaderPack=ShaderMemory.parts(root:root)
+    }
+    func chooseShaderMemory(_ choice:String) {
+        guard choice != shaderMemory,ShaderMemory.valid(choice) else { return }
+        state["shader_memory"]=choice
+        guard !isPreview && state["active_runtime"] != nil else { return }
+        Task {
+            // Another step (a launch, say) may be using the worker; save right after it.
+            while busy { try? await Task.sleep(for:.milliseconds(200)) }
+            busy=true
+            defer { busy=false }
+            do { _ = try await service.run("shader-memory",["--limit",choice]) }
+            catch { notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message }
+        }
+    }
+    /// The Help tab shown, and a topic to open with it (see openHelp).
+    var helpTab=HelpTab.questions
+    var helpTopic:String?
     var updatingComponents=false
     private var updateCheck: Task<AvailableUpdate?,Error>?
     private var lastUpdateCheck: Date?
@@ -458,6 +548,13 @@ final class AppModel {
         let args=CommandLine.arguments
         if let i=args.firstIndex(of:"--preview-macos"),args.indices.contains(i+1) { macOS=args[i+1] }
         if args.contains("--preview-korean") { nexonBuild=true;state["korean_support"]=false }
+        preparingAfterMatch=args.contains("--preview-after-match") || args.contains("--preview-shader-update")
+        updatingShaderCache=args.contains("--preview-shader-update")
+        afterMatchProgress=preparingAfterMatch ? AfterMatch.Progress(ready:3072,learned:17767) : nil
+        // Settings › Graphics › Shader memory with the owner's pack of 2026-10-14.
+        shaderUpdatePending=16911
+        shaderPack=[121822128,172324720,179897488,202437120,196611296,166780256,162372016,89495856,166106304,139503200,32750624].enumerated()
+            .map { ShaderMemory.Part(bytes:Int64($0.element),shaders:[856,1171,1257,1870,2048,2048,2048,2048,2048,2048,455][$0.offset]) }
         // The launching screen's "Preparing graphics" details: preparing, done, first,
         // or the warm-up after an update (warming, warmed).
         if value == .launching,let i=args.firstIndex(of:"--preview-graphics"),args.indices.contains(i+1) { previewGraphics(args[i+1]) }
@@ -471,6 +568,13 @@ final class AppModel {
     private func previewGraphics(_ kind:String) {
         stage="Preparing graphics";graphics=GraphicsProgress()
         if kind == "first" { graphics.update(["phase":"done","learned":0,"ready":0,"added":0]);return }
+        // A launch since 1.3.1: the numbers, with what the last match's preparation added
+        // (ready), or before any preparation has finished (unprepared).
+        if kind == "ready" || kind == "unprepared" {
+            let ready=kind == "ready" ? 856 : 0
+            graphics.update(["phase":"learned","learned":kind == "ready" ? 17767 : 7941,"ready":ready])
+            graphics.update(["phase":"done","ready":ready,"added":kind == "ready" ? 48 : 0,"warmed":0]);stage="Opening Battle.net";return
+        }
         graphics.update(["phase":"learned","learned":8168,"ready":1154])
         if kind == "warming" || kind == "warmed" {
             var generator=SystemRandomNumberGenerator()
@@ -667,7 +771,7 @@ final class AppModel {
     func launch() { perform { try await self.openClient() } }
     /// Opens Battle.net (or uses the open one) and has it start Overwatch.
     func play() { perform { try await self.openClient(play:true) } }
-    func reopen() {
+    func reopen(openingBattleNet:Bool) {
         guard !busy && clientInstalled && sheet == nil else { return }
         perform {
             // A Dock click while Battle.net or Overwatch already runs shows this
@@ -675,7 +779,7 @@ final class AppModel {
             let sessions=try await self.service.run("session")
             let processes=sessions.last?["processes"] as? [[String:Any]] ?? []
             if !processes.isEmpty { self.showSession(processes);return }
-            guard self.autoOpenBattleNet else { return }
+            guard openingBattleNet && self.autoOpenBattleNet else { return }
             try await self.openClient()
         }
     }
@@ -697,9 +801,46 @@ final class AppModel {
         }
     }
     private func showSession(_ processes:[[String:Any]]) {
-        guard !processes.isEmpty else { screen = .ready;return }
+        guard !processes.isEmpty else { screen = .ready;gameWindowHidden=false;return }
         existingName=processes.contains { $0["kind"] as? String == "game" } ? "Overwatch" : "Battle.net"
         screen = .running
+        watchExits(processes)
+        let game=processes.first { $0["kind"] as? String == "game" }.flatMap { ($0["pid"] as? NSNumber)?.int32Value }
+        guard let game else { gameWindowHidden=false;return }
+        Task {
+            let windows=await LaunchReadiness.visibleWindows()
+            gameWindowHidden = !windows.contains { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == game }
+        }
+    }
+    /// Overwatch's window isn't on screen while it runs. After Exit to Desktop the game
+    /// minimizes its window and keeps working, invisible, for 10–80 seconds before it quits
+    /// (QA, 2026-10-14); a minimized game or one on another desktop looks the same, so the
+    /// running screen offers Force Quit (GameClosingNote) and never ends the game itself.
+    var gameWindowHidden=false
+    /// macOS reports when each session process ends (a process dispatch source), so the
+    /// running screen returns to Play the moment Overwatch or Battle.net quits. Nothing polls
+    /// while the game runs.
+    @ObservationIgnored private var exitWatches:[Int32:DispatchSourceProcess]=[:]
+    private func watchExits(_ processes:[[String:Any]]) {
+        for process in processes {
+            guard let pid=(process["pid"] as? NSNumber)?.int32Value,exitWatches[pid] == nil else { continue }
+            let source=DispatchSource.makeProcessSource(identifier:pid_t(pid),eventMask:.exit,queue:.main)
+            source.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.sessionProcessEnded(pid) } }
+            exitWatches[pid]=source;source.resume()
+            // A process that ended before the source was set up never reports.
+            if kill(pid,0) != 0 && errno == ESRCH { sessionProcessEnded(pid) }
+        }
+    }
+    private func sessionProcessEnded(_ pid:Int32) {
+        guard let source=exitWatches.removeValue(forKey:pid) else { return }
+        source.cancel()
+        Task {
+            while busy { try? await Task.sleep(for:.milliseconds(250)) }
+            syncSession()
+            // The worker starts preparing shaders within about ten seconds of the game quitting.
+            for _ in 0..<3 { checkAfterMatch();try? await Task.sleep(for:.seconds(6)) }
+            checkAfterMatch()
+        }
     }
     /// Settings: what runs now. The screen answers at once; a session check confirms it
     /// unless another step is using the worker.
@@ -807,6 +948,14 @@ final class AppModel {
             }
         }
     }
+    /// Help, on the tab that fits: Troubleshooting after a failed step, otherwise the
+    /// questions; Report a Problem… asks for Support. The report is made fresh.
+    func openHelp(_ tab:HelpTab?=nil, topic:String?=nil) {
+        makeReport()
+        helpTab=tab ?? (screen == .failure ? .troubleshooting : .questions)
+        helpTopic=topic
+        sheet = .help
+    }
     /// The Korean card's Open Settings: Settings on its Advanced tab.
     func openAdvancedSettings() { settingsTab = .advanced;sheet = .settings }
     /// Troubleshooting's way back from a resolution that shows a black or wrong-sized
@@ -856,7 +1005,7 @@ final class AppModel {
         let size={ (size:CGSize) in "\(Int(size.width))x\(Int(size.height))" }
         let display:Any=MainDisplay.current.map { ["type":$0.builtIn ? "built_in" : "external","points":size($0.points),"drawn":size($0.drawn),
                                                     "native":$0.native.map(size) ?? "unknown","refresh_hz":Int($0.refresh.rounded())] } ?? "none"
-        let data:[String:Any]=["schema":1,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? metalFXSharpening.rawValue : "off","install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode]
+        let data:[String:Any]=["schema":1,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? metalFXSharpening.rawValue : "off","install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode,"shaders":ShaderRecord.read(root:root),"shader_memory":shaderMemory]
         report=String(data:(try? JSONSerialization.data(withJSONObject:data,options:[.prettyPrinted,.sortedKeys])) ?? Data(),encoding:.utf8) ?? ""
     }
     func saveReport() {

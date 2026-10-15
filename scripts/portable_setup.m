@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <signal.h>
 #include <unistd.h>
 #include "candidate_contract.generated.h"
@@ -24,6 +25,10 @@ static NSFileManager *fm;
 static NSString *root;
 static int lockFD = -1;
 static BOOL monitorMode;
+// The game app a session's monitor passes on to preparation after the match (watch --game-app).
+static NSString *monitorGameApp;
+// A monitor started by prepare-shaders (watch --prepare-now 1) prepares before it watches.
+static BOOL monitorPrepareNow;
 static BOOL ownedPreparation;
 static volatile sig_atomic_t childPID;
 static volatile sig_atomic_t cancelRequested;
@@ -410,8 +415,18 @@ static NSString *helperPath(NSString *name) {
  * the session's monitor (watch) stays until the game has closed and runs ow2-pipeline
  * --after-session; a launch only keeps what was learned. Meanwhile the monitor's pid is
  * in cache/after-session.pid, and a launch stops it first. The helper stops its tool and
- * keeps the cache it had; the next session's monitor prepares again. */
+ * keeps the cache it had; the next session's monitor prepares again. Since 1.4 every learned
+ * pipeline is prepared, in batches published one at a time, so a first preparation can run
+ * long: it has hours, and what a stopped one finished stays. */
 static NSString *afterSessionPath(void) { return join(root,@"cache/after-session.pid"); }
+// A session's monitor names itself here while it runs (from 1.4).
+static NSString *monitorPath(void) { return join(root,@"cache/monitor.pid"); }
+// The pid a file names, if it is one of this app's workers (not a pid since reused).
+static pid_t setupProcess(NSString *file) {
+    pid_t pid=[[NSString stringWithContentsOfFile:file encoding:NSUTF8StringEncoding error:nil] intValue];
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    return pid>0 && pid!=getpid() && proc_pidpath(pid,path,sizeof(path))>0 && [@(path) hasSuffix:@"/ow2-setup"] ? pid : 0;
+}
 static void stopAfterSession(void) {
     int fd=open(join(root,@"launch-monitor.lock").fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
     if(fd<0)return;
@@ -421,6 +436,27 @@ static void stopAfterSession(void) {
     kill(pid,SIGTERM);
     for(int i=0;i<600 && flock(fd,LOCK_EX|LOCK_NB);i++)[NSThread sleepForTimeInterval:0.05];
     close(fd);
+}
+/* prepare-shaders: a monitor waiting for a match is ended; the one prepare-shaders starts
+ * prepares now, then watches the session in its place. One already preparing is left to
+ * finish (NO). A monitor from before 1.4 names no pid; it ends two minutes after Battle.net
+ * closes, and the new one waits that long for its lock (watchClient). */
+static BOOL stopMonitor(void) {
+    int fd=open(join(root,@"launch-monitor.lock").fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
+    if(fd<0)return YES;
+    if(flock(fd,LOCK_EX|LOCK_NB)==0) {close(fd);return YES;}
+    if(setupProcess(afterSessionPath())) {close(fd);return NO;}
+    pid_t pid=setupProcess(monitorPath());
+    if(pid>0)kill(pid,SIGTERM);
+    for(int i=0;i<600 && pid>0 && flock(fd,LOCK_EX|LOCK_NB);i++)[NSThread sleepForTimeInterval:0.05];
+    close(fd);return YES;
+}
+// The session's monitor, told which app Overwatch runs as: with Game Mode, preparation
+// after the match also warms that app's own shader cache with every learned pipeline.
+static NSArray *watchArguments(NSString *engine, BOOL gameMode) {
+    NSString *gameApp=join(engine,@"lib/wine/game-mode/Overwatch.app");
+    BOOL app=gameMode && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")];
+    return app ? @[@"watch",@"--root",root,@"--game-app",gameApp] : @[@"watch",@"--root",root];
 }
 static void prepareAfterSession(void) {
     NSString *pipeline=helperPath(@"ow2-pipeline");
@@ -434,9 +470,9 @@ static void prepareAfterSession(void) {
         if(-checked.timeIntervalSinceNow<10) {[NSThread sleepForTimeInterval:0.25];continue;}
         checked=[NSDate date];
         if(gameRunning())continue;
-        NSTask *p=task(pipeline,@[@"--after-session",root],nil,@"pipeline-after-session.log");
+        NSTask *p=task(pipeline,monitorGameApp ? @[@"--after-session",root,monitorGameApp] : @[@"--after-session",root],nil,@"pipeline-after-session.log");
         childPID=p.processIdentifier;
-        NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:900];
+        NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:4*3600];
         while(p.running && !cancelRequested && deadline.timeIntervalSinceNow>0) {
             [NSThread sleepForTimeInterval:0.25];
             // A game started from Battle.net meanwhile must find the cache free.
@@ -454,6 +490,7 @@ static void prepareAfterSession(void) {
         attempt++;
     }
     [fm removeItemAtPath:afterSessionPath() error:nil];
+    [fm removeItemAtPath:join(root,@"cache/shader-update") error:nil];
 }
 static void closeClient(NSString *gameRunning);
 // Ends whatever is left of the Wine session (the update Agent, Wine's own services).
@@ -544,9 +581,29 @@ static void (^graphicsFeed(NSString *log))(void) {
         }
     };
 }
+/* Settings › Graphics › Shader memory: how much of the shader pack Overwatch loads when it
+ * starts. pipeline_cache.c reads cache/pipelines/load.json as the game starts: "all", "first"
+ * (the first part only: the slowest pipelines, as earlier versions loaded) or a number of MiB.
+ * All of it on every Mac unless the player chose less (the owner's call, 2026-10-14: players
+ * on 8 GB Macs play at low settings and can lower it themselves). */
+static BOOL validShaderMemory(id value) {
+    return [value isKindOfClass:NSString.class] && ([value isEqual:@"all"] || [value isEqual:@"first"] || matches(value,@"^[1-9][0-9]{0,6}$"));
+}
+static NSString *shaderMemoryChoice(void) {
+    NSString *saved=state()[@"shader_memory"];
+    return validShaderMemory(saved) ? saved : @"all";
+}
+static void applyShaderMemory(void) {
+    NSString *choice=shaderMemoryChoice(),*folder=join(root,@"cache/pipelines");
+    mkdirs(folder);
+    id limit=[choice isEqual:@"all"] || [choice isEqual:@"first"] ? choice : @(choice.longLongValue);
+    writeJSON(@{@"schema":@1,@"limit":limit},join(folder,@"load.json"));
+}
 static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx, NSString *sharpening) {
     requireRosetta();
     NSString *engine=runtime();if(![fm fileExistsAtPath:clientPath()])fail(@"battlenet_not_installed");
+    // Before anything else: an Overwatch started from a Battle.net already open reads it too.
+    applyShaderMemory();
     NSArray *existing=sessionProcesses();
     if(diagnostic && existing.count)fail(@"close_game_before_maintenance");
     // Battle.net's own command for starting Overwatch ("Pro"). A running client
@@ -567,7 +624,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
         if(!game)configureVoiceMicrophone(engine,nil,YES,NO);
         // Battle.net already open carries its own environment; this hands over the command only.
         if(play && !game)task(join(engine,@"bin/wine"),client,clientEnvironment(wineEnv(engine),sized,hud,gameMode,NO),@"battlenet-play.log");
-        if(!game)task(NSProcessInfo.processInfo.arguments[0],@[@"watch",@"--root",root],nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
+        if(!game)task(NSProcessInfo.processInfo.arguments[0],watchArguments(engine,gameMode),nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
         return;
     }
     // The update Agent can legitimately outlive the client. It must not
@@ -611,7 +668,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     NSDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),sized,hud,gameMode,metalfx);
     NSTask *p=task(join(engine,@"bin/wine"),client,env,@"battlenet.log");
     saveStage(@"battlenet_started");event(@"battlenet_open",@{@"pid":@(p.processIdentifier)});
-    task(NSProcessInfo.processInfo.arguments[0],@[@"watch",@"--root",root],nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
+    task(NSProcessInfo.processInfo.arguments[0],watchArguments(engine,gameMode),nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
 }
 
 /* Settings › Advanced. Battle.net and Overwatch carry both settings from when they start,
@@ -687,6 +744,11 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         NSString *defaultRoot=join([fm URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject.path,@"Overwatch2Mac");
         monitorMode=[command isEqual:@"watch"];
         ownRoot(options[@"root"] ?: defaultRoot);
+        // Only a game app inside an installed engine of this data folder.
+        NSString *gameApp=[options[@"game-app"] stringByStandardizingPath];
+        if(monitorMode && gameApp && [gameApp hasPrefix:[join(root,@"runtimes") stringByAppendingString:@"/"]] &&
+           [gameApp hasSuffix:@"/lib/wine/game-mode/Overwatch.app"] && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")])monitorGameApp=gameApp;
+        monitorPrepareNow=monitorMode && [options[@"prepare-now"] isEqual:@"1"];
         if([command isEqual:@"preflight"])preflight();
         else if([command isEqual:@"status"]) {
             // The resolution Overwatch opens at next on the main display.
@@ -713,6 +775,26 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
             event(@"display_memory",@{@"enabled":@([enabled isEqual:@"1"])});
         }
         else if([command isEqual:@"repair-retina"])configureRetina();
+        // Settings › Graphics › Shader memory: --limit all|first|<MiB>. Overwatch reads it when it
+        // next starts, so it can change while Battle.net or the game is open.
+        else if([command isEqual:@"shader-memory"]) {
+            if(!validShaderMemory(options[@"limit"]))fail(@"invalid_arguments");
+            NSMutableDictionary *s=state();s[@"shader_memory"]=options[@"limit"];writeJSON(s,join(root,@"state.json"));
+            applyShaderMemory();event(@"shader_memory",@{@"limit":options[@"limit"]});
+        }
+        // The one-time shader cache update offered after updating to 1.4: what the monitor does
+        // after a match, now, in a monitor of its own that a launch stops like any other (keeping
+        // what it finished) and that then watches the session. --game-mode 0 as for launch.
+        else if([command isEqual:@"prepare-shaders"]) {
+            NSString *engine=runtime();
+            for(NSDictionary *p in sessionProcesses())if([p[@"kind"] isEqual:@"game"])fail(@"close_game_before_maintenance");
+            if(!stopMonitor()) {event(@"shader_preparation_running",nil);}
+            else {
+                NSArray *arguments=[watchArguments(engine,![options[@"game-mode"] isEqual:@"0"]) arrayByAddingObjectsFromArray:@[@"--prepare-now",@"1"]];
+                task(NSProcessInfo.processInfo.arguments[0],arguments,nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
+                event(@"shader_preparation_started",nil);
+            }
+        }
         // Support and tests: the microphone launch points Wine at (portable_voice.h). --uid names one
         // instead of asking Core Audio ("none": macOS's default); --apply 0 only reports.
         else if([command isEqual:@"voice-microphone"]) {

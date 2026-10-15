@@ -1,14 +1,16 @@
 """ow2-pipeline's decisions, with stand-ins for its two Metal tools.
 
-The archive is prepared after a session (--after-session); a launch only keeps what
-was learned, warms the game app's cache and reports what that preparation added. A
-failed archive (too large, or not covering every key the last one listed) must
-lead to a smaller attempt, not end preparation for good; an archive listing
-pipelines that have no recipe left is rebuilt, and so is one in a folder over the
-game's save limit; an archive the tool did not save keeps the cache; past Recall's
-budget the least recently used learned pipelines are forgotten; and the game app's
-shader cache is warmed once per app, macOS version and GPU. Sparse files stand in
-for hundreds of MiB. tests/run_native_pipeline.py runs the real tools. Needs swiftc
+The pack is prepared after a session (--after-session); a launch only keeps what
+was learned, warms the game app's cache and reports what that preparation added.
+Since 1.4 every learned pipeline is prepared, slowest first, in batches that each
+add an archive to the pack and are published one at a time: a batch holds up to
+2048 pipelines or about 150 seconds of first builds. Small archives (the game's
+own, a batch cut short) and damaged ones are built again into the next batch. A
+pipeline finished past the tool's deadline waits for the next batch; one that
+failed, for the next session. An archive the tool did not save keeps the cache.
+Nothing learned is forgotten and no size limit applies. The game app's shader
+cache is warmed once per app, macOS version and GPU. Sparse files stand in for
+hundreds of MiB. tests/run_native_pipeline.py runs the real tools. Needs swiftc
 and a Metal device."""
 import hashlib
 import json
@@ -24,35 +26,47 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Prepares the selection, or the last archive's keys then the costliest others, and
-# like the real tool saves nothing when the archive would hold more than `fit`
-# pipelines or would drop a key the last one listed, and, without a failure, when
-# its folder held over 512 - 128 MiB as it started (or with `nosave`). With
-# `deadline`, the last pipeline is prepared too late to be captured.
+# Like the real tool in append mode: loads the archives whose files match their
+# hashes, builds the selection's pipelines (those with a recipe) up to the limit,
+# captures the ones the pack lacks and adds them as one more archive. With
+# `deadline` (used once) the last is finished too late to be captured; keys in
+# `fail` fail to build; with `nosave` nothing is saved. Verification counts the
+# selection's pipelines found in the loaded archives.
 PREPARE = r'''#!/usr/bin/python3
 import hashlib, json, os, sys
 from pathlib import Path
 here = Path(sys.argv[0]).parent; env = os.environ
 folder = next(p for p in Path(env['DXMT_PIPELINE_CACHE_PATH']).iterdir() if p.is_dir())
-size = sum(f.lstat().st_size for f in folder.rglob('*') if f.is_file())
 manifest = folder / 'archive.json'
-previous = json.loads(manifest.read_text())['prepared_keys'] if manifest.exists() else []
+catalog = json.loads(manifest.read_text()) if manifest.exists() else {'archives': []}
+loaded, archived, failures = [], set(), 0
+for entry in catalog.get('archives', []):
+    path = folder / 'archives' / (entry['sha256'] + '.metallib')
+    if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == entry['sha256']: loaded.append(entry); archived |= set(entry['prepared_keys'])
+    else: failures += 1
+assert env['DXMT_PIPELINE_CACHE_APPEND'] == '1' and env['DXMT_PIPELINE_CACHE_MIN_COST_US'] == '0'
+selection = json.loads(Path(env['DXMT_PIPELINE_CACHE_SELECTION']).read_text())
 limit = int(env['DXMT_PIPELINE_CACHE_PREWARM_LIMIT']); verify = env['DXMT_PIPELINE_CACHE_VERIFY_ONLY'] == '1'
-with open(here / 'calls', 'a') as calls: calls.write(('verify' if verify else 'prepare') + ' %d\n' % limit)
+with open(here / 'calls', 'a') as calls: calls.write(('verify' if verify else 'prepare') + ' %d\n' % len(selection))
+with open(here / 'selections', 'a') as out: out.write(json.dumps(selection) + '\n')
 if verify:
-    print(json.dumps({'write_owner': True, 'verify_only': True, 'failures': 0, 'archive_failures': 0, 'prepared': len(previous)})); sys.exit()
-costs = {f.stem: json.loads(f.read_text())['cost_us'] for f in (folder / 'recipes').glob('*.json')}
-if env.get('DXMT_PIPELINE_CACHE_SELECTION'): order = json.loads(Path(env['DXMT_PIPELINE_CACHE_SELECTION']).read_text())
-else: order = [k for k in previous if k in costs] + sorted((k for k in costs if k not in previous and costs[k] >= 16667), key=lambda k: -costs[k])
-chosen = order[:limit]
-captured = chosen[:-1] if (here / 'deadline').exists() else chosen
-result = {'namespace_directory': str(folder), 'write_owner': True, 'prepared': len(chosen), 'captured_keys': captured, 'verify_only': False, 'archive_failures': 0}
-if len(captured) > int((here / 'fit').read_text()) or not set(previous) <= set(captured): result['archive_failures'] = 1
-elif size <= (512 - 128) * 1048576 and not (here / 'nosave').exists():
+    found = [k for k in selection if k in archived]
+    print(json.dumps({'write_owner': True, 'verify_only': True, 'failures': len(selection) - len(found), 'archive_failures': failures, 'prepared': len(found)})); sys.exit()
+recipes = {f.stem for f in (folder / 'recipes').glob('*.json')}
+failing = set((here / 'fail').read_text().split()) if (here / 'fail').exists() else set()
+built = [k for k in selection if k in recipes][:limit]
+built = [k for k in built if k not in failing]
+late = (here / 'deadline').exists()
+if late: (here / 'deadline').unlink()
+captured = [k for k in built if k not in archived]
+if late: captured = captured[:-1]
+result = {'namespace_directory': str(folder), 'write_owner': True, 'prepared': len(built), 'captured_keys': captured,
+          'verify_only': False, 'archive_failures': failures, 'deadline_exceeded': late}
+if captured and not (here / 'nosave').exists():
     data = json.dumps(captured).encode(); sha = hashlib.sha256(data).hexdigest()
     (folder / 'archives').mkdir(exist_ok=True); (folder / 'archives' / (sha + '.metallib')).write_bytes(data)
-    manifest.write_text(json.dumps({'schema': 2, 'prepared_keys': captured,
-        'archives': [{'sha256': sha, 'bytes': len(captured) * 150000, 'prepared_keys': captured}]}))
+    manifest.write_text(json.dumps({'schema': 2, 'prepared_keys': sorted(archived | set(captured)),
+        'archives': loaded + [{'sha256': sha, 'bytes': len(captured) * 150000, 'prepared_keys': captured}]}))
 print(json.dumps(result))
 '''
 # "Compiles" each selected pipeline into the cache folder it is given.
@@ -118,18 +132,6 @@ class PipelineHelper(unittest.TestCase):
         # Sparse: counted at its full size without taking the disk space.
         with open(path, 'wb') as file: file.truncate(size)
 
-    def archive(self, keys, size_each, on_disk=None):
-        data = json.dumps(keys).encode(); sha = hashlib.sha256(data).hexdigest()
-        (self.folder / 'archives' / (sha + '.metallib')).write_bytes(data)
-        if on_disk: self.pad(self.folder / 'archives' / (sha + '.metallib'), on_disk)
-        (self.folder / 'archive.json').write_text(json.dumps({'schema': 2, 'prepared_keys': keys,
-            'archives': [{'sha256': sha, 'bytes': len(keys) * size_each, 'prepared_keys': keys}]}))
-
-    def learned_bytes(self):
-        # What the game's folder holds besides the archive.
-        return sum(f.stat().st_size for f in self.folder.rglob('*') if f.is_file()
-                   and f.name != 'archive.json' and f.suffix != '.metallib')
-
     def run_helper(self, *extra, launch=False):
         # The archive is prepared after a session; a launch (with the game app) only
         # keeps what was learned and warms that app's cache.
@@ -143,138 +145,163 @@ class PipelineHelper(unittest.TestCase):
     def prepared(self):
         return json.loads((self.folder / 'archive.json').read_text())['prepared_keys']
 
-    def test_an_archive_too_large_to_save_is_tried_again_smaller(self):
-        # A full archive is rebuilt to about 85% of the 128 MiB budget. The owner's
-        # rebuild came out too large to save, and the count check then ended every
-        # launch's preparation before the smaller retry.
-        old = self.recipes(894, age=7 * 86400); new = self.recipes(400)
-        self.archive(old, 149223)  # 133.4 MB, as the owner's was
-        (self.helpers / 'fit').write_text('700')
-        result, steps, calls = self.run_helper()
-        self.assertEqual(result.returncode, 0, result)
-        self.assertEqual(calls, ['prepare 764', 'prepare 573', 'verify 4096'])
-        self.assertIn('Prepared and verified 573', result.stdout)
-        self.assertEqual(len(self.prepared()), 573)
-        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 573, 'added': 400, 'warmed': 0})
-        self.assertEqual(len(list((self.folder / 'archives').glob('*.metallib'))), 1)
+    def archives(self, *groups, damaged=()):
+        # One archive per group of keys, in order; a damaged one's file doesn't match its hash.
+        entries = []
+        for keys in groups:
+            data = json.dumps(keys).encode(); sha = hashlib.sha256(data).hexdigest()
+            (self.folder / 'archives' / (sha + '.metallib')).write_bytes(b'damaged' if keys in damaged else data)
+            entries.append({'sha256': sha, 'bytes': len(data), 'prepared_keys': keys})
+        (self.folder / 'archive.json').write_text(json.dumps({'schema': 2, 'archives': entries,
+            'prepared_keys': sorted({k for keys in groups for k in keys})}))
 
-    def test_an_archive_listing_pipelines_without_recipes_is_rebuilt(self):
-        # The game archives what it prewarms; when those recipes are gone, preparing
-        # around them could never save, so the archive is rebuilt and grows.
-        kept = self.recipes(16); others = self.recipes(1000)
-        self.archive(kept + [secrets.token_hex(32) for _ in range(240)], 130000)
-        result, steps, calls = self.run_helper()
-        self.assertEqual(result.returncode, 0, result)
-        self.assertEqual(calls[0], 'prepare 689')
-        self.assertEqual(len(self.prepared()), 689)
-        self.assertLessEqual(set(self.prepared()), set(kept + others))
-        again, _, _ = self.run_helper()
-        self.assertEqual(again.returncode, 0, again)
-        self.assertGreater(len(self.prepared()), 689)
+    def catalog(self):
+        return json.loads((self.folder / 'archive.json').read_text())
 
-    def test_an_archive_over_the_save_limit_is_rebuilt_without_it(self):
-        # The owner's cache on 10-09: an archive under 85% full in a folder over the
-        # game's save limit. An extended archive was never saved, and every launch
-        # prepared it again for nothing; the rebuild's clone leaves the old one out.
-        old = self.recipes(778, cost=150000, age=7 * 86400); new = self.recipes(100, cost=200000)
-        self.archive(old, 145823, on_disk=113450294)  # 108.2 MiB, 84.5% of 128 MiB
-        self.pad(self.folder / 'padding', 300 * 1048576)  # recipes and libraries, as far as the game counts
+    def selections(self):
+        path = self.helpers / 'selections'
+        selections = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        path.unlink(missing_ok=True)
+        return selections
+
+    def test_every_learned_pipeline_is_prepared_in_batches(self):
+        # 3000 quick pipelines beside a full archive: one batch of 2048, then the rest.
+        old = self.recipes(600, cost=150000, age=7 * 86400); self.archives(old)
+        new = self.recipes(3000, cost=1000)
         result, steps, calls = self.run_helper()
         self.assertEqual(result.returncode, 0, result)
-        self.assertEqual(calls, ['prepare 828', 'verify 4096'])
-        self.assertIn('Prepared and verified 828', result.stdout)
-        self.assertLessEqual(set(new), set(self.prepared()))
-        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 828, 'added': 100, 'warmed': 0})
-        # Under Recall's budget, nothing learned is forgotten.
+        self.assertEqual(calls, ['prepare 2048', 'verify 2048', 'prepare 952', 'verify 952'])
+        self.assertIn('Prepared and verified 2048 learned pipelines; 2648 of 3600 ready', result.stdout)
+        self.assertIn('Prepared and verified 952 learned pipelines; 3600 of 3600 ready', result.stdout)
+        self.assertEqual(set(self.prepared()), set(old + new))
+        self.assertEqual([len(a['prepared_keys']) for a in self.catalog()['archives']], [600, 2048, 952])
+        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 3600, 'added': 3000, 'warmed': 0})
+        self.assertEqual([s['graphics'] for s in steps if s['graphics'] != 'pipelines'],
+                         ['learned', 'checking', 'preparing', 'verifying', 'preparing', 'verifying', 'done'])
+        self.assertFalse((self.root / 'cache/preparing.json').exists())
+        again, steps, calls = self.run_helper()
+        self.assertEqual((again.returncode, calls), (0, []))
+        self.assertIn('Learned pipelines are up to date', again.stdout)
+
+    def test_the_slowest_come_first_and_a_batch_holds_about_150_seconds(self):
+        quick = self.recipes(100, cost=1000); slow = self.recipes(900, cost=200000)
+        result, steps, calls = self.run_helper()
+        self.assertEqual(result.returncode, 0, result)
+        first, second = self.selections()[0::2]
+        self.assertEqual(len(first), 750)  # 750 x 0.2 s
+        self.assertLessEqual(set(first), set(slow))
+        self.assertEqual(second[:150], [k for k in second if k in slow])
+        self.assertEqual(set(self.prepared()), set(quick + slow))
+
+    def test_small_and_damaged_archives_are_built_into_the_next_batch(self):
+        # The game's own archives are small; one whose file is damaged is skipped by
+        # the game. Both go into the next batch with what is new; a pipeline whose
+        # recipe is gone can't be built again and leaves the pack.
+        game = [self.recipes(100) for _ in range(3)]; damaged = self.recipes(700); full = self.recipes(600)
+        gone = [secrets.token_hex(32) for _ in range(4)]
+        self.archives(full, game[0], game[1] + gone, damaged, game[2], damaged=(damaged,))
+        new = self.recipes(10)
+        result, steps, calls = self.run_helper()
+        self.assertEqual(result.returncode, 0, result)
+        self.assertEqual(calls, ['prepare 1010', 'verify 1010'])
+        self.assertEqual([len(a['prepared_keys']) for a in self.catalog()['archives']], [600, 1010])
+        self.assertEqual(set(self.prepared()), set(full + sum(game, []) + damaged + new))
+        self.assertEqual(sorted(p.name for p in (self.folder / 'archives').iterdir()),
+                         sorted(a['sha256'] + '.metallib' for a in self.catalog()['archives']))
+        # With nothing new, one small archive stays as it is, and two are merged.
+        self.archives(full + damaged + new + game[0] + game[1], game[2])
+        self.assertEqual(self.run_helper()[2], [])
+        self.archives(full + damaged + new, game[0], game[1] + game[2])
+        result, steps, calls = self.run_helper()
+        self.assertEqual(calls, ['prepare 300', 'verify 300'])
+        self.assertEqual([len(a['prepared_keys']) for a in self.catalog()['archives']], [1310, 300])
+
+    def test_the_pack_is_kept_slowest_first_and_summarized_for_settings(self):
+        # The game loads the pack's parts in order, as much as Shader memory allows, so a new
+        # part of slower pipelines goes before one of faster pipelines (by recorded build time
+        # per byte). Settings reads each part's size and count from cache/pack.json.
+        fast = self.recipes(600, cost=20000)
+        self.archives(fast)
+        catalog = self.catalog(); catalog['archives'][0]['bytes'] = 600 * 150000
+        (self.folder / 'archive.json').write_text(json.dumps(catalog))
+        slow = self.recipes(600, cost=200000)
+        result, steps, calls = self.run_helper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        parts = self.catalog()['archives']
+        self.assertEqual([set(part['prepared_keys']) for part in parts], [set(slow), set(fast)])
+        summary = json.loads((self.root / 'cache/pack.json').read_text())
+        self.assertEqual(summary, {'schema': 1, 'parts': [[600 * 150000, 600], [600 * 150000, 600]]})
+        # A launch writes it as well, and with no pack there is none.
+        (self.root / 'cache/pack.json').unlink()
+        self.assertEqual(self.run_helper(launch=True)[0].returncode, 0)
+        self.assertEqual(json.loads((self.root / 'cache/pack.json').read_text()), summary)
+        (self.folder / 'archive.json').unlink()
+        self.run_helper(launch=True)
+        self.assertFalse((self.root / 'cache/pack.json').exists())
+
+    def test_nothing_learned_is_forgotten_and_no_size_limit_applies(self):
+        # Before 1.4, over 320 MiB learned the least recently used were forgotten, and
+        # over 384 MiB in the folder no archive was saved.
+        old = self.recipes(600, cost=150000, age=20 * 86400, library=1048576); self.archives(old)
+        new = self.recipes(40, cost=2000, age=10 * 86400)
+        self.pad(self.folder / 'padding', 900 * 1048576)
+        result, steps, calls = self.run_helper(launch=True)
+        self.assertEqual(result.returncode, 0, result)
         self.assertNotIn('Forgot', result.stdout)
-        self.assertEqual(len(list((self.folder / 'recipes').glob('*.json'))), 878)
-
-    def test_past_the_budget_the_least_recently_used_are_forgotten(self):
-        # Over 320 MiB learned, the least recently used day goes first, cheapest first,
-        # down to 288 MiB. The archive's recipes, a library a kept recipe still uses
-        # and a library no recipe names stay.
-        mib = 1048576
-        packed = self.recipes(10, cost=200000, age=20 * 86400, library=8 * mib); self.archive(packed, 150000)
-        shared = self.library(8 * mib)
-        recent = self.recipes(10, cost=2000, library=8 * mib) + self.recipes(9, cost=200000, library=8 * mib) + self.recipes(1, cost=200000, shared=shared)
-        sharing = self.recipes(1, cost=1000, age=10 * 86400, shared=shared)
-        cheap = self.recipes(5, cost=2000, age=10 * 86400, library=8 * mib)
-        costly = sorted(self.recipes(5, cost=200000, age=10 * 86400, library=8 * mib))
-        orphan = self.library(12 * mib)
-        def library_of(key): return json.loads((self.folder / 'recipes' / (key + '.json')).read_text())['recipe']['vertex']['library']
-        doomed = [library_of(key) for key in cheap + costly[:1]]
-        self.assertGreater(self.learned_bytes(), 320 * mib)
-        result, steps, calls = self.run_helper(launch=True)  # before the game, which learns into this room
-        self.assertEqual(result.returncode, 0, result)
-        self.assertEqual(calls, [])
-        self.assertIn('Forgot 7 least recently used learned pipelines', result.stdout)
-        left = {path.stem for path in (self.folder / 'recipes').glob('*.json')}
-        self.assertEqual(left, set(packed + recent + costly[1:]))
-        libraries = {path.stem for path in (self.folder / 'libraries').glob('*.air')}
-        self.assertEqual(libraries & set(doomed), set())
-        self.assertLessEqual({shared, orphan} | {library_of(key) for key in packed + costly[1:]}, libraries)
-        self.assertLessEqual(self.learned_bytes(), 288 * mib)
-        self.assertEqual(steps[0], {'graphics': 'learned', 'learned': 34, 'ready': 10})
-
-    def test_learned_pipelines_too_large_for_any_archive_skip_preparation(self):
-        # Over the save limit with what no recipe accounts for: forgetting could not
-        # make room, so nothing is forgotten, and no archive could be saved, so the
-        # tool never runs.
-        old = self.recipes(10, cost=150000, age=86400); self.archive(old, 150000); self.recipes(10, cost=200000)
-        self.pad(self.folder / 'padding', 390 * 1048576)
         result, steps, calls = self.run_helper()
         self.assertEqual(result.returncode, 0, result)
-        self.assertEqual(calls, [])
-        self.assertIn('not by recipes that can be forgotten', result.stdout)
-        self.assertIn('leave no room to save an archive', result.stdout)
-        self.assertEqual(len(list((self.folder / 'recipes').glob('*.json'))), 20)
-        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 10, 'added': 0, 'warmed': 0})
+        self.assertEqual(calls, ['prepare 40', 'verify 40'])
+        self.assertEqual(len(list((self.folder / 'recipes').glob('*.json'))), 640)
+        self.assertEqual(len(self.prepared()), 640)
 
     def test_an_archive_the_tool_did_not_save_keeps_the_cache(self):
-        # The game skips a save without a failure. Preparation keeps what it had
-        # instead of ending in a count mismatch, whether it extended the archive...
-        old = self.recipes(50, age=7 * 86400); self.archive(old, 150000); self.recipes(20, cost=200000)
+        old = self.recipes(600, age=7 * 86400); self.archives(old); self.recipes(20, cost=200000)
         (self.helpers / 'nosave').write_text('')
         result, steps, calls = self.run_helper()
         self.assertEqual(result.returncode, 0, result)
-        self.assertEqual(calls, ['prepare 70'])
+        self.assertEqual(calls, ['prepare 20'])
         self.assertIn('Archive not saved; existing cache kept', result.stdout)
-        self.assertEqual(self.prepared(), old)
-        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 50, 'added': 0, 'warmed': 0})
-        # ...or rebuilt it (this one lists a pipeline without a recipe).
-        self.archive(old + [secrets.token_hex(32)], 150000)
-        result, steps, calls = self.run_helper()
-        self.assertEqual(result.returncode, 0, result)
-        self.assertEqual(calls, ['prepare 70'])
-        self.assertIn('Archive not saved; existing cache kept', result.stdout)
-        self.assertEqual(len(self.prepared()), 51)
+        self.assertEqual(self.prepared(), sorted(old))
+        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 600, 'added': 0, 'warmed': 0})
 
-    def test_a_pipeline_finished_after_the_deadline_is_not_a_mismatch(self):
-        # The tool counts a pipeline it finished after its deadline as prepared but
-        # does not capture it; the archive it saved is still a good one.
-        old = self.recipes(50, age=7 * 86400); self.archive(old, 150000); self.recipes(20, cost=200000)
+    def test_a_pipeline_finished_after_the_deadline_goes_into_the_next_batch(self):
+        old = self.recipes(600, age=7 * 86400); self.archives(old); self.recipes(20, cost=200000)
         (self.helpers / 'deadline').write_text('')
         result, steps, calls = self.run_helper()
         self.assertEqual(result.returncode, 0, result)
-        self.assertEqual(calls, ['prepare 70', 'verify 4096'])
-        self.assertIn('Prepared and verified 69', result.stdout)
-        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 69, 'added': 19, 'warmed': 0})
+        # The batch of 19 is small, so the next one builds it again with the last.
+        self.assertEqual(calls, ['prepare 20', 'verify 19', 'prepare 20', 'verify 20'])
+        self.assertIn('Prepared and verified 19', result.stdout)
+        self.assertEqual([len(a['prepared_keys']) for a in self.catalog()['archives']], [600, 20])
+        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 620, 'added': 20, 'warmed': 0})
+
+    def test_a_pipeline_that_fails_to_build_waits_for_the_next_session(self):
+        old = self.recipes(600, age=7 * 86400); self.archives(old); new = self.recipes(20, cost=200000)
+        (self.helpers / 'fail').write_text(new[0])
+        result, steps, calls = self.run_helper()
+        self.assertEqual(result.returncode, 0, result)
+        self.assertEqual(calls, ['prepare 20', 'verify 19'])
+        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 619, 'added': 19, 'warmed': 0})
+        (self.helpers / 'fail').unlink()
+        result, steps, calls = self.run_helper()
+        self.assertEqual(calls, ['prepare 20', 'verify 20'])
+        self.assertEqual(len(self.prepared()), 620)
 
     def test_a_launch_prepares_no_archive_and_reports_what_the_last_session_added(self):
         # Preparing takes minutes, so it happens after a session; a launch reports what
         # that added, once, without running the tool.
-        old = self.recipes(50, age=7 * 86400); self.archive(old, 150000); self.recipes(20, cost=200000)
+        old = self.recipes(600, age=7 * 86400); self.archives(old); self.recipes(20, cost=200000)
         result, steps, calls = self.run_helper(launch=True)
         self.assertEqual(result.returncode, 0, result)
         self.assertEqual(calls, [])
         self.assertIn('prepared after the session', result.stdout)
-        self.assertEqual(steps, [{'graphics': 'learned', 'learned': 70, 'ready': 50},
-                                 {'graphics': 'done', 'ready': 50, 'added': 0, 'warmed': 0}])
+        self.assertEqual(steps, [{'graphics': 'learned', 'learned': 620, 'ready': 600},
+                                 {'graphics': 'done', 'ready': 600, 'added': 0, 'warmed': 0}])
         result, steps, calls = self.run_helper()
-        self.assertEqual(calls, ['prepare 70', 'verify 4096'])
-        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 70, 'added': 20, 'warmed': 0})
-        self.assertEqual(self.run_helper(launch=True)[1][-1], {'graphics': 'done', 'ready': 70, 'added': 20, 'warmed': 0})
-        self.assertEqual(self.run_helper(launch=True)[1][-1], {'graphics': 'done', 'ready': 70, 'added': 0, 'warmed': 0})
+        self.assertEqual(calls, ['prepare 20', 'verify 20'])
+        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 620, 'added': 20, 'warmed': 0})
+        self.assertEqual(self.run_helper(launch=True)[1][-1], {'graphics': 'done', 'ready': 620, 'added': 20, 'warmed': 0})
+        self.assertEqual(self.run_helper(launch=True)[1][-1], {'graphics': 'done', 'ready': 620, 'added': 0, 'warmed': 0})
 
     def test_the_game_apps_shader_cache_is_warmed_once_per_app_macos_and_gpu(self):
         identifier = 'org.overwatch2mac.helper-test-' + secrets.token_hex(4)
@@ -306,6 +333,27 @@ class PipelineHelper(unittest.TestCase):
         # Without Game Mode the game is not its own app: nothing to warm.
         marker.unlink()
         self.assertNotIn('warming', [s['graphics'] for s in self.run_helper(launch=True)[1]])
+
+    def test_after_a_session_every_learned_pipeline_is_warmed_every_time(self):
+        # The game loads only part of a large pack (pipeline_cache.c), so after each
+        # session every learned pipeline also goes into the game app's own shader cache,
+        # after the pack's batches, whatever the once-per-macOS marker says.
+        identifier = 'org.overwatch2mac.helper-test-' + secrets.token_hex(4)
+        cache = self.caches / identifier / 'com.apple.metal'
+        self.addCleanup(shutil.rmtree, self.caches / identifier, True)
+        app = self.base / 'Overwatch.app'; (app / 'Contents').mkdir(parents=True)
+        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': identifier}))
+        old = self.recipes(600, age=7 * 86400); self.archives(old); new = self.recipes(20, cost=200000)
+        result, steps, calls = self.run_helper(app)
+        self.assertEqual(result.returncode, 0, result)
+        self.assertEqual(calls, ['prepare 20', 'verify 20'])
+        self.assertIn('Warmed 620 learned pipelines for ' + identifier, result.stdout)
+        self.assertLess(result.stdout.index('Prepared and verified'), result.stdout.index('Warmed'))
+        self.assertEqual(sorted((cache / 'functions.data').read_text().split()), sorted(old + new))
+        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 620, 'added': 20, 'warmed': 620})
+        again, steps, calls = self.run_helper(app)
+        self.assertEqual(calls, [])
+        self.assertIn('Warmed 620', again.stdout)
 
     def test_an_unusable_game_app_is_not_warmed(self):
         self.recipes(5)

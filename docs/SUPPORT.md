@@ -1,5 +1,11 @@
 # Support and privacy
 
+## Get help from other players
+
+Join the [Recall Discord](https://discord.gg/pexasKezCn) to ask questions in #help,
+compare Macs and settings, and find people to play with. Bugs still belong in a
+GitHub issue, so they can be tracked and fixed.
+
 ## Reporting a problem
 
 [Open an issue](https://github.com/AsherJN/recall/issues), or choose Help › Report a Problem

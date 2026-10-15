@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/AsherJN/recall/releases/latest"><img src="https://img.shields.io/badge/Download_for_Mac_%C2%B7_Free-FFAA2E?style=for-the-badge" height="40" alt="Download Recall for Mac, free"></a>
+  <a href="https://discord.gg/pexasKezCn"><img src="https://img.shields.io/badge/Join_the_Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white" height="40" alt="Join the Recall Discord"></a>
 </p>
 
 <p align="center"><sub>M1 or newer · macOS 26.5 or later · Notarized by Apple</sub></p>
@@ -165,6 +166,8 @@ Choose Settings › Uninstall Recall. It moves Recall and the game installation 
 </details>
 
 ## Help and contributions
+
+Get help, compare setups, and find other Mac Overwatch players in the [Recall Discord](https://discord.gg/pexasKezCn).
 
 [Report a bug](https://github.com/AsherJN/recall/issues/new?template=bug_report.yml) · [Share how it runs on your Mac](https://github.com/AsherJN/recall/issues/new?template=performance_report.yml) · [Suggest an idea](https://github.com/AsherJN/recall/issues/new?template=feature_request.yml)
 

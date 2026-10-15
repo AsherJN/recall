@@ -1,0 +1,295 @@
+diff --git a/src/winemetal/unix/pipeline_cache.c b/src/winemetal/unix/pipeline_cache.c
+--- a/src/winemetal/unix/pipeline_cache.c
++++ b/src/winemetal/unix/pipeline_cache.c
+@@ -16,13 +16,18 @@
+ #include <string.h>
+ #include <errno.h>
+ 
++// Recall 1.4: every learned pipeline is kept and prepared. The capacities are
++// sanity bounds, far past any player's cache; free disk space is the real limit.
+ enum { QueueCapacity = 2048, OverflowCapacity = 256, TraceCapacity = 512, StateCapacity = 256,
+-       RecipeCapacity = 32768, LibraryCapacity = 65536, EnumerationCapacity = 131072 };
++       RecipeCapacity = 1048576, LibraryCapacity = 2097152, EnumerationCapacity = 4194304,
++       ArchiveCapacity = 4096, SelectionCapacity = 65536 };
+ static const uint64_t QueueByteLimit = 32u * 1024u * 1024u;
+ static const uint64_t OverflowByteLimit = 8u * 1024u * 1024u;
+-static const uint64_t DiskByteLimit = 512u * 1024u * 1024u;
++static const uint64_t DiskByteLimit = 64ull * 1024u * 1024u * 1024u;
+ static const uint64_t FreeDiskReserve = 128u * 1024u * 1024u;
+-static const uint64_t ArchiveByteLimit = 128u * 1024u * 1024u;
++// One archive file. Archives are hashed in pieces, never read into memory whole.
++static const uint64_t ArchiveByteLimit = 4ull * 1024u * 1024u * 1024u;
++static const uint64_t ManifestByteLimit = 64u * 1024u * 1024u;
+ static atomic_bool globallyStopped;
+ static const uint64_t DiagnosticByteLimit = 8u * 1024u * 1024u;
+ 
+@@ -35,6 +40,36 @@
+   return [NSString stringWithUTF8String:result];
+ }
+ 
++// SHA-256 of a regular file of at most LIMIT bytes, read 1 MiB at a time so an
++// archive of any size costs no more memory than that. Its size goes to SIZE.
++static NSString *digestFile(NSString *path, uint64_t limit, uint64_t *size) {
++  int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
++  if (fd < 0) return nil;
++  struct stat st;
++  if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || (uint64_t)st.st_size > limit) {
++    close(fd); return nil;
++  }
++  CC_SHA256_CTX context;
++  CC_SHA256_Init(&context);
++  unsigned char *buffer = malloc(1 << 20);
++  uint64_t total = 0;
++  BOOL failed = !buffer;
++  while (!failed && total < (uint64_t)st.st_size) {
++    ssize_t count = read(fd, buffer, 1 << 20);
++    if (count <= 0) { failed = YES; break; }
++    CC_SHA256_Update(&context, buffer, (CC_LONG)count);
++    total += count;
++  }
++  free(buffer); close(fd);
++  if (failed || total != (uint64_t)st.st_size) return nil;
++  unsigned char bytes[CC_SHA256_DIGEST_LENGTH];
++  CC_SHA256_Final(bytes, &context);
++  char result[65];
++  for (unsigned i = 0; i < sizeof(bytes); ++i) snprintf(result + i * 2, 3, "%02x", bytes[i]);
++  if (size) *size = total;
++  return [NSString stringWithUTF8String:result];
++}
++
+ static BOOL validKey(NSString *key) {
+   if (![key isKindOfClass:[NSString class]] || key.length != 64) return NO;
+   const char *text = key.UTF8String;
+@@ -63,6 +98,24 @@
+   } @finally { close(fd); }
+ }
+ 
++// How much of the pack a game loads, from Recall's Shader memory setting: load.json
++// beside the pack ({"limit": "first"} or a number of MiB). Without it, all of it. A
++// game holds what it loads in memory (about the archives' size); archives are listed
++// slowest pipelines first, and "first" keeps only the first, as earlier versions loaded.
++static uint64_t packLoadBudget(BOOL *firstOnly) {
++  *firstOnly = NO;
++  const char *base = getenv("DXMT_PIPELINE_CACHE_PATH");
++  if (!base || base[0] != '/') return UINT64_MAX;
++  NSData *data = readBounded([[NSString stringWithUTF8String:base] stringByAppendingPathComponent:@"load.json"], 4096);
++  NSDictionary *setting = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
++  if (![setting isKindOfClass:NSDictionary.class]) return UINT64_MAX;
++  id limit = setting[@"limit"];
++  if ([limit isEqual:@"first"]) { *firstOnly = YES; return UINT64_MAX; }
++  if ([limit isKindOfClass:NSNumber.class] && [limit unsignedLongLongValue] > 0)
++    return MIN([limit unsignedLongLongValue], 1ull << 24) << 20;
++  return UINT64_MAX;
++}
++
+ static unsigned envUnsigned(const char *name, unsigned fallback, unsigned maximum) {
+   const char *value = getenv(name);
+   if (!value || !*value) return fallback;
+@@ -109,7 +162,7 @@
+   NSMutableArray *_archiveEntries;
+   NSMutableSet *_archivedKeys, *_capturedKeys;
+   NSSet *_knownRecipeKeys;
+-  BOOL _offline, _offlineVerify, _preferExpensive;
++  BOOL _offline, _offlineVerify, _offlineAppend, _preferExpensive;
+   double _minimumPrepareCost;
+   double _startupDeadline;
+   unsigned _prewarmLimit, _startupBudget;
+@@ -202,6 +255,9 @@
+   // process retains its original 128-state/10-second startup defaults.
+   _offline = YES;
+   _offlineVerify = envUnsigned("DXMT_PIPELINE_CACHE_VERIFY_ONLY", 0, 1) != 0;
++  // Append: the archives stay as they are and what this run prepares is saved as
++  // one more, so preparation can go in batches. Otherwise one archive replaces all.
++  _offlineAppend = envUnsigned("DXMT_PIPELINE_CACHE_APPEND", 0, 1) != 0;
+   _prewarmLimit = envUnsigned("DXMT_PIPELINE_CACHE_PREWARM_LIMIT", 4096, 8192);
+   budget = envUnsigned("DXMT_PIPELINE_CACHE_PREWARM_MS", 180000, 600000);
+   _minimumPrepareCost = envUnsigned("DXMT_PIPELINE_CACHE_MIN_COST_US", 16667, 60000000);
+@@ -409,7 +465,7 @@
+ }
+ 
+ - (void)loadArchive {
+-  NSData *metadata = readBounded([_directory stringByAppendingPathComponent:@"archive.json"], 1024 * 1024);
++  NSData *metadata = readBounded([_directory stringByAppendingPathComponent:@"archive.json"], ManifestByteLimit);
+   NSDictionary *manifest = metadata ? [NSJSONSerialization JSONObjectWithData:metadata options:0 error:nil] : nil;
+   if (![manifest isKindOfClass:NSDictionary.class]) return;
+   NSArray *entries = nil;
+@@ -417,20 +473,50 @@
+     entries = manifest[@"archives"];
+   else if (validKey(manifest[@"sha256"]))
+     entries = @[manifest]; // Preserve and migrate the previous single-archive format.
+-  if (!entries || entries.count > 32) return;
++  if (!entries || entries.count > ArchiveCapacity) return;
++  // The game loads archives in order within the player's Shader memory setting; the
++  // preparation tool, which must see the whole pack, loads all of them.
++  NSUInteger count = entries.count, skipped = 0;
++  BOOL *matches = calloc(count ? count : 1, sizeof(BOOL)), *wanted = calloc(count ? count : 1, sizeof(BOOL));
++  uint64_t *sizes = calloc(count ? count : 1, sizeof(uint64_t));
++  if (!matches || !wanted || !sizes) { free(matches); free(wanted); free(sizes); return; }
++  BOOL firstOnly = NO, chosen = NO;
++  uint64_t budget = _offline ? UINT64_MAX : packLoadBudget(&firstOnly), planned = 0;
++  for (NSUInteger i = 0; i < count; ++i) {
++    id candidate = entries[i];
++    if (![candidate isKindOfClass:NSDictionary.class] || !validKey(candidate[@"sha256"])) continue;
++    struct stat st;
++    NSString *path = [_archiveDirectory stringByAppendingPathComponent:[candidate[@"sha256"] stringByAppendingString:@".metallib"]];
++    uint64_t size = !lstat(path.fileSystemRepresentation, &st) && S_ISREG(st.st_mode) ? (uint64_t)st.st_size : 0;
++    if (firstOnly ? !chosen && size : size <= budget - planned) { wanted[i] = chosen = YES; planned += size; } else ++skipped;
++  }
++  // Those it loads are checked against their hashes first, on all cores at once: under
++  // Rosetta one core hashes about 260 MB a second, and the game waits for this.
++  NSString *archiveDirectory = _archiveDirectory;
++  dispatch_apply(count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
++    @autoreleasepool {
++      if (!wanted[i]) return;
++      id candidate = entries[i];
++      if (![candidate isKindOfClass:NSDictionary.class] || !validKey(candidate[@"sha256"])) return;
++      NSString *hash = candidate[@"sha256"];
++      NSString *path = [archiveDirectory stringByAppendingPathComponent:[hash stringByAppendingString:@".metallib"]];
++      matches[i] = [digestFile(path, ArchiveByteLimit, &sizes[i]) isEqual:hash];
++    }
++  });
+   NSMutableArray *archives = [NSMutableArray array];
+   uint64_t totalBytes = 0;
+-  for (id candidate in entries) {
++  for (NSUInteger index = 0; index < count; ++index) {
++    id candidate = entries[index];
++    if (!wanted[index]) continue;
+     if (atomic_load(&globallyStopped)) break;
+-    // With preparation disabled, existing archives remain available for cheap
+-    // runtime lookup. Otherwise do not start another load after its deadline.
+-    if (_startupBudget && CACurrentMediaTime() >= _startupDeadline) break;
++    // Every wanted archive loads, however long that takes. Lookups stop waiting for the
++    // pack at the startup deadline, and an archive loaded after it is used from then on.
+     @autoreleasepool {
+       if (![candidate isKindOfClass:NSDictionary.class] || !validKey(candidate[@"sha256"])) continue;
+       NSString *hash = candidate[@"sha256"];
+       NSString *path = [_archiveDirectory stringByAppendingPathComponent:[hash stringByAppendingString:@".metallib"]];
+-      NSData *data = readBounded(path, ArchiveByteLimit - totalBytes);
+-      if (![digest(data) isEqual:hash]) { atomic_fetch_add(&_archiveFailures, 1); continue; }
++      uint64_t bytes = sizes[index];
++      if (!matches[index]) { atomic_fetch_add(&_archiveFailures, 1); continue; }
+       MTLBinaryArchiveDescriptor *descriptor = [[MTLBinaryArchiveDescriptor alloc] init];
+       descriptor.url = [NSURL fileURLWithPath:path];
+       NSError *error = nil;
+@@ -446,14 +532,17 @@
+           }
+         }
+         [archives addObject:archive];
+-        [_archiveEntries addObject:@{@"sha256": hash, @"bytes": @(data.length), @"prepared_keys": keys}];
+-        totalBytes += data.length;
++        [_archiveEntries addObject:@{@"sha256": hash, @"bytes": @(bytes), @"prepared_keys": keys}];
++        totalBytes += bytes;
+       } else atomic_fetch_add(&_archiveFailures, 1);
+       [archive release];
+-      [self event:@"archive_load" values:@{@"success": @(archive != nil), @"bytes": @(data.length),
++      [self event:@"archive_load" values:@{@"success": @(archive != nil), @"bytes": @(bytes),
+           @"error_domain": error.domain ?: @"", @"error_code": @(error.code)}];
+     }
+   }
++  free(matches); free(wanted); free(sizes);
++  [self event:@"archive_budget" values:@{@"budget": @(budget == UINT64_MAX ? 0 : budget), @"loaded_bytes": @(totalBytes),
++      @"skipped_archives": @(skipped), @"first_only": @(firstOnly)}];
+   // Publish immutable objects exactly once. Neither prewarm nor runtime ever
+   // adds functions to, or serializes, an archive in this array.
+   os_unfair_lock_lock(&_lock);
+@@ -467,11 +556,12 @@
+   NSDictionary *selectionRanks = nil;
+ #ifdef DXMT_PIPELINE_CACHE_OFFLINE_TOOL
+   const char *selectionPath = getenv("DXMT_PIPELINE_CACHE_SELECTION");
+-  if (_offline && !_offlineVerify && selectionPath && *selectionPath) {
+-    NSData *data = readBounded([NSString stringWithUTF8String:selectionPath], 1024*1024);
++  // A selection orders preparation, or limits verification to the pipelines a batch added.
++  if (_offline && selectionPath && *selectionPath) {
++    NSData *data = readBounded([NSString stringWithUTF8String:selectionPath], 8 * 1024 * 1024);
+     id keys = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+     NSMutableDictionary *ranks = [NSMutableDictionary dictionary];
+-    BOOL valid = [keys isKindOfClass:NSArray.class] && [keys count] <= 7168;
++    BOOL valid = [keys isKindOfClass:NSArray.class] && [keys count] <= SelectionCapacity;
+     if (valid) for (id key in keys) {
+       if (!validKey(key) || ranks[key]) { valid = NO; break; }
+       ranks[key] = @(ranks.count);
+@@ -534,7 +624,10 @@
+   // adding another library to a loaded archive can succeed yet later fail
+   // serialization. A fresh immutable batch preserves prior batches unchanged.
+   NSError *error = nil;
+-  id<MTLBinaryArchive> capture = _writeOwner && !_offlineVerify && (_offline || _archiveEntries.count < 32)
++  // Since 1.4 only the preparation tool adds to the pack: it prepares every learned
++  // pipeline after each session, and a game that loaded part of the pack must not
++  // rewrite its catalog. The game still prewarms its states in memory.
++  id<MTLBinaryArchive> capture = _writeOwner && !_offlineVerify && _offline
+       ? [_device newBinaryArchiveWithDescriptor:archiveDescriptor error:&error] : nil;
+   [archiveDescriptor release];
+   unsigned attempted = 0;
+@@ -579,7 +672,7 @@
+         atomic_fetch_add(&_prewarmed, 1);
+         // Archive population is startup-only, and only begun while budget remains.
+         // An in-flight Metal call cannot be canceled and may finish after deadline.
+-        if (capture && (_offline || !archiveHit || ![_archivedKeys containsObject:entry[@"key"]]) &&
++        if (capture && ((_offline && !_offlineAppend) || !archiveHit || ![_archivedKeys containsObject:entry[@"key"]]) &&
+             ![_capturedKeys containsObject:entry[@"key"]] &&
+             !(atomic_load(&_stopped) || atomic_load(&globallyStopped)) && CACurrentMediaTime() < _startupDeadline) {
+           descriptor.binaryArchives = nil;
+@@ -603,11 +696,13 @@
+ }
+ 
+ - (void)persistArchive:(id<MTLBinaryArchive>)archive {
+-  if (!_writeOwner || _diskBytes > DiskByteLimit - ArchiveByteLimit || _archiveFiles >= 64) return;
++  if (!_writeOwner || _diskBytes >= DiskByteLimit || _archiveFiles >= ArchiveCapacity) return;
+   // A compact replacement is only valid if it preserves ALL existing archive
+   // coverage. The launcher prepares a cloned cache and verifies this again in
+   // a fresh process before publishing it; original archive files remain intact.
+-  if (_offline && ![_archivedKeys isSubsetOfSet:_capturedKeys]) {
++  // An appended batch leaves the other archives as they are.
++  BOOL replaces = _offline && !_offlineAppend;
++  if (replaces && ![_archivedKeys isSubsetOfSet:_capturedKeys]) {
+     atomic_fetch_add(&_archiveFailures, 1);
+     [self event:@"archive_serialize" values:@{@"success": @NO, @"failure_stage": @"incomplete_previous_coverage"}];
+     return;
+@@ -616,36 +711,35 @@
+   @try {
+     NSError *error = nil;
+     BOOL serialized = [archive serializeToURL:[NSURL fileURLWithPath:temporary] error:&error];
+-    NSData *bytes = serialized ? readBounded(temporary, ArchiveByteLimit) : nil;
+-    NSString *hash = digest(bytes);
++    uint64_t length = 0;
++    NSString *hash = serialized ? digestFile(temporary, ArchiveByteLimit, &length) : nil;
+     BOOL saved = NO;
+-    if (bytes && hash && _diskBytes <= DiskByteLimit - bytes.length &&
+-        (_offline || _activeArchiveBytes <= ArchiveByteLimit - bytes.length)) {
++    if (hash && _diskBytes <= DiskByteLimit - length) {
+       NSString *target = [_archiveDirectory stringByAppendingPathComponent:[hash stringByAppendingString:@".metallib"]];
+       struct stat prior;
+       BOOL exists = !lstat(target.fileSystemRepresentation, &prior);
+-      if (exists && S_ISREG(prior.st_mode) && [digest(readBounded(target, ArchiveByteLimit)) isEqual:hash]) saved = YES;
++      if (exists && S_ISREG(prior.st_mode) && [digestFile(target, ArchiveByteLimit, NULL) isEqual:hash]) saved = YES;
+       else if ((!exists || S_ISREG(prior.st_mode)) &&
+                !rename(temporary.fileSystemRepresentation, target.fileSystemRepresentation)) {
+         uint64_t old = exists ? (uint64_t)prior.st_size : 0;
+-        _diskBytes += bytes.length; _diskBytes -= MIN(old, _diskBytes);
++        _diskBytes += length; _diskBytes -= MIN(old, _diskBytes);
+         if (!exists) ++_archiveFiles;
+         saved = YES;
+       }
+       if (saved) {
+-        NSMutableArray *entries = _offline ? [NSMutableArray array] : [NSMutableArray arrayWithArray:_archiveEntries];
+-        [entries addObject:@{@"sha256": hash, @"bytes": @(bytes.length), @"prepared_keys": _capturedKeys.allObjects}];
++        NSMutableArray *entries = replaces ? [NSMutableArray array] : [NSMutableArray arrayWithArray:_archiveEntries];
++        [entries addObject:@{@"sha256": hash, @"bytes": @(length), @"prepared_keys": _capturedKeys.allObjects}];
+         NSData *manifest = [NSJSONSerialization dataWithJSONObject:@{@"schema": @2, @"archives": entries,
+             @"prepared_keys": _archivedKeys.allObjects} options:0 error:nil];
+-        if (manifest.length > 1024 * 1024) saved = NO;
++        if (manifest.length > ManifestByteLimit) saved = NO;
+         else saved = [self writeData:manifest to:[_directory stringByAppendingPathComponent:@"archive.json"]];
+-        if (saved) { [_archiveEntries setArray:entries]; _activeArchiveBytes = (_offline ? 0 : _activeArchiveBytes) + bytes.length; }
++        if (saved) { [_archiveEntries setArray:entries]; _activeArchiveBytes = (replaces ? 0 : _activeArchiveBytes) + length; }
+       }
+     }
+     if (!saved) atomic_fetch_add(&_archiveFailures, 1);
+-    [self event:@"archive_serialize" values:@{@"success": @(saved), @"bytes": @(bytes.length),
++    [self event:@"archive_serialize" values:@{@"success": @(saved), @"bytes": @(length),
+         @"serialized": @(serialized), @"error_domain": error.domain ?: @"", @"error_code": @(error.code),
+-        @"failure_stage": saved ? @"none" : !serialized ? @"serialize" : !bytes ? @"readback" : @"publish"}];
++        @"failure_stage": saved ? @"none" : !serialized ? @"serialize" : !hash ? @"readback" : @"publish"}];
+   } @finally {
+     unlink(temporary.fileSystemRepresentation);
+   }

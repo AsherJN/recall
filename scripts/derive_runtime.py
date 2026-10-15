@@ -50,6 +50,11 @@ and makes the game app again from that loader; unsigned, every file stays byte-i
 in that workspace (MetalFX upscaling: dxmt-metalfx-upscaling.patch), replaces Wine's d3d12.dll
 with DXMT's stand-in and adds DXMT's signed DLSS stand-in (nvngx.dll), its NVAPI stand-in
 (nvapi64.dll) and NVAPI's MIT license. Launches disable all three unless upscaling is on.
+
+--shader-pack DXMT_WORKSPACE (1.4) replaces the base's winemetal.so with the build_portable_dxmt.py
+build in that workspace (dxmt-shader-pack.patch: the shader pack holds every learned pipeline).
+The patch changes only the pipeline cache, which only winemetal.so contains, so DXMT's other files
+stay as the base ships them.
 """
 import argparse
 import hashlib
@@ -818,6 +823,40 @@ def derive_metalfx(base_version, version, identity, dxmt_workspace):
         raise ValueError('nvngx.dll changed on its way into the runtime')
 
 
+# The shader pack (1.4): every learned pipeline is prepared, in batches, with no limit on the
+# pack's size (pipeline_cache.c, which only winemetal.so contains).
+SHADER_PACK_PATCHES = {**DXMT_PATCHES, 'patches/dxmt-shader-pack.patch': 'shader_pack_patch_sha256'}
+SHADER_PACK_REPLACED = {'lib/wine/x86_64-unix/winemetal.so': 'x86_64-unix/winemetal.so'}
+
+
+def derive_shader_pack(base_version, version, identity, dxmt_workspace):
+    """1.4: the shader pack. The DXMT build with the shader pack patch on top of the MetalFX
+    build's patches gives the base a new winemetal.so, packaged as the assembler packages DXMT's
+    and signed; every other file stays byte-identical."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
+        raise ValueError('Invalid runtime version')
+    base, dest = ARTIFACTS / base_version, ARTIFACTS / version
+    if dest.exists() or Path(str(dest) + '.tar.gz').exists():
+        raise ValueError('Use a new version; existing artifact is never overwritten')
+    manifest = json.loads((base / 'runtime.json').read_text())
+    if manifest['version'] != base_version:
+        raise ValueError('The base artifact names a different version')
+    proof = json.loads((dxmt_workspace / 'dxmt-build-proof.json').read_text())
+    install = dxmt_workspace / 'dxmt-install'
+    for patch, key in SHADER_PACK_PATCHES.items():
+        if proof.get(key) != sha(ROOT / patch):
+            raise ValueError(f'Rebuild DXMT: {patch} changed since the build')
+    record = {'built_by': 'scripts/build_portable_dxmt.py',
+              'patches': {patch: proof[key] for patch, key in SHADER_PACK_PATCHES.items()}}
+    sources, replaced = {}, {}
+    for relative, built in SHADER_PACK_REPLACED.items():
+        if proof['files'].get(built) != sha(install / built):
+            raise ValueError(f'DXMT build proof does not match {built}')
+        sources[relative] = install / built
+        replaced[relative] = dict(record, build_sha256=proof['files'][built])
+    replace_files(base, dest, base_version, version, identity, manifest, sources, replaced)
+
+
 def unsigned_identical(original, resigned):
     """True when the two files are the same once their signatures are removed."""
     with tempfile.TemporaryDirectory() as folder:
@@ -940,6 +979,8 @@ if __name__ == '__main__':
     parser.add_argument('--metalfx', type=Path, metavar='DXMT_WORKSPACE',
                         help="Replace DXMT with this build_portable_dxmt.py workspace's MetalFX build and add its "
                              'd3d12, DLSS and NVAPI stand-ins')
+    parser.add_argument('--shader-pack', type=Path, metavar='DXMT_WORKSPACE',
+                        help="Replace winemetal.so with this build_portable_dxmt.py workspace's shader pack build")
     args = parser.parse_args()
     if args.repackage:
         repackage(args.base_version, args.version)
@@ -953,6 +994,8 @@ if __name__ == '__main__':
         derive_microphone(args.base_version, args.version, args.identity)
     elif args.metalfx:
         derive_metalfx(args.base_version, args.version, args.identity, args.metalfx.resolve())
+    elif args.shader_pack:
+        derive_shader_pack(args.base_version, args.version, args.identity, args.shader_pack.resolve())
     elif args.minimum_macos:
         restamp_runtime(args.base_version, args.version, args.identity, args.minimum_macos)
     elif args.native:

@@ -23,12 +23,13 @@ enum SettingsTab:String, CaseIterable, Identifiable {
 struct SettingsSheet:View {
     @Bindable var model:AppModel
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var scheme
     @State private var confirmForceQuit=false
     @State private var confirmRepair=false
     @State private var confirmResetDisplay=false
     @State private var confirmKorean=false
     @State private var aboutUpscaling=false
+    /// Shader memory's slider: how many of the shader cache's parts Overwatch loads.
+    @State private var shaderParts=1.0
     /// Follows System Settings: the main display can change while Settings is open.
     @State private var main=MainDisplay.current
     /// Also follows System Settings, where the player turns the microphone on or off.
@@ -36,11 +37,15 @@ struct SettingsSheet:View {
     var body:some View {
         VStack(spacing:16) {
             LauncherHeading(title:"Settings",subtitle:"",compact:true)
-            tabs
-            // Each tab fits without scrolling; the sheet takes the open tab's height, as the
-            // update sheet takes its step's.
-            VStack(spacing:12) { page }
-            if !model.notice.isEmpty { LauncherNotice(text:model.notice) }
+            LauncherTabs(tabs:SettingsTab.allCases,selection:$model.settingsTab,title:\.title,symbol:\.symbol)
+            // One size on every tab, so the tabs, Done and Uninstall never move. The page sits
+            // under the tabs; a page (or a page and a notice) taller than the room scrolls.
+            ScrollView {
+                VStack(spacing:12) {
+                    page
+                    if !model.notice.isEmpty { LauncherNotice(text:model.notice) }
+                }
+            }.scrollBounceBehavior(.basedOnSize).frame(maxHeight:.infinity,alignment:.top)
             HStack {
                 // Uninstall lives here, always visible and apart from the
                 // everyday settings; it opens its own confirmation.
@@ -51,7 +56,8 @@ struct SettingsSheet:View {
                 Spacer()
                 Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
             }
-        }.font(LauncherStyle.font(14)).padding(.horizontal,32).padding(.vertical,28).frame(width:540)
+        }.font(LauncherStyle.font(14)).padding(.horizontal,32).padding(.vertical,28)
+            .frame(width:LauncherStyle.sheetWidth,height:LauncherStyle.largeSheetHeight)
             .tint(.primary).background { LauncherBackground() }
             .onReceive(NotificationCenter.default.publisher(for:NSApplication.didChangeScreenParametersNotification)) { _ in
                 main=MainDisplay.current
@@ -77,28 +83,6 @@ struct SettingsSheet:View {
                 Button("Reset",action:model.resetDisplay)
             } message: { Text("Overwatch will open full screen at \(DisplayResolution.initial(for:main).label)\(model.rememberEachDisplay ? " on this display" : "") the next time it starts. Your graphics quality and FPS settings stay as they are.") }
     }
-    /// The categories, each an icon above its name, like the toolbar of a Mac app's Settings.
-    private var tabs:some View {
-        HStack(spacing:6) {
-            ForEach(SettingsTab.allCases) { tab in
-                let selected=model.settingsTab == tab
-                let shape=RoundedRectangle(cornerRadius:14,style:.continuous)
-                Button { model.settingsTab=tab } label: {
-                    VStack(spacing:5) {
-                        Image(systemName:tab.symbol).font(.system(size:17,weight:.medium)).frame(height:21)
-                            .foregroundStyle(selected ? AnyShapeStyle(LauncherStyle.accent) : AnyShapeStyle(.secondary))
-                        Text(tab.title).font(LauncherStyle.font(12,selected ? .semibold : .medium))
-                            .foregroundStyle(selected ? .primary : .secondary)
-                    }.frame(width:78,height:54)
-                        .background {
-                            if selected {
-                                shape.fill(LauncherStyle.surface(scheme)).overlay { shape.strokeBorder(.primary.opacity(0.05),lineWidth:1) }
-                            }
-                        }.contentShape(shape)
-                }.buttonStyle(.plain).accessibilityLabel(tab.title).accessibilityAddTraits(selected ? .isSelected : [])
-            }
-        }
-    }
     @ViewBuilder private var page:some View {
         switch model.settingsTab {
         case .general:
@@ -110,6 +94,7 @@ struct SettingsSheet:View {
         case .graphics:
             upscaling
             metalHUD
+            shaderMemory
         case .audio:
             microphone
             sound
@@ -312,6 +297,53 @@ struct SettingsSheet:View {
             }
         }
     }
+    /// How much of the shader cache Overwatch loads when it starts (ShaderMemory): its parts
+    /// load in order, slowest shaders first, and the slider picks how many. Overwatch reads the
+    /// choice as it starts, so it can change while Battle.net or the game is open.
+    private var shaderMemory:some View {
+        let parts=model.shaderPack
+        let count=parts.count > 1 ? Int(shaderParts) : parts.count
+        let loaded=parts.prefix(count),total=parts.reduce(0) { $0+$1.shaders }
+        let shaders=loaded.reduce(0) { $0+$1.shaders }
+        let bytes=loaded.reduce(Int64(0)) { $0+$1.bytes }
+        let caption=parts.isEmpty ? "\(Brand.name) builds your shader cache after your first match."
+            : count >= parts.count ? "Loads all \(total.formatted()) shaders."
+            : count == 1 ? "Loads the \(shaders.formatted()) slowest shaders, as earlier versions did. The rest come from macOS’s shader cache."
+            : "Loads \(shaders.formatted()) of \(total.formatted()) shaders, slowest first. The rest come from macOS’s shader cache."
+        return LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:10) {
+                HStack(alignment:.center,spacing:12) {
+                    VStack(alignment:.leading,spacing:2) {
+                        Text("Shader memory").font(LauncherStyle.font(14,.semibold))
+                        Text("How much of your shader cache Overwatch loads when it starts. All of it means the fewest stutters.")
+                            .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Spacer(minLength:12)
+                    if !parts.isEmpty {
+                        Text(ByteCountFormatter.string(fromByteCount:bytes,countStyle:.file)).font(LauncherStyle.font(13,.medium)).monospacedDigit()
+                    }
+                }.accessibilityElement(children:.combine)
+                if parts.count > 1 {
+                    HStack(spacing:10) {
+                        Text("Slowest only").font(LauncherStyle.font(12)).foregroundStyle(.secondary).accessibilityHidden(true)
+                        Slider(value:$shaderParts,in:1...Double(parts.count),step:1) {
+                            Text("Shader memory")
+                        } onEditingChanged: { editing in
+                            if !editing { model.chooseShaderMemory(ShaderMemory.choice(loading:Int(shaderParts),of:parts)) }
+                        }.labelsHidden().tint(LauncherStyle.accent).accessibilityValue(caption)
+                        Text("All").font(LauncherStyle.font(12)).foregroundStyle(.secondary).accessibilityHidden(true)
+                    }
+                }
+                Text(caption).font(LauncherStyle.font(13)).lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+                Text(model.running == .game ? "Applies the next time Overwatch starts. Only lower this if your Mac runs short of memory during matches; it’s meant for Macs with 8 GB."
+                     : "Only lower this if your Mac runs short of memory during matches; it’s meant for Macs with 8 GB.")
+                    .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+            }
+        }.onAppear {
+            model.loadShaderPack()
+            shaderParts=Double(max(1,ShaderMemory.loaded(model.shaderMemory,model.shaderPack)))
+        }
+    }
     /// A setting Battle.net carries from when it opens: change it once it's closed.
     private func closeFirst(_ running:AppModel.Running, _ what:String) -> some View {
         HStack(spacing:12) {
@@ -494,112 +526,12 @@ struct KoreanSupportSheet:View {
                     .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)
                     .tint(LauncherStyle.accent).foregroundStyle(LauncherStyle.ink)
             }
-        }.font(LauncherStyle.font(14)).padding(32).frame(width:520)
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
             .tint(.primary).background { LauncherBackground() }
     }
     private func paragraph(_ text:String) -> some View {
         Text(text).font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary)
             .frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
-    }
-}
-struct HelpSheet:View {
-    @Bindable var model:AppModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var reportExpanded=false
-    @State private var expanded=Set<Int>()
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private let questions:[(question:String, answer:String)]=[
-        ("What are the best Overwatch settings?","In Overwatch’s Video settings, set Render Scale to 100%, Dynamic Render Scale to Off and Frame Rate to Custom, then restart Overwatch. Overwatch resets these whenever you change the graphics quality preset, so check them again after a preset change."),
-        ("How do I use MetalFX upscaling?","Close Battle.net, turn on Settings › Graphics › MetalFX upscaling, then play from \(Brand.name). In Overwatch’s Video settings, choose NVIDIA DLSS and a mode: Quality looks closest to full resolution; Performance and Ultra Performance give the most FPS. The info button beside the setting explains how it works."),
-        ("Why do my first matches stutter?","Your Mac prepares each of Overwatch’s graphics effects the first time it appears. The stutters fade as you play, and the prepared graphics are kept for next time."),
-        ("How do I play on an external monitor?","Overwatch opens on your main display, the one with the menu bar. In System Settings › Displays, select the monitor and set Use as to Main display. Then choose your monitor’s resolution in Overwatch under Options › Video, for example 2560 × 1440 for a 1440p monitor or 5120 × 2160 for a 5K2K ultrawide. \(Brand.name) remembers it for that monitor, and your MacBook screen keeps its own."),
-        ("“No compatible graphics hardware was found”","This can follow connecting or unplugging a display while Battle.net was open. Open Battle.net from \(Brand.name) rather than from the Dock: \(Brand.name) reopens it for your current displays."),
-        ("Which resolution should I choose?","Your display’s own resolution gives the sharpest picture; a smaller one runs faster and is scaled up to fill the screen. Change it in Overwatch under Options › Video, or in Settings › Display, which shows what each size looks like on your main display."),
-        ("The game is black or the wrong size","Quit Overwatch, choose Settings › Display › Reset Display Settings, then play again. Overwatch opens at 1080p; your graphics and FPS settings stay as they are."),
-        ("I can’t find the game window","Select Overwatch or Battle.net in the Dock. If it’s still hidden, check your other desktops."),
-        ("Battle.net shows a blank window","Close Battle.net, then open it again from \(Brand.name)."),
-        ("Battle.net looks too big or too small","This can follow connecting, unplugging or rearranging displays while Battle.net was open. Close Battle.net, then open it again from \(Brand.name)."),
-        ("The game stopped responding","Choose Settings › Advanced › Force Quit, then open Overwatch again. If it still won’t start, choose Settings › Advanced › Repair Game Files."),
-        ("Battle.net can’t connect on a work or school network","Some of these networks set up their proxy automatically. Close Battle.net, turn on Settings › Advanced › Detect network proxy automatically, then open Battle.net again from \(Brand.name)."),
-        ("Overwatch closes as it starts on a Korean account","Korean accounts linked to Nexon need Korean account support (한국 계정 지원), an experimental option in Settings › Advanced. Close Battle.net, turn it on, then play from \(Brand.name)."),
-        ("My team can’t hear me","Open Settings › Audio. If the microphone is off, choose Turn On…, switch on \(Brand.name) in System Settings, then open \(Brand.name) again. Then check the voice chat settings in Overwatch’s Sound options."),
-        ("Which Macs can play?","Macs with Apple silicon on macOS 26.5 or later, with Rosetta. 16 GB of memory is recommended, and a new installation needs about 85–95 GB of storage."),
-        ("How do I uninstall?","Choose Settings › Uninstall \(Brand.name). \(Brand.name), Battle.net and Overwatch move to the Trash; your Blizzard account isn’t affected."),
-        ("Found a bug?","Choose Report a Problem to open an issue on GitHub, and attach a support report (below): it lists your setup, never account details."),
-    ]
-    var body:some View {
-        VStack(spacing:24) {
-            LauncherHeading(title:"Help & FAQ",subtitle:"Quick answers to common questions.",compact:true)
-            ScrollView {
-                VStack(spacing:16) {
-                    LauncherPanel(inset:0) {
-                        VStack(spacing:0) {
-                            ForEach(questions.indices,id:\.self) { index in
-                                if index>0 { Divider().padding(.horizontal,20) }
-                                question(index)
-                            }
-                        }
-                    }
-                    LauncherPanel(inset:0) {
-                        VStack(spacing:0) {
-                            Button {
-                                withAnimation(reduceMotion ? nil : .easeInOut(duration:0.18)) { reportExpanded.toggle() }
-                            } label: {
-                                HStack {
-                                    Text("Support report").font(LauncherStyle.font(15,.semibold))
-                                    Spacer()
-                                    Image(systemName:reportExpanded ? "chevron.up" : "chevron.down")
-                                        .font(.system(size:12,weight:.semibold)).foregroundStyle(.secondary)
-                                }.padding(20).frame(maxWidth:.infinity).contentShape(Rectangle())
-                            }.buttonStyle(.plain).accessibilityValue(reportExpanded ? "Expanded" : "Collapsed")
-                                .accessibilityHint("Show or hide the report preview")
-                            if reportExpanded {
-                            VStack(alignment:.leading,spacing:16) {
-                                Text("Review exactly what will be saved. Nothing is uploaded.")
-                                    .font(LauncherStyle.font(13)).foregroundStyle(.secondary)
-                                Text(model.report).font(LauncherStyle.font(12)).textSelection(.enabled)
-                                    .frame(maxWidth:.infinity,alignment:.leading).accessibilityLabel("Support report preview")
-                                HStack {
-                                    Button("Refresh",action:model.makeReport).buttonStyle(.borderless)
-                                    Spacer()
-                                    Button("Save Report…",action:model.saveReport).buttonStyle(.bordered).buttonBorderShape(.capsule)
-                                }
-                            }.padding(.horizontal,20).padding(.bottom,20)
-                            }
-                        }
-                    }
-                    RepositoryLink()
-                }
-            }.scrollIndicators(.hidden)
-            HStack {
-                Link(destination:Brand.issues) {
-                    Label("Report a Problem",systemImage:"exclamationmark.bubble").font(LauncherStyle.font(13,.medium))
-                }.buttonStyle(.borderless).help("Open a new issue on GitHub in your browser")
-                Spacer()
-                Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.defaultAction)
-            }
-        }.font(LauncherStyle.font(14)).padding(32).frame(width:540,height:660)
-            .tint(.primary).background { LauncherBackground() }
-    }
-    private func question(_ index:Int)->some View {
-        let open=expanded.contains(index)
-        return VStack(alignment:.leading,spacing:0) {
-            Button {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration:0.16)) { if open { expanded.remove(index) } else { expanded.insert(index) } }
-            } label: {
-                HStack(spacing:12) {
-                    Text(questions[index].question).font(LauncherStyle.font(14,.semibold)).multilineTextAlignment(.leading)
-                    Spacer(minLength:8)
-                    Image(systemName:"chevron.down").font(.system(size:11,weight:.semibold)).foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(open ? 180 : 0)).accessibilityHidden(true)
-                }.padding(.horizontal,20).padding(.vertical,14).frame(maxWidth:.infinity,alignment:.leading).contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityValue(open ? "Expanded" : "Collapsed")
-            if open {
-                Text(questions[index].answer).font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary)
-                    .fixedSize(horizontal:false,vertical:true).textSelection(.enabled)
-                    .padding(.horizontal,20).padding(.bottom,16)
-            }
-        }
     }
 }
 struct AboutSheet:View {
@@ -628,6 +560,9 @@ struct AboutSheet:View {
                         .foregroundStyle(.secondary).help("Show \(Brand.name)’s license and notices")
                 }.font(LauncherStyle.font(12))
             }
+            // The heading, the repository row and the bottom row stay put; the letter and the
+            // support section scroll, as Help's content does.
+            ScrollView {
             LauncherPanel {
                 VStack(alignment:.leading,spacing:18) {
                     HStack(alignment:.center,spacing:16) {
@@ -656,14 +591,14 @@ struct AboutSheet:View {
                     }
                 }
             }
-            Spacer(minLength:0)
+            }.scrollBounceBehavior(.basedOnSize).frame(maxHeight:.infinity,alignment:.top)
             HStack(alignment:.bottom,spacing:20) {
                 Text(Brand.trademarks).font(LauncherStyle.font(10.5)).lineSpacing(1).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                 Spacer(minLength:0)
                 Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
-                    .controlSize(.large).keyboardShortcut(.defaultAction)
+                    .controlSize(.large).keyboardShortcut(.defaultAction).closesOnEscape { dismiss() }
             }
-        }.padding(28).frame(width:520,height:880,alignment:.top).tint(.primary)
+        }.padding(28).frame(width:LauncherStyle.sheetWidth,height:LauncherStyle.largeSheetHeight,alignment:.top).tint(.primary)
             .background(LauncherStyle.ground(scheme))
             .sheet(isPresented:$licenses) { LicensesSheet() }
     }
@@ -686,8 +621,8 @@ struct LicensesSheet:View {
                     Text(text.isEmpty ? "The license files are missing from this copy of \(Brand.name)." : text)
                         .font(.system(size:10.5,design:.monospaced)).lineSpacing(2).textSelection(.enabled)
                         .frame(maxWidth:.infinity,alignment:.leading)
-                }.frame(height:340)
-            }
+                }.frame(maxHeight:.infinity)
+            }.frame(maxHeight:.infinity)
             HStack(spacing:16) {
                 if let thirdParty {
                     Button("Third-Party Licenses") { NSWorkspace.shared.activateFileViewerSelecting([thirdParty]) }
@@ -696,9 +631,9 @@ struct LicensesSheet:View {
                 }
                 Spacer()
                 Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
-                    .controlSize(.large).keyboardShortcut(.defaultAction)
+                    .controlSize(.large).keyboardShortcut(.defaultAction).closesOnEscape { dismiss() }
             }
-        }.font(LauncherStyle.font(14)).padding(32).frame(width:660)
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth,height:LauncherStyle.largeSheetHeight)
             .tint(.primary).background { LauncherBackground() }
     }
 }
@@ -742,7 +677,7 @@ struct UninstallSheet:View {
                 Button("Quit") { model.quit() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                     .controlSize(.large).keyboardShortcut(.defaultAction)
             }
-        }.font(LauncherStyle.font(14)).padding(32).frame(width:520)
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
             .tint(.primary).background { LauncherBackground() }
     }
     private func row(_ name:String,_ detail:String)->some View {
@@ -795,6 +730,7 @@ struct UpdateSheet:View {
             case .upToDate:
                 SheetHero(symbol:"checkmark",title:"You’re up to date",subtitle:"\(Brand.name) \(UpdateCheck.installed) is the latest version.")
                 Button("Done") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.defaultAction)
+                    .closesOnEscape { dismiss() }
             case .failed(let message):
                 SheetHero(symbol:"exclamationmark",title:"Couldn’t check for updates",subtitle:message)
                 HStack(spacing:16) {
@@ -807,8 +743,50 @@ struct UpdateSheet:View {
                 ProgressView().controlSize(.small).accessibilityLabel("Checking for updates")
                 Button("Cancel") { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).keyboardShortcut(.cancelAction)
             }
-        }.font(LauncherStyle.font(14)).padding(32).frame(width:520)
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
             .tint(.primary).background { LauncherBackground() }
+    }
+}
+/// After updating to 1.4, once, following What's New (AppModel.whatsNewClosed): the shaders
+/// Overwatch has used get prepared for 1.4's shader cache now, or after the next match. Built
+/// for a quick yes: the facts in three lines and one large button.
+struct ShaderUpdateSheet:View {
+    @Bindable var model:AppModel
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body:some View {
+        VStack(spacing:24) {
+            VStack(spacing:20) {
+                Image(systemName:"square.stack.3d.up.fill").font(.system(size:30,weight:.medium))
+                    .foregroundStyle(LauncherStyle.accent)
+                    .symbolEffect(.breathe,isActive:!reduceMotion)
+                    .frame(width:72,height:72)
+                    .background(LauncherStyle.accent.opacity(0.14),in:RoundedRectangle(cornerRadius:22,style:.continuous))
+                    .accessibilityHidden(true)
+                LauncherHeading(title:"Update your shader cache",
+                                subtitle:"\(Brand.name) 1.4 compiles and loads shaders more efficiently. Update your shader cache once and you’re set.",compact:true)
+            }
+            LauncherPanel {
+                VStack(alignment:.leading,spacing:14) {
+                    if model.shaderUpdatePending > 0 { fact("bolt.fill","\(model.shaderUpdatePending.formatted()) of your shaders to upgrade") }
+                    fact("clock.fill","About 5–15 minutes, one time only")
+                    fact("laptopcomputer","Keep using your Mac while it runs")
+                }
+            }
+            VStack(spacing:12) {
+                LauncherPrimaryAction(title:"Update Now",wide:true) { model.updateShaderCache() }.keyboardShortcut(.defaultAction)
+                Button("Maybe later") { dismiss() }.buttonStyle(.borderless).font(LauncherStyle.font(14,.medium))
+                    .foregroundStyle(.secondary).keyboardShortcut(.cancelAction)
+            }
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
+            .tint(.primary).background { LauncherBackground() }
+    }
+    private func fact(_ symbol:String,_ text:String)->some View {
+        HStack(spacing:14) {
+            Image(systemName:symbol).font(.system(size:16,weight:.semibold)).foregroundStyle(LauncherStyle.accent)
+                .frame(width:24).accessibilityHidden(true)
+            Text(text).font(LauncherStyle.font(15,.medium)).foregroundStyle(.primary).fixedSize(horizontal:false,vertical:true)
+        }
     }
 }
 struct WhatsNewSheet:View {
@@ -834,9 +812,9 @@ struct WhatsNewSheet:View {
             HStack(spacing:16) {
                 Link("Release Notes",destination:Brand.releases).font(LauncherStyle.font(13))
                 Spacer()
-                LauncherPrimaryAction(title:"Continue") { dismiss() }.keyboardShortcut(.defaultAction)
+                LauncherPrimaryAction(title:"Continue") { dismiss() }.keyboardShortcut(.defaultAction).closesOnEscape { dismiss() }
             }
-        }.font(LauncherStyle.font(14)).padding(32).frame(width:520)
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
             .tint(.primary).background { LauncherBackground() }
     }
 }

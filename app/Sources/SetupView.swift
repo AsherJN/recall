@@ -25,13 +25,14 @@ struct SetupView: View {
                         if model.screen == .launching && model.graphics.phase != nil { GraphicsDetails(progress:model.graphics) }
                     }.frame(maxWidth:LauncherStyle.contentWidth).padding(.top,model.screen == .welcome ? 28 : 34)
                     Spacer(minLength:28)
+                    DiscordLink().frame(maxWidth:LauncherStyle.contentWidth).padding(.bottom,supportPlacement == nil ? 20 : 14)
                     if let placement=supportPlacement {
                         SupportCard(placement:placement).frame(maxWidth:LauncherStyle.contentWidth).padding(.bottom,20)
                     }
                     VersionStatus(model:model).padding(.bottom,12)
                     HStack(spacing:12) {
                         FooterTile(title:"Settings",symbol:"gearshape") { model.sheet = .settings }.disabled(model.screen == .moveApp)
-                        FooterTile(title:"Help & FAQ",symbol:"questionmark.circle") { model.makeReport();model.sheet = .help }
+                        FooterTile(title:"Help & FAQ",symbol:"questionmark.circle") { model.openHelp() }
                         FooterTile(title:"About",symbol:"info.circle") { model.sheet = .about }
                     }.frame(maxWidth:LauncherStyle.contentWidth).padding(.bottom,24)
                 }.padding(.horizontal,36).frame(maxWidth:.infinity).frame(minHeight:geometry.size.height)
@@ -48,10 +49,19 @@ struct SetupView: View {
             case .uninstall: UninstallSheet(model:model).interactiveDismissDisabled(model.uninstall == .working)
             case .update: UpdateSheet(model:model).interactiveDismissDisabled(model.update == .installing)
                 .onDisappear { model.updateSheetClosed() }
-            case .whatsNew: WhatsNewSheet()
+            case .whatsNew: WhatsNewSheet().onDisappear { model.whatsNewClosed() }
+            case .shaderUpdate: ShaderUpdateSheet(model:model)
             }
         }
         .task { model.startup() }
+        // While the after-match status shows, look again every few seconds to see it finish.
+        .task(id:model.showsAfterMatch) {
+            while model.showsAfterMatch && !Task.isCancelled {
+                try? await Task.sleep(for:.seconds(3))
+                model.checkAfterMatch()
+            }
+        }
+        .onChange(of:model.screen) { _,screen in if screen == .ready || screen == .running { model.checkAfterMatch() } }
     }
     /// Josh's support card, once Battle.net has opened for the first time.
     private var supportPlacement:Brand.Placement? {
@@ -155,14 +165,17 @@ struct SetupView: View {
         case .ready:
             VStack(spacing:16) {
                 if model.lowStorage { storageWarning }
-                PerformanceTip()
+                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) } else { PerformanceTip() }
                 if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
+                if !model.gameInstalled { XboxSignInNote(model:model) }
                 if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
             }
         case .running:
             VStack(spacing:16) {
-                PerformanceTip()
+                if model.existingName == "Overwatch" && model.gameWindowHidden { GameClosingNote() }
+                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) } else { PerformanceTip() }
                 if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
+                if !model.gameInstalled { XboxSignInNote(model:model) }
                 if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
             }
         case .driveMissing: EmptyView()
@@ -337,6 +350,22 @@ struct FirstMatchTip: View {
             .padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
             .task(id:copied) { if copied { try? await Task.sleep(for:.seconds(2));copied=false } }
+    }
+}
+// Overwatch is running with its window out of sight (AppModel.gameWindowHidden): usually
+// still closing after Exit to Desktop. Force Quit asks first (AppDelegate.forceQuit).
+struct GameClosingNote: View {
+    var body:some View {
+        LauncherNotice(text:"Just exited Overwatch? It can take up to a minute to close after its window goes away. If it doesn’t, choose Force Quit.",
+                       symbol:"hourglass",action:("Force Quit…",{ NSApp.sendAction(#selector(AppDelegate.forceQuit),to:nil,from:nil) }))
+    }
+}
+// Before Overwatch is installed, while the player signs in to Battle.net (issue #33).
+struct XboxSignInNote: View {
+    let model:AppModel
+    var body:some View {
+        LauncherNotice(text:"Signing in with Xbox? If Battle.net keeps waiting after your browser says to return, see Help › Troubleshooting.",
+                       symbol:"person.badge.key",action:("Open Help",{ model.openHelp(.troubleshooting,topic:"xbox") }))
     }
 }
 // Korean accounts linked to Nexon need Korean account support (Settings › Advanced). Shown

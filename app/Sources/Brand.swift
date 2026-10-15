@@ -17,17 +17,18 @@ enum Brand {
     /// "<anything>-<version>.dmg", so a later rename cannot strand an install.
     static let releaseFeed=URL(string:"https://api.github.com/repos/\(repositoryPath)/releases/latest")!
     static func diskImage(_ version:String)->String { "\(name)-\(version).dmg" }
+    /// The community server's permanent invite (unlimited uses); it lands in #start-here.
+    /// Opens in the browser, which hands it to the Discord app when one is installed.
+    static let discord=URL(string:"https://discord.gg/pexasKezCn")!
     static let trademarks="Not affiliated with or endorsed by Blizzard Entertainment or Apple. Overwatch is a trademark of Blizzard Entertainment, Inc. Mac is a trademark of Apple Inc."
 
-    // The author's links. Mosaic News links say where in the app they were
-    // opened (utm_content), so its analytics can tell the placements apart.
+    // The author's links. Mosaic News opens on the App Store, where every Mac that runs
+    // Recall can install it. Each placement keeps its own call, so App Store Connect
+    // campaign links (pt and ct) can tell them apart once a provider token is added.
     static let linkedIn=URL(string:"https://www.linkedin.com/in/asherjn/")!
     static let koFi=URL(string:"https://ko-fi.com/asherjn")!
     enum Placement: String { case home, running, loading, about }
     static func mosaic(_ placement:Placement)->URL {
-        var link=URLComponents(string:"https://mosaicnews.app/")!
-        link.queryItems=[URLQueryItem(name:"utm_source",value:"recall"),URLQueryItem(name:"utm_medium",value:"app"),
-                         URLQueryItem(name:"utm_campaign",value:"support"),URLQueryItem(name:"utm_content",value:placement.rawValue)]
-        return link.url!
+        URL(string:"https://apps.apple.com/us/app/mosaic-news-build-your-news/id6760421352")!
     }
 }

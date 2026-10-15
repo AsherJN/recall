@@ -8,6 +8,15 @@ enum LauncherStyle {
     static let ink=Color(red:0.15,green:0.13,blue:0.10)
     static let contentWidth:CGFloat=440
     static let radius:CGFloat=22
+    /// Every pop-up (sheet) is this wide. The large ones (Settings, Help & FAQ, About, Licenses)
+    /// are also all this tall, so switching between them, or between tabs, moves nothing.
+    static let sheetWidth:CGFloat=540
+    static let largeSheetHeight:CGFloat=760
+    /// 760 fits every Settings tab at its tallest (Graphics while Battle.net is open, 745;
+    /// Display with two monitors, 714); only a notice on top of that scrolls (owner, 2026-10-14).
+    /// The main window's smallest size (Main.swift): tall enough for a large pop-up under the
+    /// title bar, and the window's starting height.
+    static let windowMinimum=CGSize(width:540,height:800)
     static func font(_ size:CGFloat, _ weight:Font.Weight = .regular) -> Font {
         .system(size:size,weight:weight)
     }
@@ -76,9 +85,11 @@ struct LauncherPanel<Content:View>: View {
 }
 struct LauncherPrimaryAction: View {
     let title:String
+    /// Across the whole width it is given (the shader cache update), not just its title's.
+    var wide=false
     let action:()->Void
     var body:some View {
-        Button(action:action) { Text(title).font(LauncherStyle.font(15,.semibold)) }
+        Button(action:action) { Text(title).font(LauncherStyle.font(15,.semibold)).frame(maxWidth:wide ? .infinity : nil) }
             .buttonStyle(LauncherActionStyle())
     }
 }
@@ -154,6 +165,47 @@ struct LauncherNotice: View {
             .font(LauncherStyle.font(13)).foregroundStyle(.secondary)
             .padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
+    }
+}
+/// A sheet's categories in tabs across the top (Settings, Help), each an icon above its name,
+/// like the toolbar of a Mac app's Settings.
+struct LauncherTabs<Tab:Hashable & Identifiable>: View {
+    let tabs:[Tab]
+    @Binding var selection:Tab
+    var width:CGFloat=78
+    let title:(Tab)->String
+    let symbol:(Tab)->String
+    @Environment(\.colorScheme) private var scheme
+    var body:some View {
+        HStack(spacing:6) {
+            ForEach(tabs) { tab in
+                let selected=selection == tab
+                let shape=RoundedRectangle(cornerRadius:14,style:.continuous)
+                Button { selection=tab } label: {
+                    VStack(spacing:5) {
+                        Image(systemName:symbol(tab)).font(.system(size:17,weight:.medium)).frame(height:21)
+                            .foregroundStyle(selected ? AnyShapeStyle(LauncherStyle.accent) : AnyShapeStyle(.secondary))
+                        Text(title(tab)).font(LauncherStyle.font(12,selected ? .semibold : .medium))
+                            .foregroundStyle(selected ? .primary : .secondary)
+                    }.frame(width:width,height:54)
+                        .background {
+                            if selected {
+                                shape.fill(LauncherStyle.surface(scheme)).overlay { shape.strokeBorder(.primary.opacity(0.05),lineWidth:1) }
+                            }
+                        }.contentShape(shape)
+                }.buttonStyle(.plain).accessibilityLabel(title(tab)).accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+    }
+}
+extension View {
+    /// Esc closes a pop-up whose button answers Return, as that button would; the visible
+    /// buttons stay as they are (a button takes one keyboard shortcut).
+    func closesOnEscape(_ close:@escaping ()->Void)->some View {
+        background {
+            Button("",action:close).keyboardShortcut(.cancelAction)
+                .opacity(0).frame(width:0,height:0).accessibilityHidden(true)
+        }
     }
 }
 struct SheetHero: View {

@@ -112,6 +112,67 @@ class DisplaySetup(setup.NativeSetup):
         pidfile.write_text(str(bystander.pid))
         self.call('launch',success=False)
         self.assertIsNone(bystander.poll())
+    def launchable_fixture(self):
+        self.profile(b'[Render.13]\n')
+        (self.root/'runtimes/v1/config/dxmt.conf').write_text((setup.ROOT/'config/dxmt-source60-1200.conf').read_text())
+        (self.root/'environment/user.reg').write_text('[Software\\\\Wine\\\\Mac Driver]\n"RetinaMode"="Y"\n')
+        client=self.root/'environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe'
+        client.parent.mkdir(parents=True);client.write_text('fixture')
+    def test_shader_memory_is_kept_and_written_where_the_game_reads_it(self):
+        # Settings › Graphics › Shader memory: the worker keeps the choice and writes it beside
+        # the shader cache (load.json), which Overwatch reads as it starts. A launch writes it
+        # first, so a game started from a Battle.net already open has it too. Without a choice
+        # it is all of it, on every Mac.
+        self.launchable_fixture()
+        load=self.root/'cache/pipelines/load.json'
+        self.call('launch',success=False)  # the fixture runtime cannot start Wine
+        self.assertEqual(json.loads(load.read_text()),{'schema':1,'limit':'all'})
+        for choice,limit in (('first','first'),('450',450),('all','all')):
+            self.assertEqual(self.call('shader-memory','--limit',choice)[-1],{'stage':'shader_memory','limit':choice})
+            self.assertEqual(json.loads(load.read_text()),{'schema':1,'limit':limit})
+            self.assertEqual(self.call('status')[-1]['state']['shader_memory'],choice)
+        self.call('shader-memory','--limit','first');load.unlink()
+        self.call('launch',success=False)
+        self.assertEqual(json.loads(load.read_text()),{'schema':1,'limit':'first'})
+        for value in ('0','0450','none','12345678','-1',''):
+            self.assertEqual(self.call('shader-memory','--limit',value,success=False)[-1]['code'],'invalid_arguments')
+        self.assertEqual(self.call('status')[-1]['state']['shader_memory'],'first')
+    def test_prepare_shaders_prepares_now_in_a_monitor_of_its_own(self):
+        # The one-time shader cache update: a monitor runs the after-match preparation now,
+        # marked for the app as the update, and replaces a monitor waiting for a match. Asked
+        # again while it prepares, it is left to finish.
+        self.launchable_fixture()
+        (self.root/'cache').mkdir(exist_ok=True)
+        seen,marked=self.base/'pipeline-arguments',self.base/'pipeline-marked'
+        helper=self.binary.parent/'ow2-pipeline'
+        helper.write_text(f'#!/bin/sh\n[ -e "{self.root}/cache/shader-update" ] && touch "{marked}"\n'
+                          f'printf "%s\\n" "$@" > "{seen}"\nsleep 4\n');helper.chmod(0o755)
+        self.addCleanup(helper.unlink)
+        def stop_monitors():
+            for name in ('monitor.pid','after-session.pid'):
+                try:pid=int((self.root/'cache'/name).read_text())
+                except (OSError,ValueError):continue
+                subprocess.run(['/bin/kill',str(pid)],capture_output=True)
+        self.addCleanup(stop_monitors)
+        # A monitor waiting for a match (no Battle.net: it would end after two minutes).
+        waiting=subprocess.Popen([str(self.binary),'watch','--root',str(self.root)],stdout=subprocess.DEVNULL)
+        self.addCleanup(lambda:(waiting.kill(),waiting.wait()))
+        deadline=time.monotonic()+15
+        while not (self.root/'cache/monitor.pid').exists() and time.monotonic()<deadline:time.sleep(.05)
+        self.assertEqual(int((self.root/'cache/monitor.pid').read_text()),waiting.pid)
+        self.assertEqual(self.call('prepare-shaders')[-1],{'stage':'shader_preparation_started'})
+        self.assertIsNotNone(waiting.wait(timeout=10))
+        deadline=time.monotonic()+30
+        while not seen.exists() and time.monotonic()<deadline:time.sleep(.05)
+        self.assertEqual([str(setup.Path(line).resolve()) if line.startswith('/') else line for line in seen.read_text().splitlines()],['--after-session',str(self.root)])
+        self.assertTrue(marked.exists())
+        self.assertEqual(self.call('prepare-shaders')[-1],{'stage':'shader_preparation_running'})
+        # Done: the marker and the pid of the preparation are gone; the monitor watches on.
+        deadline=time.monotonic()+30
+        while (self.root/'cache/after-session.pid').exists() and time.monotonic()<deadline:time.sleep(.1)
+        self.assertFalse((self.root/'cache/after-session.pid').exists())
+        self.assertFalse((self.root/'cache/shader-update').exists())
+        self.assertTrue((self.root/'cache/monitor.pid').exists())
     def test_launch_writes_the_canvas_size_with_dxmt_option_names(self):
         # DXMT matches option names exactly; a case-insensitive edit once wrote
         # "fullScreenCanvasHeight", which turned the canvas off for 1080.

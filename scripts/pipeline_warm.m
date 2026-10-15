@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
     if (![MTLGetShaderCachePath() isEqualToString:cachePath]) return 3;
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device) return 2;
-    NSData *listing = readBounded(@(argv[3]), 4 * 1024 * 1024);
+    NSData *listing = readBounded(@(argv[3]), 64 * 1024 * 1024);
     NSArray *keys = listing ? [NSJSONSerialization JSONObjectWithData:listing options:0 error:nil] : nil;
     if (![keys isKindOfClass:NSArray.class] || keys.count > 32768) return 4;
     for (id key in keys) if (!validKey(key)) return 4;

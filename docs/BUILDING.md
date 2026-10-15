@@ -23,8 +23,8 @@ reference.
 
 Initialize DXMT at its exact commit and initialize the pinned DirectX and NVAPI
 headers submodules. Apply, once each and in this order, `patches/dxmt-v1-private.patch`,
-`patches/dxmt-v1-performance.patch`, `patches/dxmt-portable-metal.patch` and
-`patches/dxmt-metalfx-upscaling.patch`.
+`patches/dxmt-v1-performance.patch`, `patches/dxmt-portable-metal.patch`,
+`patches/dxmt-metalfx-upscaling.patch` and `patches/dxmt-shader-pack.patch`.
 Extract the Wine source and apply, once each and in this order,
 `patches/wine-v1-canvas.patch`, `patches/wine-mouselook.patch`,
 `patches/wine-portable-directory-boolean.patch`, Soju's
@@ -137,6 +137,12 @@ replaced, its `d3d12.dll` stand-in replaces Wine's, and its signed DLSS stand-in
 (`nvngx.dll`), its NVAPI stand-in (`nvapi64.dll`) and NVAPI's license
 (`licenses/NVAPI-MIT`) are added. Launches leave all three off unless MetalFX
 upscaling is on; `nvngx.dll` keeps the signature `build_portable_dxmt.py` gave it.
+
+Runtime `phase2-20261014.3` is `phase2-20261009.1` with the `winemetal.so` of a DXMT
+build that adds `patches/dxmt-shader-pack.patch` (`scripts/build_portable_dxmt.py`, then
+`scripts/derive_runtime.py --shader-pack <DXMT workspace>`). The patch changes only the
+pipeline cache, which only `winemetal.so` contains, so DXMT's other files stay as
+`phase2-20261009.1` ships them.
 
 Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
 replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py

@@ -20,7 +20,7 @@ ROOT=Path(__file__).resolve().parents[1]
 # The bundle and executable name players see; Brand.swift holds the in-app
 # copy. The bundle identifier keeps its original value so updates carry over.
 APP_NAME='Recall'
-APP_BUILD='52'
+APP_BUILD='66'
 # Overwatch's voice chat runs under this app's microphone permission (Microphone.swift); the
 # hardened runtime gives an app signed without the entitlement silence, with no prompt.
 ENTITLEMENTS={'com.apple.security.device.audio-input':True}
@@ -47,7 +47,7 @@ def build(output,workspace,runtime_archive,icon=None,identity=None):
     run('/usr/bin/swiftc','-file-prefix-map',str(ROOT)+'=/ow2-source','-O','-target','arm64-apple-macos'+MINIMUM_MACOS,ROOT/'scripts/portable_pipeline.swift','-o',helpers/'ow2-pipeline')
     native=workspace/'dxmt-source/src/winemetal/unix'
     # Compile only the exact accepted pipeline source, not an arbitrary checkout.
-    accepted={'pipeline_cache.c': '56531ef6221f6be9a8e621c3df7f0b8c3faf5233a763c118a4ec97142b290f9e', 'pipeline_cache.h': '5e4558226c4e4144af5f199ffd435f6c94b04ff3c9f17714605eabc0abaea16f', 'pipeline_recipe.c': '47c3c7bbb4f9286c38de1316a7bc47300faad79dc0ae40be86292da93e889dc6', 'pipeline_recipe.h': '40f4193da8270d9f3f60b8306fa6f0680f3cf226e7e307625c7a795020f18af2'}
+    accepted={'pipeline_cache.c': '2aa5d8252ab7aef24aa37b8104e2c40b00cdd5e43e6807bfb6c5607b6781f0ce', 'pipeline_cache.h': '5e4558226c4e4144af5f199ffd435f6c94b04ff3c9f17714605eabc0abaea16f', 'pipeline_recipe.c': '47c3c7bbb4f9286c38de1316a7bc47300faad79dc0ae40be86292da93e889dc6', 'pipeline_recipe.h': '40f4193da8270d9f3f60b8306fa6f0680f3cf226e7e307625c7a795020f18af2'}
     sources=('pipeline_cache.c','pipeline_cache.h','pipeline_recipe.c','pipeline_recipe.h')
     for name in sources:
         if sha(native/name)!=accepted[name]:raise ValueError('Pipeline sources differ from accepted build: '+name)

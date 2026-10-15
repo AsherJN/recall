@@ -27,6 +27,18 @@ canvas, presentation and shader/pipeline caching tuned for Overwatch.
 `scripts/portable_metal.py`, which keeps the build machine's paths out of the
 compiled shaders.
 
+`dxmt-shader-pack.patch` (1.4) lets the shader pack hold every pipeline the
+game has used on the Mac. The pipeline cache keeps learning until the disk is
+nearly full, with no size limit of its own; it checks each archive in 1 MiB
+pieces instead of reading it into memory whole; and Recall's preparation tool
+can add a batch of pipelines as one more archive (`DXMT_PIPELINE_CACHE_APPEND`)
+instead of rebuilding the pack, so preparation after a session can be stopped
+and resumed without losing finished work. A game checks the archives on all cores
+at once and loads them in order, slowest pipelines first, as much as Recall's
+Shader memory setting allows (`load.json` beside the pack: all of it unless the
+player chose less), and keeps loading past its startup deadline; only the
+preparation tool adds to the pack.
+
 `dxmt-metalfx-upscaling.patch` is MetalFX upscaling (1.3): with Recall's
 MetalFX upscaling setting on, Overwatch offers NVIDIA DLSS, which runs on
 Apple's MetalFX temporal upscaler.

@@ -24,6 +24,11 @@
      "patch": "patches/dxmt-metalfx-upscaling.patch",
      "sha256": "87ab3e3a74a1c140653d6d66cda6576049472c8999afab68bccc866e48028b17",
      "applies_after": "patches/dxmt-portable-metal.patch"
+    },
+    {
+     "patch": "patches/dxmt-shader-pack.patch",
+     "sha256": "26b64c19f499e4e7fbccfa9402ab0bdd5a0e383af2d5098aa00c9abcd7182773",
+     "applies_after": "patches/dxmt-metalfx-upscaling.patch"
     }
    ],
    "nvapi_headers_commit": "d08488fcc82eef313b0464db37d2955709691e94",
@@ -141,6 +146,10 @@
   {
    "path": "patches/dxmt-metalfx-upscaling.patch",
    "sha256": "87ab3e3a74a1c140653d6d66cda6576049472c8999afab68bccc866e48028b17"
+  },
+  {
+   "path": "patches/dxmt-shader-pack.patch",
+   "sha256": "26b64c19f499e4e7fbccfa9402ab0bdd5a0e383af2d5098aa00c9abcd7182773"
   },
   {
    "path": "patches/wine-portable-directory-boolean.patch",

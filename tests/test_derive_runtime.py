@@ -426,6 +426,75 @@ class MetalFX(unittest.TestCase):
             derive_runtime.derive_metalfx('next', 'again', '-', self.workspace)
 
 
+class ShaderPack(unittest.TestCase):
+    """1.4: the DXMT build with the shader pack patch gives the base a new winemetal.so (packaged and
+    signed as the assembler does, at the base's minimum macOS); DXMT's other files and everything else
+    stay byte-identical, and a build without the patch is refused."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ow2-shader-pack-')
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name)
+        self.addCleanup(setattr, derive_runtime, 'ARTIFACTS', derive_runtime.ARTIFACTS)
+        derive_runtime.ARTIFACTS = self.artifacts = folder / 'artifacts'
+        (folder / 'probe.c').write_text('int probe(void) { return 1; }\n')
+
+        def winemetal(path, minimum='26.0'):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-mmacosx-version-min=' + minimum, '-dynamiclib',
+                            folder / 'probe.c', '-install_name', '@rpath/winemetal.so', '-Wl,-rpath,@loader_path',
+                            '-Wl,-rpath,@loader_path/../..', '-o', path],
+                           check=True)
+        base = self.artifacts / 'base'
+        windows = sorted({*derive_runtime.METALFX_REPLACED, *derive_runtime.METALFX_ADDED} - {'lib/wine/x86_64-unix/winemetal.so'})
+        for relative in [*windows, 'bin/wine']:
+            (base / relative).parent.mkdir(parents=True, exist_ok=True)
+            (base / relative).write_bytes(b'base ' + relative.encode())
+        winemetal(base / 'lib/wine/x86_64-unix/winemetal.so', '15.0')
+        files = {str(p.relative_to(base)): {'sha256': derive_runtime.sha(p)} for p in base.rglob('*') if p.is_file()}
+        (base / 'runtime.json').write_text(json.dumps({'version': 'base', 'minimum_macos': '15.0', 'files': files}))
+        write_archive(base)
+        (self.artifacts / 'base.tar.json').write_text(json.dumps({'version': 'base'}))
+        self.workspace = folder / 'dxmt'
+        install = self.workspace / 'dxmt-install'
+        for built in [*derive_runtime.METALFX_REPLACED.values(), *derive_runtime.METALFX_ADDED.values()]:
+            (install / built).parent.mkdir(parents=True, exist_ok=True)
+            (install / built).write_bytes(b'built ' + built.encode())
+        winemetal(install / 'x86_64-unix/winemetal.so')
+        self.proof = {'files': {str(p.relative_to(install)): derive_runtime.sha(p) for p in install.rglob('*') if p.is_file()},
+                      **{key: derive_runtime.sha(derive_runtime.ROOT / patch)
+                         for patch, key in derive_runtime.SHADER_PACK_PATCHES.items()}}
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+
+    def test_only_winemetal_is_replaced(self):
+        derive_runtime.derive_shader_pack('base', 'next', '-', self.workspace)
+        manifest = check_archive(self.artifacts / 'next.tar.gz')
+        base, next_ = self.artifacts / 'base', self.artifacts / 'next'
+        self.assertEqual(sorted(manifest['files']), sorted(json.loads((base / 'runtime.json').read_text())['files']))
+        self.assertEqual(sorted(manifest['derived_from']['replaced']), ['lib/wine/x86_64-unix/winemetal.so'])
+        patches = manifest['derived_from']['replaced']['lib/wine/x86_64-unix/winemetal.so']['patches']
+        self.assertEqual(sorted(patches), sorted(derive_runtime.SHADER_PACK_PATCHES))
+        self.assertIn('patches/dxmt-shader-pack.patch', patches)
+        for relative in manifest['files']:
+            if relative != 'lib/wine/x86_64-unix/winemetal.so':
+                self.assertEqual((next_ / relative).read_bytes(), (base / relative).read_bytes(), relative)
+        self.assertNotEqual((next_ / 'lib/wine/x86_64-unix/winemetal.so').read_bytes(),
+                            (base / 'lib/wine/x86_64-unix/winemetal.so').read_bytes())
+        self.assertEqual(file_minimum(next_ / 'lib/wine/x86_64-unix/winemetal.so')[1], parse_macos('15.0'))
+        self.assertEqual(json.loads((self.artifacts / 'next.tar.json').read_text())['replaced'], ['lib/wine/x86_64-unix/winemetal.so'])
+
+    def test_a_build_without_the_patch_or_that_differs_from_its_proof_is_refused(self):
+        del self.proof['shader_pack_patch_sha256']
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_shader_pack('base', 'next', '-', self.workspace)
+        self.proof['shader_pack_patch_sha256'] = derive_runtime.sha(derive_runtime.ROOT / 'patches/dxmt-shader-pack.patch')
+        self.proof['files']['x86_64-unix/winemetal.so'] = '0' * 64
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_shader_pack('base', 'next', '-', self.workspace)
+        self.assertFalse((self.artifacts / 'next').exists())
+
+
 class GameModeApp(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='ow2-game-mode-app-')
