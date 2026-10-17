@@ -170,6 +170,26 @@ final class AppModel {
             catch { notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message }
         }
     }
+    /// Settings › Graphics › Delete Shaders (a confirmation there): empty the prepared shader
+    /// cache so every shader builds again after the next match. Overwatch must be closed.
+    func deleteShaders() {
+        guard !isPreview else { shaderPack=[];notice=L("Shader cache deleted.");return }
+        Task {
+            // Another step (a launch, say) may be using the worker; delete right after it.
+            while busy { try? await Task.sleep(for:.milliseconds(200)) }
+            busy=true
+            defer { busy=false }
+            do {
+                _ = try await service.run("delete-shaders",[])
+                shaderPack=[]
+                notice=L("Shader cache deleted. {0} rebuilds it after your gameplay session.",Brand.name)
+            } catch {
+                // What the panel shows must match what the worker kept.
+                loadShaderPack()
+                notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
+            }
+        }
+    }
     /// The Help tab shown, and a topic to open with it (see openHelp).
     var helpTab=HelpTab.questions
     var helpTopic:String?

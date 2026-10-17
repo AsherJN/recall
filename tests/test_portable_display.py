@@ -137,6 +137,46 @@ class DisplaySetup(setup.NativeSetup):
         for value in ('0','0450','none','12345678','-1',''):
             self.assertEqual(self.call('shader-memory','--limit',value,success=False)[-1]['code'],'invalid_arguments')
         self.assertEqual(self.call('status')[-1]['state']['shader_memory'],'first')
+    def test_delete_shaders_clears_the_cache_and_keeps_the_choice(self):
+        # Settings › Graphics › Delete Shaders: the prepared shader cache (its packs and the
+        # pack summary) is removed so every shader builds again after the next match, while
+        # the Shader memory choice is kept: load.json is written again for the next launch.
+        self.launchable_fixture()
+        load=self.root/'cache/pipelines/load.json'
+        pack=self.root/'cache/pipelines/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+        pack.mkdir(parents=True);(pack/'archive.json').write_text('{"archives":[]}')
+        (self.root/'cache/pack.json').write_text('{"parts":[]}')
+        self.call('shader-memory','--limit','first')
+        self.assertEqual(self.call('delete-shaders')[-1],{'stage':'shaders_deleted'})
+        self.assertFalse(pack.exists())
+        self.assertFalse((self.root/'cache/pack.json').exists())
+        self.assertEqual(json.loads(load.read_text()),{'schema':1,'limit':'first'})
+        self.assertEqual(self.call('status')[-1]['state']['shader_memory'],'first')
+        # Nothing to delete yet is not an error, and the choice is written all the same.
+        self.assertEqual(self.call('delete-shaders')[-1],{'stage':'shaders_deleted'})
+        self.assertEqual(json.loads(load.read_text()),{'schema':1,'limit':'first'})
+    def test_delete_shaders_refuses_while_a_preparation_runs(self):
+        # The cache is written by the preparation that runs after a match, so asking for a
+        # deletion while one runs is refused, and works once it has finished.
+        self.launchable_fixture()
+        (self.root/'cache').mkdir(exist_ok=True)
+        helper=self.binary.parent/'ow2-pipeline'
+        helper.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{self.base}/pipeline-arguments"\nsleep 4\n');helper.chmod(0o755)
+        self.addCleanup(helper.unlink)
+        def stop_monitors():
+            for name in ('monitor.pid','after-session.pid'):
+                try:pid=int((self.root/'cache'/name).read_text())
+                except (OSError,ValueError):continue
+                subprocess.run(['/bin/kill',str(pid)],capture_output=True)
+        self.addCleanup(stop_monitors)
+        self.assertEqual(self.call('prepare-shaders')[-1],{'stage':'shader_preparation_started'})
+        deadline=time.monotonic()+15
+        while not (self.root/'cache/after-session.pid').exists() and time.monotonic()<deadline:time.sleep(.05)
+        self.assertEqual(self.call('delete-shaders',success=False)[-1]['code'],'shader_preparation_running')
+        deadline=time.monotonic()+30
+        while (self.root/'cache/after-session.pid').exists() and time.monotonic()<deadline:time.sleep(.1)
+        self.assertEqual(self.call('delete-shaders')[-1],{'stage':'shaders_deleted'})
+        self.assertTrue((self.root/'cache/pipelines/load.json').exists())
     def test_prepare_shaders_prepares_now_in_a_monitor_of_its_own(self):
         # The one-time shader cache update: a monitor runs the after-match preparation now,
         # marked for the app as the update, and replaces a monitor waiting for a match. Asked
