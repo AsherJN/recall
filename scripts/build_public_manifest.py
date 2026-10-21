@@ -31,6 +31,7 @@ EXCLUDE = {
 DOCS = {
     'docs/public-readme.md': 'README.md',
     'docs/public-readme-zh-CN.md': 'README.zh-CN.md',
+    'docs/public-readme-ko.md': 'README.ko.md',
     'docs/public-gitignore.md': '.gitignore',
     'docs/public-precommit.md': '.githooks/pre-commit',
     'docs/public-prepush.md': '.githooks/pre-push',
@@ -81,11 +82,12 @@ README_REPLACEMENTS = [
     ('(public-notices.md)', '(THIRD_PARTY_NOTICES.md)'),
     ('(../licenses/PROJECT-APACHE-2.0)', '(LICENSE)'),
     ('(../licenses/PROJECT-NOTICE)', '(NOTICE)'),
-    # The English and Simplified Chinese READMEs link to each other.
+    # The English, Simplified Chinese and Korean READMEs link to each other.
     ('href="public-readme-zh-CN.md"', 'href="README.zh-CN.md"'),
+    ('href="public-readme-ko.md"', 'href="README.ko.md"'),
     ('href="public-readme.md"', 'href="README.md"'),
 ]
-READMES = ('docs/public-readme.md', 'docs/public-readme-zh-CN.md')
+READMES = ('docs/public-readme.md', 'docs/public-readme-zh-CN.md', 'docs/public-readme-ko.md')
 
 
 def tracked():

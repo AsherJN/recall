@@ -18,12 +18,43 @@ General (updates, opening Battle.net with the app; Battle.net's size follows the
 display by itself, so there is no switch for it), Display (fullscreen
 resolution, Reset Display Settings), Graphics (MetalFX upscaling and Sharpening, with an
 info button explaining them; the Metal HUD; Shader memory), Audio (microphone; how Bluetooth headphones
-and the sound output are handled) and Advanced (Force Quit, Repair, proxy detection,
-Korean account support). Uninstall stays at the foot of every tab. `HelpSheet.swift` owns Help &
+and the sound output are handled) and Advanced (Force Quit, Repair, Logging and Save Logs, proxy detection).
+Uninstall stays at the foot of every tab. `HelpSheet.swift` owns Help &
 FAQ, in the same tabs (`LauncherTabs`): FAQ and Troubleshooting (`HelpTopic`: an answer, numbered
 steps, a note and a button to the setting the steps name, one topic open at a time) and Support
-(the Discord invite, and a bug report in two steps: copy or save the support report, then open a
-GitHub issue). `AppModel.openHelp` opens it on Troubleshooting after a failed step, on Support
+(the Discord invite, and a bug report in three steps: copy or save the support report, save the
+logs, then open a GitHub issue). A search field under the tabs (1.5) looks through FAQ and Troubleshooting together
+(`HelpTopic.search`: every word of the query in the question or its answer, questions that name it
+first, case, accents, width, bold and curly quotes ignored; Chinese and Korean match as typed) and
+shows the matches under the tab each lives in, with no tab selected. Cmd-F starts a search, Esc
+clears it before it closes Help, Return opens the first answer, and choosing a tab ends it. The
+Edit menu has Undo, Redo, Cut and Paste for the field (`Main.swift`); `tests/HelpSearchTests.swift`
+covers the matching. The Play, opening and running screens name what else is using the Mac
+(1.5, REC-5; `BusyApps.swift`, shown by `PerformanceTip`, one row each, and nothing when
+nothing is; Help › Troubleshooting explains them at length): when other apps together use more graphics, processor (performance
+cores Overwatch needs to itself) or memory than Overwatch can spare, the largest users until the
+rest would fit, graphics first, each with its icon, what it uses and a Quit button
+(`NSRunningApplication.terminate`, as Cmd-Q); plus Low Power Mode (a button to
+System Settings › Battery, or › Energy without a battery), a Mac that macOS is slowing down to
+cool (thermal state serious or critical). When macOS reports memory pressure
+(`kern.memorystatus_vm_pressure_level` warning or critical, before or during a match), the note
+says the Mac is low on memory and names the largest memory users until they hold Overwatch's
+footprint; if all of them together couldn't make room, macOS itself holds the memory and, before
+Overwatch starts, it suggests a restart instead. Memory moved to disk (`vm.swapusage`) is only
+reported: it stays there long after the pressure. On October 20 such a Mac kept FPS while
+movement and aim answered late; Help › Troubleshooting › "My controls feel delayed" says to quit
+apps, then to restart a Mac up for days. The lines come from replay and in-game measurements.
+It reads what Activity Monitor shows without any permission: this user's processes' processor
+time and footprint (`proc_pidinfo`, `proc_pid_rusage`), each grouped
+under the app macOS holds responsible for it (`responsibility_get_pid_responsible_for_pid`, not
+public API), graphics time per process from the GPU driver's user clients in the I/O Registry
+(`AppUsage`), and `kern.memorystatus_level`. Recall, its data folders (Wine, Battle.net, Overwatch),
+macOS's own apps and the Finder never count. `AppModel.watchLoad` looks every five seconds while
+one of those screens is visible (`applicationDidChangeOcclusionState`), never while the window is
+hidden, a match included; Battle.net's or Overwatch's launch saves the latest result, and the
+support report (schema 4) carries it as `other_apps.at_last_launch` with the current one as
+`other_apps.now`. `tests/BusyAppsTests.swift` covers the reading and the choice.
+`AppModel.openHelp` opens it on Troubleshooting after a failed step, on Support
 from Help › Report a Problem…, otherwise on FAQ. Every pop-up is 540 wide; Settings, Help &
 FAQ, About and Licenses are all 540 × 760 (`LauncherStyle.largeSheetHeight`), so tabs, Done and
 Uninstall never move: Settings' page scrolls only when a notice joins its tallest tab (Graphics
@@ -76,46 +107,57 @@ first: AppKit drops them while one is attached.
 
 Battle.net, Overwatch and Wine are Intel programs, so every launch and the Battle.net
 installer first check Rosetta (`rosetta_required`, the same screen as first setup; an
-upgrade to macOS 27 can remove it). Settings › Advanced holds two choices
-the worker keeps in `state.json` and in Wine's registry (`portable_network.h`,
-`portable_korea.h`): automatic proxy detection, off by default because some internet
-providers answer the lookup it makes with an address that never responds and the
-Battle.net installer then stalls (`network`); and Korean account support, experimental,
-which adds a DigiCert certificate the Korean build checks and has Wine's Mac driver
-answer screen reads with a black image (`korean-support`, `WINEMAC_SCREEN_READBACK`).
-Setup applies both before Battle.net's installer runs; a launch puts back any that
-went missing. Both change only while Battle.net and Overwatch are closed, and turning
-Korean support on asks first, in English and Korean. The Play screens suggest it when
-the game folder holds Nexon's anti-cheat (`nexon_build`). Support reports name the
+upgrade to macOS 27 can remove it). Two choices the worker keeps in `state.json` and in
+Wine's registry (`portable_network.h`, `portable_korea.h`): automatic proxy detection
+(Settings › Advanced), off by default because some internet providers answer the lookup it
+makes with an address that never responds and the Battle.net installer then stalls
+(`network`); and Korean account support, which is the Korea region (see below): it adds a
+DigiCert certificate the Korean build checks and has Wine's Mac driver answer screen reads
+with a black image (`korean-support`, `WINEMAC_SCREEN_READBACK`). Setup applies both before
+Battle.net's installer runs; a launch puts back any that went missing. Both change only
+while Battle.net and Overwatch are closed. Setup and launches also make the left Option key
+Alt in Overwatch alone (`keyboard`, Wine's Mac driver `LeftOptionIsAlt` under
+`AppDefaults\Overwatch.exe`): Wine sends nothing for Option and makes Command Alt, so
+Overwatch's Alt actions answered only to Command. Command stays Alt, and the right Option key
+and Battle.net keep typing Option's characters. On Global, the Play screens suggest the Korea
+region when the game folder holds Nexon's anti-cheat (`nexon_build`). Support reports name the
 failure code itself; anything that isn't a plain code stays `other_setup_error`.
 
-Recall speaks English and Simplified Chinese (`Localization.swift`), following the Mac's
-language or the one chosen for Recall in System Settings › General › Language & Region ›
+Recall speaks English, Simplified Chinese and Korean (`Localization.swift`), following the
+Mac's language or the one chosen for Recall in System Settings › General › Language & Region ›
 Applications. Every on-screen string goes through `L("English", values…)`: the English is
 the key, `{0}`, `{1}`… stand for values filled in after the lookup, and `sentences()` joins
 whole sentences (no space between them in Chinese). Names and codes use `Text(verbatim:)`.
-The translations live in `Resources/Localizations/zh-Hans.json` (`Localizable`, plus the two
-`InfoPlist` strings); `build_native_app.py` writes `en.lproj` and `zh-Hans.lproj` from it as
-binary `.strings` and declares both in `CFBundleLocalizations`. `tests/test_localization.py`
+The translations live in `Resources/Localizations/zh-Hans.json` and `ko.json` (`Localizable`,
+plus the two `InfoPlist` strings); `build_native_app.py` writes an `.lproj` for each as binary
+`.strings` and declares them all in `CFBundleLocalizations`. `tests/test_localization.py`
 fails on an untranslated or leftover string, mismatched `{n}`, on-screen text or any other
 sentence that skips `L`, and a translation whose Markdown bold doesn't parse as the English
 does (Help renders its text as Markdown). The update sheet takes a release's `## 更新内容`
-section when Recall is in Chinese.
+or `## 새로운 기능` section when Recall is in Chinese or Korean.
 
 Setup's first question is which Battle.net to install (`BattleNetChoice.swift`, screen
-`battleNet`): Global or China's (国服, NetEase accounts, Blizzard's China installer pinned in
+`battleNet`): Global, Korea (Korean accounts linked to Nexon, which sign in to Global's
+Battle.net) or China's (国服, NetEase accounts, Blizzard's China installer pinned in
 `release.json` as `chinaInstallerURL`/`chinaInstallerSHA256`), and the language Battle.net
-installs in (English, Simplified Chinese or Korean; China's is Chinese only), both filled in
-from the Mac. China first shows `ChinaBattleNetSheet` (NetEase sign-in in the browser, the
-anti-cheat's account risk). Setup hands the choice to the worker (`battlenet`,
-`portable_region.h`), which keeps it in `state.json`, runs the installer with that `--lang`
-and, for Chinese or Korean, adds Wine font replacements so Battle.net's text isn't boxes
-(`tests/run_font_probe.py`). Accounts don't carry over between the two, so Settings ›
-General › Battle.net region › Change moves the installation to the Trash (the worker's
-`uninstall`) and starts setup again with the other region. Installations from before 1.4.1
-are Global. Help shows the topics for every player and those for the chosen region
-(`HelpTopic.region`: NetEase sign-in on China's Battle.net, Xbox sign-in and Korean support on
-Global), and setup's sign-in note follows the region. Discord is blocked in mainland China, so
+installs in (English, Simplified Chinese or Korean; China's is Chinese only, Korea suggests
+Korean), all filled in from the Mac. China first shows `ChinaBattleNetSheet` (NetEase sign-in
+in the browser, the anti-cheat's account risk), Korea `KoreanSupportSheet` (what Recall
+changes, Nexon's anti-cheat). Setup hands the Battle.net to the worker (`battlenet`,
+`portable_region.h`: `global` for Korea too), which keeps it in `state.json`, runs the
+installer with that `--lang` and, for Chinese or Korean, adds Wine font replacements so
+Battle.net's text isn't boxes (`tests/run_font_probe.py`); for Korea setup also turns on
+Korean account support (`korean-support`), which prepare applies. The region an installation
+is on is `BattleNetRegion.kept`: China's Battle.net, or Global's, which is Korea while Korean
+account support is on, so 1.3 and 1.4.0 installations that turned it on in Settings ›
+Advanced show as Korea (`tests/RegionTests.swift`). Settings › General › Battle.net region
+switches between Global and Korea by turning that support on (Korea asks first) or off;
+accounts don't carry over to or from China's Battle.net, so that change moves the
+installation to the Trash (the worker's `uninstall`, `ChangeRegionSheet`) and starts setup
+again with the region chosen. Help shows the topics for every player and those for the
+player's region (`HelpTopic.regions`, `AppModel.currentRegion`: NetEase sign-in and account
+on China's Battle.net; Xbox sign-in on Global and Korea; the Korean account's risk on Korea;
+how to choose Korea on Global), and setup's sign-in note follows the region. Discord is blocked in mainland China, so
 players who choose China's Battle.net see `GitHubHelpLink` where the Discord card is
 (`AppModel.showsDiscord`). The worker finds Battle.net and Overwatch in other folders under Program Files
 too, and support reports name the region, languages, default browser and whether NetEase's
@@ -245,8 +287,28 @@ becomes active and every few seconds while shown, with how many are ready of all
 (`cache/preparing.json`, written after each batch). The launching screen's details explain
 the two numbers (ready: the pack's pipelines; learned: every recipe), and an info button
 explains shaders in plain words (`ShaderInfo`,
-also in Help's FAQ). Support reports carry the numbers, whether preparation is running and
-how the last after-match preparation ended, as a code (`ShaderRecord`).
+also in Help's FAQ). Support reports carry the numbers, whether preparation is running or
+waiting for the game to close, and how the last after-match preparation ended, as a code
+(`ShaderRecord`): one stopped because the game started again is `cancelled`, not `failed`. From
+1.5.0 (schema 3) they give MetalFX upscaling (`on`/`off`) and its sharpening as two fields
+(`tests/SupportReportTests.swift`).
+
+Settings › Advanced › Logging (`LoggingSetting`, `Logging.swift`; REC-40) is off unless the player
+turns it on: presets named for a kind of problem (Crashes and freezes, Graphics, Battle.net) or
+Custom, Wine's own WINEDEBUG text, checked as it's typed against Wine's grammar. Battle.net carries
+it from when it opens (worker: `launch --logging`, `scripts/portable_logs.h`), as it does the HUD.
+The worker keeps each Battle.net start's output and record in `logs/sessions/<UTC start>/` and
+removes the oldest only while the logs would take more room than the disk has left. Turning
+logging on warns about FPS first, and the Play, opening and running screens say it's on, or that
+an open Battle.net still logs (`LoggingReminder`, one slim row with Save Logs and Turn Off, so it
+stacks with the busy-apps note and the first-matches tip). Save Logs
+(Settings › Advanced, Help › Support and the reminder; `LogBundle.swift`) saves the recent
+sessions' logs from Recall, Battle.net and Overwatch in one zip, newest first while it stays under
+GitHub's 25 MB attachment limit, after `LogCleaner` removes personal details (its rules come from
+a check of real logs). `Summary.txt` is the timeline in the player's language; `index.json` and
+`README.md` (`app/Resources/LogsReadme.md`) point engineers and AI assistants at the moments that
+matter, by file and line. Crash dumps never go in. The support report names the setting.
+`tests/LogBundleTests.swift` and `tests/test_session_logs.py` cover them.
 
 The running screen learns the session's processes from `ow2-setup session` (when the window
 becomes active, or from Settings) and asks macOS to report when each one ends (a process

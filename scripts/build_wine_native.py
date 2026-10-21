@@ -45,6 +45,11 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               letterbox bars black, caps its drawable at the screen's own pixels, and
               answers the game's window moves with the canvas frame, so Wine's window stays
               where the canvas draws it (cursor clipping and pointer positions depend on it).
+              Raw input and key presses have variants (WINEMAC_INPUT_VARIANT). Recall's
+              launch settings choose "precise" from 1.5.0: mouse buttons come from GCMouse
+              in order with its motion, pointer events stand in at GCMouse's scale while it
+              is silent, and its handlers are set again when macOS replaces or drops them.
+              Without the variable the driver keeps Recall 1.4's behaviour.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor

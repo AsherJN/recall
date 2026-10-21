@@ -128,11 +128,23 @@ patches above:
   minimized and out of fullscreen until you come back to it: on macOS its own
   requests to restore the window or re-enter fullscreen would bring it back to
   the front;
-- with Korean account support on (`WINEMAC_SCREEN_READBACK=1`, set by the app),
+- with Korean account support on (`WINEMAC_SCREEN_READBACK=1`, which the app sets on the Korea region),
   reading the screen back (BitBlt or StretchBlt from the screen) gives a black
   image instead of failing, so the anti-cheat in the Korean build of Overwatch
   no longer crashes the game when it takes a screenshot. No pixels are read;
-  without the variable the call fails as before.
+  without the variable the call fails as before;
+- with `WINEMAC_INPUT_VARIANT=precise`, which the app sets from 1.5:
+  - mouse buttons come from the Game Controller framework's mouse input, as the
+    motion does, and each one reaches the game after the motion that came before
+    it, as on Windows. macOS's own copy of each click held it until the next
+    display refresh, so shots during a flick landed past where the player clicked;
+  - moves carry the time they were delivered and go out as soon as a millisecond
+    has passed since the last delivery;
+  - if the Game Controller mouse input goes quiet, pointer events stand in at the
+    mouse's own scale, and its handlers are set again. A trackpad alone keeps the
+    pointer's scale, so it can aim too.
+
+  Without the variable, input behaves as in 1.4.
 `WINEMAC_INPUT_STATS` writes an input report (off unless set).
 
 Menus, Battle.net and every other program keep the standard behavior.

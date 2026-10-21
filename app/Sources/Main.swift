@@ -7,6 +7,9 @@ import Darwin
     var window:NSWindow!
     var lockFD:Int32 = -1
     var outsideClicks:Any?
+    var escapeKey:Any?
+    /// An info popover (the ⓘ buttons) is open: a click or Esc goes to it first.
+    private var infoPopoverOpen:Bool { NSApp.windows.contains(where:{ $0.isVisible && NSStringFromClass(type(of:$0)).contains("Popover") }) }
     func applicationDidFinishLaunching(_ notification:Notification) {
         // NSWorkspace normally routes repeat opens to this process. The file lock
         // also covers explicit `open -n` and copies of the same app bundle.
@@ -36,9 +39,23 @@ import Darwin
         outsideClicks=NSEvent.addLocalMonitorForEvents(matching:.leftMouseDown) { [weak self] event in
             guard let self,let window=self.window,event.window === window,let sheet=window.attachedSheet,
                   sheet.attachedSheet == nil,window.contentLayoutRect.contains(event.locationInWindow),
-                  !NSApp.windows.contains(where:{ $0.isVisible && NSStringFromClass(type(of:$0)).contains("Popover") })
+                  !self.infoPopoverOpen
             else { return event }
             return self.model.closeSheetFromOutside() ? nil : event
+        }
+        // Esc closes one thing at a time: an open info popover first, then Help's search, and
+        // only then the pop-up, through its own button. Left to SwiftUI, Esc with a popover open
+        // also reached what was under it (it closed Settings), and in Help it skipped the search.
+        // Not while an input method is composing text: Esc cancels that.
+        escapeKey=NSEvent.addLocalMonitorForEvents(matching:.keyDown) { [weak self] event in
+            guard let self,event.keyCode == 53,event.modifierFlags.isDisjoint(with:[.command,.option,.control,.shift]),
+                  !((NSApp.keyWindow?.firstResponder as? NSTextView)?.hasMarkedText() ?? false)
+            else { return event }
+            if self.infoPopoverOpen { NotificationCenter.default.post(name:.closeInfoPopover,object:nil);return nil }
+            if self.model.sheet == .help && NSApp.keyWindow === self.window.attachedSheet && !self.model.helpQuery.isEmpty {
+                self.model.helpQuery="";return nil
+            }
+            return event
         }
         NSApp.mainMenu=menu();NSApp.activate(ignoringOtherApps:true)
     }
@@ -58,7 +75,11 @@ import Darwin
         let hide=NSMenuItem(title:L("Hide {0}",Brand.name),action:#selector(NSApplication.hide(_:)),keyEquivalent:"h");app.addItem(hide)
         add(L("Quit {0}",Brand.name),#selector(quit),"q")
         let editItem=NSMenuItem();main.addItem(editItem);let edit=NSMenu(title:L("Edit"));editItem.submenu=edit
-        for (title,selector,key) in [(L("Copy"),#selector(NSText.copy(_:)),"c"),(L("Select All"),#selector(NSText.selectAll(_:)),"a")] { edit.addItem(NSMenuItem(title:title,action:selector,keyEquivalent:key)) }
+        // Undo, Cut and Paste for Help's search field: a text field gets them only from the menu.
+        edit.addItem(NSMenuItem(title:L("Undo"),action:#selector(EditActions.undo(_:)),keyEquivalent:"z"))
+        let redo=NSMenuItem(title:L("Redo"),action:#selector(EditActions.redo(_:)),keyEquivalent:"z");redo.keyEquivalentModifierMask=[.command,.shift];edit.addItem(redo)
+        edit.addItem(.separator())
+        for (title,selector,key) in [(L("Cut"),#selector(NSText.cut(_:)),"x"),(L("Copy"),#selector(NSText.copy(_:)),"c"),(L("Paste"),#selector(NSText.paste(_:)),"v"),(L("Select All"),#selector(NSText.selectAll(_:)),"a")] { edit.addItem(NSMenuItem(title:title,action:selector,keyEquivalent:key)) }
         let windowItem=NSMenuItem();main.addItem(windowItem);let wm=NSMenu(title:L("Window"));windowItem.submenu=wm
         wm.addItem(NSMenuItem(title:L("Minimize"),action:#selector(NSWindow.performMiniaturize(_:)),keyEquivalent:"m"))
         wm.addItem(NSMenuItem(title:L("Close"),action:#selector(NSWindow.performClose(_:)),keyEquivalent:"w"))
@@ -128,6 +149,8 @@ import Darwin
     @objc func help() { show();model.openHelp() }
     func show() { window?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true) }
     func applicationDidBecomeActive(_ notification:Notification) { model.syncSession();model.checkIfDue();model.checkAfterMatch() }
+    /// The busy note looks at the Mac only while this window can be seen (AppModel.watchesLoad).
+    func applicationDidChangeOcclusionState(_ notification:Notification) { model.windowVisible=NSApp.occlusionState.contains(.visible) }
     /// A Dock click. With the window closed it reopens Recall, as opening the app does, so
     /// Battle.net opens if that's set. A window that was only behind other apps or minimized
     /// just comes forward: a player there may have closed Battle.net on purpose.
@@ -151,3 +174,5 @@ import Darwin
         withExtendedLifetime(delegate) { app.run() }
     }
 }
+/// The responder chain's undo: and redo:, which AppKit declares for Objective-C only.
+@objc private protocol EditActions { func undo(_ sender:Any?);func redo(_ sender:Any?) }

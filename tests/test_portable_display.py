@@ -137,24 +137,67 @@ class DisplaySetup(setup.NativeSetup):
         for value in ('0','0450','none','12345678','-1',''):
             self.assertEqual(self.call('shader-memory','--limit',value,success=False)[-1]['code'],'invalid_arguments')
         self.assertEqual(self.call('status')[-1]['state']['shader_memory'],'first')
-    def test_delete_shaders_clears_the_cache_and_keeps_the_choice(self):
-        # Settings › Graphics › Delete Shaders: the prepared shader cache (its packs and the
-        # pack summary) is removed so every shader builds again after the next match, while
-        # the Shader memory choice is kept: load.json is written again for the next launch.
+    def test_delete_shaders_clears_every_shader_cache_and_keeps_the_choice(self):
+        # Settings › Graphics › Clear Shader Cache (#37): DXMT's translated shaders, the learned
+        # and prepared pipelines with the helper's records, and macOS's own cache for the
+        # engine's game app all go, so every shader builds again; the Shader memory choice is
+        # kept (load.json is written again for the next launch). Another app's cache stays.
         self.launchable_fixture()
-        load=self.root/'cache/pipelines/load.json'
-        pack=self.root/'cache/pipelines/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+        cache=self.root/'cache'
+        load=cache/'pipelines/load.json'
+        pack=cache/'pipelines/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
         pack.mkdir(parents=True);(pack/'archive.json').write_text('{"archives":[]}')
-        (self.root/'cache/pack.json').write_text('{"parts":[]}')
+        (cache/'shaders').mkdir();(cache/'shaders/shaders_320.db').write_text('db')
+        records=('pack.json','prepared.json','preparing.json','warmed.json','shader-update')
+        for name in records:(cache/name).write_text('{}')
+        caches=setup.Path(subprocess.run(['/usr/bin/getconf','DARWIN_USER_CACHE_DIR'],capture_output=True,text=True,check=True).stdout.strip())
+        tag=self.base.name.replace('_','-')
+        game=caches/f'org.overwatch2mac.test-{tag}';other=caches/f'org.example.recall-test-{tag}'
+        for folder in (game,other):
+            (folder/'com.apple.metal').mkdir(parents=True);(folder/'com.apple.metal/functions.data').write_text('compiled')
+            self.addCleanup(subprocess.run,['/bin/rm','-rf','--',str(folder)])
+        app=self.root/'runtimes/v1/lib/wine/game-mode/Overwatch.app/Contents'
+        app.mkdir(parents=True)
+        def identify(identifier):
+            (app/'Info.plist').write_text('<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+                                          f'<key>CFBundleIdentifier</key><string>{identifier}</string></dict></plist>')
+        identify(game.name)
         self.call('shader-memory','--limit','first')
         self.assertEqual(self.call('delete-shaders')[-1],{'stage':'shaders_deleted'})
         self.assertFalse(pack.exists())
-        self.assertFalse((self.root/'cache/pack.json').exists())
+        self.assertFalse((cache/'shaders').exists())
+        for name in records:self.assertFalse((cache/name).exists(),name)
+        self.assertFalse(game.exists())
+        self.assertFalse((self.root/'tmp/cleared-shaders').exists())
         self.assertEqual(json.loads(load.read_text()),{'schema':1,'limit':'first'})
         self.assertEqual(self.call('status')[-1]['state']['shader_memory'],'first')
-        # Nothing to delete yet is not an error, and the choice is written all the same.
+        # Only the engine's own game app: never a cache an app named otherwise keeps.
+        identify(other.name)
         self.assertEqual(self.call('delete-shaders')[-1],{'stage':'shaders_deleted'})
+        self.assertTrue((other/'com.apple.metal/functions.data').exists())
+        # Nothing to clear is not an error, and the choice is written all the same.
         self.assertEqual(json.loads(load.read_text()),{'schema':1,'limit':'first'})
+    def test_delete_shaders_refuses_while_battlenet_is_open(self):
+        # A Battle.net left open could start Overwatch on half a cache, and the session's
+        # monitor would prepare nothing after the match: both must be closed first.
+        self.launchable_fixture()
+        engine=self.root/'runtimes/v1'
+        (self.root/'cache/shaders').mkdir(parents=True);(self.root/'cache/shaders/shaders_320.db').write_text('db')
+        source=self.base/'hold.c'
+        source.write_text('#include <fcntl.h>\n#include <sys/mman.h>\n#include <unistd.h>\n'
+                          'int main(int c,char **v){int f=open(v[1],O_RDONLY);if(f<0||mmap(0,1,PROT_READ,MAP_SHARED,f,0)==MAP_FAILED)return 1;'
+                          'write(1,"ready\\n",6);sleep(30);return 0;}\n')
+        client=engine/'bin/C:\\Battle.net.exe'
+        subprocess.run(['/usr/bin/clang','-o',str(client),str(source)],check=True,capture_output=True)
+        mapped=self.root/'environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe'
+        held=subprocess.Popen([str(client),str(mapped)],stdout=subprocess.PIPE,text=True)
+        self.addCleanup(lambda:(held.kill(),held.wait(),held.stdout.close()))
+        self.assertEqual(held.stdout.readline(),'ready\n')
+        self.assertEqual(self.call('delete-shaders',success=False)[-1]['code'],'close_game_before_maintenance')
+        self.assertTrue((self.root/'cache/shaders/shaders_320.db').exists())
+        held.kill();held.wait()
+        self.assertEqual(self.call('delete-shaders')[-1],{'stage':'shaders_deleted'})
+        self.assertFalse((self.root/'cache/shaders').exists())
     def test_delete_shaders_refuses_while_a_preparation_runs(self):
         # The cache is written by the preparation that runs after a match, so asking for a
         # deletion while one runs is refused, and works once it has finished.

@@ -27,6 +27,57 @@ links, `app/Sources/SetupService.swift` for the setup flow,
 `scripts/portable_setup.m` for the native worker, and `patches/` for the
 rendering and window-driver changes.
 
+## Quick start: build the app
+
+To work on the Mac app (its screens, setup and settings), you don't need to
+build the Wine engine. Build the app around the engine from the matching Recall
+release. You need Apple's Command Line Tools (`xcode-select --install`), git and
+Python 3.10 or later.
+
+1. Clone the repository. `main` matches the latest release; for an earlier one,
+   check out its tag, for example `git checkout v1.4.0`.
+
+   ```sh
+   git clone https://github.com/AsherJN/recall.git && cd recall
+   ```
+
+2. Copy the engine out of the Recall app of the same version. If the Recall you
+   have installed is a different version, download the matching one from
+   [Releases](https://github.com/AsherJN/recall/releases).
+
+   ```sh
+   mkdir -p runtime
+   cp /Applications/Recall.app/Contents/Resources/runtime.tar.gz runtime/
+   ```
+
+3. Fetch the shader preparation source once. This clones DXMT at its pinned
+   commit and applies the project's patches; it needs no other tools.
+
+   ```sh
+   python3 scripts/build_portable_dxmt.py --workspace runtime/dxmt --source-only
+   ```
+
+4. Build the app. Each build needs a new `--output`; earlier ones are kept.
+
+   ```sh
+   python3 scripts/build_native_app.py --output runtime/build/Recall.app --workspace runtime/dxmt
+   ```
+
+5. Quit the installed Recall, then open your build with
+   `open runtime/build/Recall.app`. It uses the same data folder as the installed
+   app, so it sets up and plays the same way. To look at screens without touching
+   your installation, build with `--preview` and open it with
+   `open runtime/build/Recall.app --args --preview-state welcome`; its Preview menu
+   switches between screens and between light and dark appearance.
+
+The build stops if the engine or the shader preparation source isn't the exact
+one this version of the app was tested with, and says what to fix. To try your
+own engine in a personal build, build it as [BUILDING.md](BUILDING.md) describes,
+then set `runtimeArchive`, `runtimeVersion` and `runtimeSHA256` in
+`app/Resources/release.json` to match it. Don't share a build made that way.
+
+Run the tests that need no game or engine with `python3 tests/run_portable.py`.
+
 ## Contributing
 
 Keep changes focused, preserve upstream attribution, and describe relevant

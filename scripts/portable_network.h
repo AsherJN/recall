@@ -114,3 +114,29 @@ static BOOL configureProxy(NSString *engine, BOOL detect) {
     event(@"network_proxy",details);
     return ok;
 }
+
+/* The left Option key in Overwatch (REC-20). Mac keyboards label Option "alt", but Wine's Mac
+ * driver sends Windows nothing for either Option key and makes Command the Alt key
+ * (winemac.drv keyboard.c), so Overwatch's Alt actions, choosing a perk among them, answered
+ * only to Command. LeftOptionIsAlt, read for Overwatch.exe alone (the driver's AppDefaults),
+ * makes the left Option key Alt as well. Command stays Alt; the right Option key still types
+ * accented letters and symbols in the game, and Battle.net keeps both for email and password
+ * (an "@" is Option+L on some keyboards). Wine reads it when Overwatch starts. */
+static NSString *const gameKeyboardKey=@"Software\\Wine\\AppDefaults\\Overwatch.exe\\Mac Driver";
+/* Without ENGINE it only reports whether the value is missing. The registry tool runs only
+ * then. Never fails: setup and launches go on, and the next launch tries again. Reports
+ * keyboard. */
+static BOOL configureOptionKey(NSString *engine) {
+    NSDictionary *values=userRegistryValues(gameKeyboardKey);
+    BOOL set=[values[@"LeftOptionIsAlt"] isEqual:@"\"Y\""],ok=YES;
+    NSMutableDictionary *details=[@{@"left_option_is_alt":@YES,@"changed":@NO} mutableCopy];
+    if(!values)details[@"registry"]=@"unreadable";
+    if(engine && !set) {
+        ok=registryTool(engine,@[@"add",[@"HKCU\\" stringByAppendingString:gameKeyboardKey],@"/v",@"LeftOptionIsAlt",@"/t",@"REG_SZ",@"/d",@"Y",@"/f"],@"keyboard.log");
+        details[@"changed"]=@(ok);
+        if(!ok)details[@"failed"]=@YES;
+    }
+    else if(!engine)details[@"changed"]=@(!set);
+    event(@"keyboard",details);
+    return ok;
+}

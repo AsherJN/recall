@@ -20,6 +20,15 @@ in the app. Include:
 
 Remove account names and personal file paths before posting.
 
+<a id="id-save-logs"></a>If something went wrong in Battle.net or Overwatch, attach your logs too:
+choose Save Logs… in Settings › Advanced (or Help › Support) and add the file to the
+issue. It holds your recent sessions' logs from Recall, Battle.net and Overwatch, with
+personal details removed (see [Privacy](#privacy)), and a short summary of what happened.
+For more detail, turn on Settings › Advanced › Logging before you play again and choose
+the kind of problem: Crashes and freezes, Graphics or Battle.net. Custom takes Wine's own
+`WINEDEBUG` settings, as you'd type them in Terminal. Logging can lower your FPS, so the
+app shows a reminder on its home screen while it's on; turn it off when you're done.
+
 ## If something goes wrong
 
 - **The game stops responding.** In the app, choose Settings › Advanced › Force Quit
@@ -28,6 +37,10 @@ Remove account names and personal file paths before posting.
   Repair Game Files with Overwatch and Battle.net closed. It reinstalls the files
   the app adds and refreshes the Windows environment; Overwatch, its settings
   and your Battle.net sign-in are kept.
+- **Overwatch crashes or shows graphics glitches.** Quit Overwatch and close
+  Battle.net, then choose Settings › Graphics › Clear Shader Cache. Your next few
+  matches stutter again while your Mac relearns your shaders; your game files
+  and settings stay as they are.
 - <a id="id-external-monitor"></a>**Playing on an external monitor.** Overwatch opens on your main display, the
   one with the menu bar. In System Settings › Displays, select the monitor and
   set Use as to Main display (Displays… in the app's Settings › Display opens that page).
@@ -37,9 +50,10 @@ Remove account names and personal file paths before posting.
   your MacBook screen keeps its own. You can also set it in the app under
   Settings › Display, which names your main display and says how
   each size will look on it.
-- **Matches stutter.** Play Workshop code 929PJ from Custom Games and let it
-  run for 5 to 10 minutes; your Mac gets Overwatch's graphics ready ahead of
-  time. See [Your first matches](INSTALLATION.md#your-first-matches).
+- **Matches stutter.** Your first 5 to 10 matches stutter while your Mac learns
+  Overwatch. To speed it up, play Workshop code 929PJ or join a 500% custom game;
+  see [Your first matches](INSTALLATION.md#your-first-matches). Still stuttering
+  after 15,000 shaders? Report it with the support report from Help › Support.
 - **The game is black or the wrong size.** Quit Overwatch, choose Settings › Display ›
   Reset Display Settings, then play again. Overwatch opens at 1080p; your
   graphics and FPS settings stay as they are.
@@ -58,6 +72,14 @@ Remove account names and personal file paths before posting.
 - **I don't want Battle.net to open with Recall.** Choose Cancel while it opens,
   or turn off Settings › General › Open Battle.net when Recall opens; then start it with
   Open Battle.net.
+- <a id="id-battlenet-update"></a>**Battle.net shows Update, Queued or Initializing for a long time.**
+  Battle.net updates itself before it updates or starts Overwatch, so Overwatch
+  waits its turn. Leave Battle.net open until it's done: quitting starts
+  Battle.net's own update over, and clicking Update, Pause or Settings sends
+  Overwatch back to the end of the line. In some regions Battle.net's update
+  takes much longer, depending on Blizzard's download servers. If it's still
+  waiting after half an hour, report it with your support report
+  (Help › Report a Problem), which shows how long each update took.
 - **Battle.net looks too big or too small.** This can follow connecting,
   unplugging or rearranging displays while Battle.net was open. Close
   Battle.net, then open it again from the app.
@@ -72,15 +94,16 @@ Remove account names and personal file paths before posting.
   Settings › Advanced › Detect network proxy automatically, then open
   Battle.net again from the app.
 - <a id="id-korean-accounts"></a>**Overwatch closes as it starts on a Korean account (linked to Nexon).**
-  Close Battle.net, turn on Settings › Advanced › Korean account support
-  (한국 계정 지원), then play from the app. It's experimental: it doesn't turn off
-  Nexon's anti-cheat, but Nexon doesn't support playing on a Mac, so using it
-  could affect your account.
+  Close Battle.net, choose Korea in Settings › General › Battle.net region, then
+  play from the app. Recall adds a certificate the game checks when it starts and
+  hands Nexon's anti-cheat a blank image when it takes a screenshot. It doesn't
+  turn off Nexon's anti-cheat, but Nexon doesn't support playing on a Mac, so
+  playing this way could affect your account.
 
 ## Known issues
 
-- Extra stutter in the first few matches while the game compiles shaders.
-  Workshop code 929PJ gets ahead of it (see above).
+- Stutter in the first 5 to 10 matches while your Mac learns Overwatch's
+  shaders. Workshop code 929PJ and 500% custom games speed it up (see above).
 - If a problem starts after a Blizzard or macOS update, check for a Recall
   update with Recall › Check for Updates….
 - Changing the graphics quality preset makes Overwatch reset Render Scale to
@@ -114,9 +137,18 @@ Trash, including a game installed on an external drive.
 
 The app keeps a small local record of setup progress and errors. It can export
 a short diagnostic summary for a bug report; the export is optional, sanitized,
-and shown to you before you share it. Nothing is uploaded automatically, there
-is no project login, and the app does not inventory other apps. Battle.net and
-Apple handle their own sign-in and privacy.
+and shown to you before you share it. It includes what Battle.net did on its
+last three starts: how long each update waited and took, Battle.net's own error
+codes and the names of its download servers, nothing about your account.
+Save Logs puts the logs Recall, Battle.net and Overwatch keep into one file, saved
+where you choose. Before saving, it removes your Mac's user and computer names,
+people's names (such as in a device's name), Battle.net account numbers and
+sign-in codes, Windows user IDs, IPv6 addresses, hardware addresses, email
+addresses and BattleTags, and it never includes Overwatch's crash dumps. Logging
+(Settings › Advanced) is off unless you turn it on.
+Nothing is uploaded automatically, there is no project login, and the app does
+not inventory other apps. Battle.net and Apple handle their own sign-in and
+privacy.
 
 To find updates, the app asks GitHub's public release API for the latest
 version when it opens, and at most every 12 hours while it stays open. The

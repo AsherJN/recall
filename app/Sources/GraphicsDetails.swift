@@ -175,7 +175,7 @@ struct ShaderInfoButton:View {
         Button { isPresented=true } label: { Image(systemName:"info.circle").font(.system(size:14)) }
             .buttonStyle(.borderless).foregroundStyle(.secondary)
             .help(L("About shaders")).accessibilityLabel(L("About shaders"))
-            .popover(isPresented:$isPresented,arrowEdge:.bottom) { ShaderInfoView() }
+            .infoPopover(isPresented:$isPresented) { ShaderInfoView() }
     }
 }
 struct ShaderInfoView:View {
@@ -312,6 +312,26 @@ enum ShaderMemory {
         return String((bytes+(1<<20)-1)>>20)
     }
 }
+/// Settings › Graphics › Clear Shader Cache: the size of what it removes, as the worker finds it
+/// (portable_setup.m deleteShaders): Recall's caches, and macOS's for the engine's game app.
+enum ShaderCache {
+    static func bytes(root:URL,runtime:String?)->Int64 {
+        var folders=[root.appendingPathComponent("cache/pipelines"),root.appendingPathComponent("cache/shaders")]
+        var caches=[CChar](repeating:0,count:Int(PATH_MAX))
+        if let runtime,!runtime.contains("/"),
+           let info=NSDictionary(contentsOf:root.appendingPathComponent("runtimes/\(runtime)/lib/wine/game-mode/Overwatch.app/Contents/Info.plist")),
+           let identifier=info["CFBundleIdentifier"] as? String,identifier.hasPrefix("org.overwatch2mac."),!identifier.contains("/"),!identifier.contains(".."),
+           confstr(_CS_DARWIN_USER_CACHE_DIR,&caches,caches.count) > 0 {
+            folders.append(URL(fileURLWithPath:String(cString:caches)).appendingPathComponent(identifier))
+        }
+        var total=Int64(0)
+        for folder in folders {
+            guard let files=FileManager.default.enumerator(at:folder,includingPropertiesForKeys:[.totalFileAllocatedSizeKey]) else { continue }
+            for case let file as URL in files { total+=Int64((try? file.resourceValues(forKeys:[.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0) }
+        }
+        return total
+    }
+}
 /// The support report's shader record: the numbers and how the last after-match preparation
 /// ended, read from the helper's own logs and reported as numbers and codes (no paths).
 enum ShaderRecord {
@@ -321,7 +341,11 @@ enum ShaderRecord {
         let after=log(logs.appendingPathComponent("pipeline-after-session.log"))
         // The newer of the two has the current numbers.
         let newest=[launch,after].compactMap { $0 }.max { $0.date < $1.date }
-        var record:[String:Any]=["preparing_now":AfterMatch.running(root:root)]
+        // The monitor names itself once Battle.net is closed for the match, then waits for the game
+        // to close before the helper starts and rewrites its log: until then, the log is the last run's.
+        let named=AfterMatch.running(root:root) ? modified(root.appendingPathComponent("cache/after-session.pid")) : nil
+        let waiting=named.map { since in after.map { $0.date < since } ?? true } ?? false
+        var record:[String:Any]=["preparing_now":named != nil && !waiting,"waiting_for_game_to_close":waiting]
         if let newest {
             if let learned=newest.last("learned") { record["learned"]=learned["learned"] ?? 0;record["ready"]=learned["ready"] ?? 0 }
             if let done=newest.last("done"),let ready=done["ready"] { record["ready"]=ready }
@@ -343,18 +367,22 @@ enum ShaderRecord {
             return nil
         }
     }
+    private static func modified(_ url:URL)->Date? { (try? url.resourceValues(forKeys:[.contentModificationDateKey]))?.contentModificationDate }
     private static func log(_ url:URL)->Log? {
-        guard let text=try? String(contentsOf:url,encoding:.utf8),
-              let date=(try? url.resourceValues(forKeys:[.contentModificationDateKey]))?.contentModificationDate else { return nil }
+        guard let text=try? String(contentsOf:url,encoding:.utf8),let date=modified(url) else { return nil }
         return Log(text:text,date:date)
     }
-    /// scripts/portable_pipeline.swift's last word on the run, as a code.
-    private static func outcome(_ text:String)->String {
+    /// scripts/portable_pipeline.swift's last word on the run, as a code. The worker stops a
+    /// preparation when the game starts again: that is "cancelled", not "failed". A stop while the
+    /// helper waits on one of its tools reads the same as that tool timing out.
+    static func outcome(_ text:String)->String {
         let codes=[("Prepared and verified","prepared"),("Learned pipelines are up to date","up_to_date"),
                    ("Current archive covers comparable","up_to_date"),("Refresh already evaluated","up_to_date"),
                    ("no verified improvement","up_to_date"),("to preserve disk headroom","skipped_low_disk"),
                    ("leave no room to save","skipped_no_room"),("Archive not saved","not_saved"),
-                   ("No learned pipelines yet","nothing_learned"),("Pipeline preparation skipped","failed"),
+                   ("No learned pipelines yet","nothing_learned"),
+                   ("retained: Preparation cancelled or timed out","cancelled_or_timed_out"),
+                   ("retained: Preparation cancelled","cancelled"),("Pipeline preparation skipped","failed"),
                    ("ran out of time","timed_out")]
         for line in text.split(separator:"\n").reversed() where !line.hasPrefix("{") {
             if let code=codes.first(where:{ line.contains($0.0) })?.1 { return code }

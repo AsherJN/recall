@@ -71,11 +71,15 @@ static void watchClient(void) {
     }
     // It waits for a match as long as Battle.net stays open (until two minutes after it
     // closes), up to half a day, so a match started late is still prepared after.
-    NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:12*3600],*seen=nil,*clientSeen=[NSDate date];BOOL played=NO;
+    NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:12*3600],*seen=nil,*clientSeen=[NSDate date],*lastSeen=[NSDate date];BOOL played=NO,wasGame=NO;
     while(deadline.timeIntervalSinceNow>0 && !cancelRequested) {
         NSArray *rows=sessionProcesses();NSMutableArray *clients=[NSMutableArray array];BOOL game=NO;
         for(NSDictionary *p in rows) {if([p[@"kind"] isEqual:@"game"])game=YES;else[clients addObject:p];}
         played|=game;
+        // The session's record (portable_logs.h): when Overwatch ran, and when anything last did.
+        if(rows.count)lastSeen=[NSDate date];
+        if(game && !wasGame)recordGameStarted(monitorSession);else if(!game && wasGame)recordGameEnded(monitorSession);
+        wasGame=game;
         if(clients.count)clientSeen=[NSDate date];
         if(!game)seen=nil;else if(!seen)seen=[NSDate date];
         if(!game && -clientSeen.timeIntervalSinceNow>120)break;
@@ -89,6 +93,7 @@ static void watchClient(void) {
         [NSThread sleepForTimeInterval:2];
     }
     if(played && !cancelRequested)prepareAfterSession();
+    recordSessionEnded(monitorSession,lastSeen);
     if(setupProcess(monitorPath())==0)[fm removeItemAtPath:monitorPath() error:nil];
     close(fd);
 }

@@ -120,7 +120,8 @@ python3 scripts/build_portable_runtime.py --workspace runtime/phase-2 --jobs 4
 python3 scripts/build_portable_dxmt.py --workspace runtime/phase-2 --jobs 2
 python3 scripts/build_portable_setup.py --output runtime/phase-2/native/ow2-setup
 python3 scripts/assemble_portable_runtime.py --workspace runtime/phase-2
-python3 scripts/build_native_app.py --output runtime/build/Recall.app
+python3 scripts/build_native_app.py --output runtime/build/Recall.app \
+    --runtime-archive runtime/phase-2/artifacts/<runtime version>.tar.gz
 python3 -m venv runtime/tools/dmgbuild && runtime/tools/dmgbuild/bin/python -m pip install dmgbuild==1.6.5
 runtime/tools/dmgbuild/bin/python scripts/build_release_dmg.py --app runtime/build/Recall.app \
     --output runtime/release/Recall-1.0.0.dmg --identity "Developer ID Application: ..."
@@ -143,6 +144,12 @@ build that adds `patches/dxmt-shader-pack.patch` (`scripts/build_portable_dxmt.p
 `scripts/derive_runtime.py --shader-pack <DXMT workspace>`). The patch changes only the
 pipeline cache, which only `winemetal.so` contains, so DXMT's other files stay as
 `phase2-20261009.1` ships them.
+
+Runtime `phase2-20261019.1` is `phase2-20261014.3` with only the Mac driver replaced
+(`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py --native winemac`).
+The driver is built with the updated `patches/wine-winemac-activation.patch`, which adds the
+input variants. The app chooses `precise` with `WINEMAC_INPUT_VARIANT` from 1.5: mouse buttons
+in order with the motion, and a fallback to pointer events. `patches/README.md` describes them.
 
 Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
 replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py

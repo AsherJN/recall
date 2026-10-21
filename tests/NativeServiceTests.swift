@@ -30,7 +30,7 @@ import Foundation
         let slow=Task { try await service.run("slow") }
         try await Task.sleep(for:.milliseconds(200))
         do { _ = try await service.run("success");fatalError("Concurrent mutation accepted") }
-        catch let e as SetupFailure { precondition(e.code=="setup_already_running") }
+        catch let e as SetupFailure { precondition(e.code=="app_worker_busy") }
         service.cancel()
         do { _ = try await slow.value;fatalError("Cancellation succeeded") }
         catch let e as SetupFailure { precondition(e.code=="cancelled") }

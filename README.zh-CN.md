@@ -2,7 +2,7 @@
   <img src="app/Resources/Banner.png" width="640" alt="Recall">
 </h1>
 
-<p align="center"><sub><a href="README.md">English</a> · 简体中文</sub></p>
+<p align="center"><sub><a href="README.md">English</a> · 简体中文 · <a href="README.ko.md">한국어</a></sub></p>
 
 <h3 align="center">在 Mac 上玩守望先锋。</h3>
 
@@ -14,7 +14,7 @@
 
 <p align="center"><sub>M1 或更新 · macOS 26.5 或更高版本 · 已通过 Apple 公证 · 支持国服战网</sub></p>
 
-<p align="center"><b>国服玩家：</b>支持国服战网和简体中文界面的 <a href="https://github.com/AsherJN/recall/releases/tag/v1.4.1-rc1">Recall 1.4.1 测试版</a>已发布。欢迎下载试用，并在 <a href="https://github.com/AsherJN/recall/issues/34">#34</a> 告诉我运行情况。</p>
+<p align="center"><b>国服玩家：</b>Recall 1.5 支持国服战网和简体中文界面。<a href="https://github.com/AsherJN/recall/releases/latest">下载 Recall</a></p>
 
 <p align="center"><sub>Josh 制作 · <a href="#为什么做-recall">支持这个项目</a></sub></p>
 
@@ -97,7 +97,7 @@ CrossOver 是在 Mac 上玩 Windows 游戏最流行的方式，所以它是最�
 
 ## 国服战网
 
-目前国服战网支持仅在 [Recall 1.4.1 测试版](https://github.com/AsherJN/recall/releases/tag/v1.4.1-rc1) 中提供。Recall 可以为中国大陆的网易账号设置国服战网。设置时在“选择你的战网”中选择“国服”；已经设置好的话，可以在“设置 › 通用 › 战网区服”中切换。国际服和国服战网的账号互不相通，所以切换时 Recall 会把当前的安装移到废纸篓，再重新设置。
+Recall 可以为中国大陆的网易账号设置国服战网。设置时在“选择你的战网”中选择“国服”；已经设置好的话，可以在“设置 › 通用 › 战网区服”中切换。国际服和国服战网的账号互不相通，所以切换时 Recall 会把当前的安装移到废纸篓，再重新设置。
 
 - **登录。** 国服战网会在网页浏览器中让你用网易账号登录。如果 Safari 没有返回战网，请把 Chrome 或 Firefox 设为默认浏览器；如果 Chrome 请求访问本地网络上的设备，请选择“允许”。
 - **反作弊。** 国服守望先锋包含网易的反作弊程序。Recall 不会关闭它，但网易不支持在 Mac 上游戏。
@@ -145,11 +145,11 @@ Josh
 </details>
 
 <details>
-<summary><b>为什么最初几局会有些卡顿？</b></summary>
+<summary><b>为什么最初几局会卡顿？</b></summary>
 
-第一次玩时，游戏需要准备着色器，也就是 Mac 的图形芯片用来绘制每个场景的小程序。这会让最初几局比赛出现短暂卡顿，玩得越多就越流畅。
+守望先锋第一次用到某个着色器时，Mac 需要构建它，这会导致卡顿。每局比赛结束后，Recall 会准备好学到的着色器，所以比赛会越来越流畅。大多数玩家在 5 到 10 局内，或大约 10,000 到 15,000 个着色器时就能流畅游戏。
 
-想提前解决，可以在排队前从“自定义游戏”中运行地图工坊代码 **929PJ**，让它运行 5 到 10 分钟。
+想加快速度，可以运行地图工坊代码 **929PJ** 5 到 10 分钟：依次选择**游戏 › 自定游戏 › 创建游戏 › 设置 › 导入代码**，粘贴代码并开始。也可以打开**游戏 › 自定游戏**，搜索 **500%** 并加入一场游戏。国服战网的服务器不支持国际服的地图工坊代码，国服玩家可以只用 500% 的方法。
 </details>
 
 <details>

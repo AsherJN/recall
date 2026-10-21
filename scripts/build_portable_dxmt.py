@@ -22,8 +22,10 @@ SIGNING=ROOT/'runtime/signing/recall-nvngx'
 def run(*args,**kwargs):return subprocess.run([str(a) for a in args],check=True,**kwargs)
 
 
-def build(work,tools,jobs,signing=SIGNING):
-    source=work/'dxmt-source';builddir=work/'dxmt-build';install=work/'dxmt-install'
+def prepare_source(work):
+    """DXMT at its pinned commit with the accepted patches, in WORK/dxmt-source. It is all the app
+    build needs (build_native_app.py --workspace WORK): its pipeline sources come from here."""
+    source=work/'dxmt-source'
     if not source.exists():run('git','clone','--no-checkout','https://github.com/NerRobDog/dxmt',source)
     current=subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD'],text=True).strip()
     if current!=BASE:run('git','-C',source,'checkout','--detach',BASE)
@@ -32,7 +34,6 @@ def build(work,tools,jobs,signing=SIGNING):
     if current!=HEADERS:raise ValueError('DirectX header identity mismatch')
     current=subprocess.check_output(['git','-C',str(source/'external/nvapi'),'rev-parse','HEAD'],text=True).strip()
     if current!=NVAPI:raise ValueError('NVAPI header identity mismatch')
-    if not (signing/sign_pe.KEY).is_file():raise ValueError(f'No signing certificate in {signing} (scripts/sign_pe.py create-certificate)')
     patch=ROOT/'patches/dxmt-v1-private.patch'
     if hashlib.sha256(patch.read_bytes()).hexdigest()!='5afcbde9512381c37e975450d08f7fd3cef1e8755739f1f5b4ae8f1563de5199':raise ValueError('Accepted renderer patch changed')
     check=subprocess.run(['git','apply','--check',str(patch)],cwd=source,capture_output=True)
@@ -68,6 +69,13 @@ def build(work,tools,jobs,signing=SIGNING):
     check=subprocess.run(['git','apply','--check',str(shader_pack)],cwd=source,capture_output=True)
     if check.returncode==0:run('git','apply',shader_pack,cwd=source)
     else:run('git','apply','--reverse','--check',shader_pack,cwd=source)
+    return source,{'patch':patch,'performance':performance,'portable':portable_patch,'metalfx':metalfx,'shader_pack':shader_pack}
+
+
+def build(work,tools,jobs,signing=SIGNING):
+    if not (signing/sign_pe.KEY).is_file():raise ValueError(f'No signing certificate in {signing} (scripts/sign_pe.py create-certificate)')
+    source,patches=prepare_source(work);builddir=work/'dxmt-build';install=work/'dxmt-install'
+    patch,performance,portable_patch,metalfx,shader_pack=(patches[k] for k in ('patch','performance','portable','metalfx','shader_pack'))
     wrapper=source/'portable_metal.py'
     shutil.copy2(ROOT/'scripts/portable_metal.py',wrapper);wrapper.chmod(0o755)
     env=os.environ.copy();env.pop('DESTDIR',None)
@@ -103,4 +111,7 @@ def build(work,tools,jobs,signing=SIGNING):
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--workspace',type=Path,required=True)
     p.add_argument('--toolchains',type=Path,default=ROOT/'runtime/toolchains');p.add_argument('--jobs',type=int,choices=range(1,5),default=2)
-    a=p.parse_args();build(a.workspace.resolve(),a.toolchains.resolve(),a.jobs)
+    p.add_argument('--source-only',action='store_true',help='only fetch and patch DXMT (enough for build_native_app.py --workspace); no toolchains or signing needed')
+    a=p.parse_args()
+    if a.source_only:a.workspace.mkdir(parents=True,exist_ok=True);prepare_source(a.workspace.resolve())
+    else:build(a.workspace.resolve(),a.toolchains.resolve(),a.jobs)

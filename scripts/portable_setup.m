@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <libproc.h>
 #include <signal.h>
 #include <unistd.h>
@@ -29,6 +30,8 @@ static BOOL monitorMode;
 static NSString *monitorGameApp;
 // A monitor started by prepare-shaders (watch --prepare-now 1) prepares before it watches.
 static BOOL monitorPrepareNow;
+// The Battle.net start a launch's monitor watches (watch --session), whose record it adds to (portable_logs.h).
+static NSString *monitorSession;
 static BOOL ownedPreparation;
 static volatile sig_atomic_t childPID;
 static volatile sig_atomic_t cancelRequested;
@@ -127,9 +130,21 @@ static void ownRoot(NSString *requested) {
     else if(n!=20 || memcmp(bytes,"ow2-native-setup-v1\n",20)) {close(markerFD);fail(@"invalid_ownership_marker");}
     close(markerFD);
     lockFD=open(join(root,@"setup.lock").fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
-    if(lockFD<0)fail(@"setup_already_running");
-    if(monitorMode) { if(flock(lockFD,LOCK_EX))fail(@"setup_already_running"); }
-    else if(flock(lockFD,LOCK_EX|LOCK_NB))fail(@"setup_already_running");
+    if(lockFD<0)fail(@"setup_lock_failed");
+    // A launch's new monitor briefly owns this lock before handing off to its own.
+    // Wait here, BEFORE dispatch: retrying a whole launch after it started could
+    // open another client. Keep app operations bounded and cancellation responsive.
+    NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+(monitorMode ? 180.0 : 5.0);
+    BOOL announced=NO;
+    while(YES) {
+        if(cancelRequested)fail(@"cancelled");
+        if(flock(lockFD,LOCK_EX|LOCK_NB)==0)break;
+        if(errno!=EWOULDBLOCK && errno!=EAGAIN && errno!=EINTR)fail(@"setup_lock_failed");
+        if(NSProcessInfo.processInfo.systemUptime>=deadline)fail(@"setup_already_running");
+        if(!announced) {event(@"waiting_for_setup",nil);announced=YES;}
+        [NSThread sleepForTimeInterval:0.05];
+    }
+    if(cancelRequested)fail(@"cancelled");
     for (NSString *directory in @[@"runtimes",@"downloads",@"logs",@"home",@"tmp",@"cache"])
         mkdirs(join(root,directory));
 }
@@ -150,6 +165,9 @@ static NSString *runtime(void) {
 static NSMutableDictionary *wineEnv(NSString *engine) {
     // Keep Wine's Windows profile and shell-folder symlinks inside this new
     // environment. Never borrow the developer's HOME, account state or caches.
+    // The contract's CX_HACK_FILESYSTEM_TYPE (CrossOver's GetVolumeInformationW hack) drops
+    // FILE_PERSISTENT_ACLS: Wine rebuilds ACLs from Unix modes, so Battle.net's folder check
+    // failed on every start and marked Overwatch not playable (2123) until an update ran (REC-6).
     NSMutableDictionary *env=[candidateEnvironment() mutableCopy];
     [env addEntriesFromDictionary:@{@"PATH":@"/usr/bin:/bin:/usr/sbin:/sbin",@"HOME":join(root,@"home"),@"USER":@"player",
         @"TMPDIR":join(root,@"tmp"),@"WINEPREFIX":join(root,@"environment"),@"WINEARCH":@"win64",
@@ -196,6 +214,7 @@ static BOOL busy(NSString *engine) {
     if(result!=0 && result!=124)fail(@"server_check_failed");
     return result==124;
 }
+#include "portable_logs.h"
 #include "portable_session.h"
 #include "portable_preferences.h"
 #include "portable_retina.h"
@@ -384,10 +403,12 @@ static void prepare(void) {
     if(waitTask(task(join(engine,@"bin/wineserver"),@[@"-w"],wineEnv(engine),@"wineboot-wait.log"),60))fail(@"environment_initialization_busy");
     if(![fm fileExistsAtPath:join(prefix,@"system.reg")])fail(@"environment_registry_missing");
     configureRetina();
-    // The player's network and Korean account choices (portable_network.h, portable_korea.h)
-    // and the fonts for Chinese or Korean (portable_region.h), before Battle.net's installer
-    // first goes online. None stops setup; launches retry.
+    // The player's network and Korean account choices (portable_network.h, portable_korea.h),
+    // the fonts for Chinese or Korean (portable_region.h) and Overwatch's left Option key
+    // (portable_network.h), before Battle.net's installer first goes online. None stops setup;
+    // launches retry.
     configureProxy(engine,proxyDetectionChosen());
+    configureOptionKey(engine);
     if(koreanSupportChosen())configureKoreanCertificate(engine,YES,YES);
     if(cjkFontsChosen())configureFonts(engine,YES);
     if(!registrySaved(engine,60))fail(@"environment_initialization_busy");
@@ -454,11 +475,13 @@ static BOOL stopMonitor(void) {
     close(fd);return YES;
 }
 // The session's monitor, told which app Overwatch runs as: with Game Mode, preparation
-// after the match also warms that app's own shader cache with every learned pipeline.
-static NSArray *watchArguments(NSString *engine, BOOL gameMode) {
+// after the match also warms that app's own shader cache with every learned pipeline. A
+// launch's monitor also gets the Battle.net start whose record it keeps (portable_logs.h).
+static NSArray *watchArguments(NSString *engine, BOOL gameMode, NSString *session) {
     NSString *gameApp=join(engine,@"lib/wine/game-mode/Overwatch.app");
     BOOL app=gameMode && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")];
-    return app ? @[@"watch",@"--root",root,@"--game-app",gameApp] : @[@"watch",@"--root",root];
+    NSArray *arguments=app ? @[@"watch",@"--root",root,@"--game-app",gameApp] : @[@"watch",@"--root",root];
+    return validSessionName(session) ? [arguments arrayByAddingObjectsFromArray:@[@"--session",session]] : arguments;
 }
 static void prepareAfterSession(void) {
     NSString *pipeline=helperPath(@"ow2-pipeline");
@@ -472,6 +495,7 @@ static void prepareAfterSession(void) {
         if(-checked.timeIntervalSinceNow<10) {[NSThread sleepForTimeInterval:0.25];continue;}
         checked=[NSDate date];
         if(gameRunning())continue;
+        recordGameEnded(monitorSession);
         NSTask *p=task(pipeline,monitorGameApp ? @[@"--after-session",root,monitorGameApp] : @[@"--after-session",root],nil,@"pipeline-after-session.log");
         childPID=p.processIdentifier;
         NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:4*3600];
@@ -601,19 +625,47 @@ static void applyShaderMemory(void) {
     id limit=[choice isEqual:@"all"] || [choice isEqual:@"first"] ? choice : @(choice.longLongValue);
     writeJSON(@{@"schema":@1,@"limit":limit},join(folder,@"load.json"));
 }
-/* Settings › Graphics › Delete Shaders: clear the prepared shader cache so every shader builds
- * again from scratch after the next match. The game holds the cache's write lock while it runs,
- * and a preparation after a match writes the same archives, so both block it. The Shader
- * memory choice is kept, and load.json is written again for the next launch. */
+/* Settings › Graphics › Clear Shader Cache (from @dagadtwok's pull request, #37): everything
+ * Recall keeps of Overwatch's shaders, so each one builds again from scratch: DXMT's translated
+ * shaders (cache/shaders), the learned and prepared pipelines (cache/pipelines) with the helper's
+ * records of them, and macOS's own compiled-shader cache for the engine's game app, which the
+ * helper warms for Game Mode. Battle.net and Overwatch must be closed: the game holds the caches
+ * while it runs, and a Battle.net left open would start it on half of them. A preparation after
+ * a match writes the same archives, so it blocks this too; a monitor only waiting is ended. The
+ * Shader memory choice is kept, and load.json is written again for the next launch. */
+static NSString *gameAppShaderCache(void) {
+    if(!state()[@"active_runtime"])return nil;
+    NSDictionary *info=[NSDictionary dictionaryWithContentsOfFile:join(runtime(),@"lib/wine/game-mode/Overwatch.app/Contents/Info.plist")];
+    NSString *identifier=info[@"CFBundleIdentifier"];
+    char caches[PATH_MAX];
+    // Only the engine's own game app: never another app's cache, nor macOS's shared one.
+    if(![identifier isKindOfClass:NSString.class] || !matches(identifier,@"^org\\.overwatch2mac\\.[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$") ||
+       !confstr(_CS_DARWIN_USER_CACHE_DIR,caches,sizeof(caches)))return nil;
+    return join(@(caches),identifier);
+}
 static void deleteShaders(void) {
-    for(NSDictionary *p in sessionProcesses())if([p[@"kind"] isEqual:@"game"])fail(@"close_game_before_maintenance");
+    if(sessionProcesses().count)fail(@"close_game_before_maintenance");
     if(!stopMonitor())fail(@"shader_preparation_running");
-    [fm removeItemAtPath:join(root,@"cache/pack.json") error:nil];
-    if([fm fileExistsAtPath:join(root,@"cache/pipelines")] && ![fm removeItemAtPath:join(root,@"cache/pipelines") error:nil])fail(@"shader_delete_failed");
+    // Moved aside first, so each cache is whole or gone even if removing it stops partway.
+    NSString *cache=join(root,@"cache"),*aside=join(root,@"tmp/cleared-shaders");
+    [fm removeItemAtPath:aside error:nil];mkdirs(aside);
+    for(NSString *name in @[@"pipelines",@"shaders"]) {
+        NSString *path=join(cache,name);
+        if(([fm fileExistsAtPath:path] || [fm destinationOfSymbolicLinkAtPath:path error:nil]) &&
+           ![fm moveItemAtPath:path toPath:join(aside,name) error:nil])fail(@"shader_delete_failed");
+    }
+    for(NSString *name in @[@"pack.json",@"prepared.json",@"preparing.json",@"warmed.json",@"shader-update"])
+        [fm removeItemAtPath:join(cache,name) error:nil];
+    NSString *metal=gameAppShaderCache();
+    if(metal && [fm fileExistsAtPath:metal] && ![fm removeItemAtPath:metal error:nil])fail(@"shader_delete_failed");
+    [fm removeItemAtPath:aside error:nil];
     applyShaderMemory();
     event(@"shaders_deleted",nil);
 }
-static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx, NSString *sharpening) {
+static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx, NSString *sharpening,
+                         NSString *logging, NSString *loggingCustom) {
+    // A logging setting Wine wouldn't understand stops the launch before anything starts.
+    NSDictionary *logs=loggingEnvironment(logging,loggingCustom);
     requireRosetta();
     NSString *engine=runtime();if(![fm fileExistsAtPath:clientPath()])fail(@"battlenet_not_installed");
     // Before anything else: an Overwatch started from a Battle.net already open reads it too.
@@ -638,7 +690,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
         if(!game)configureVoiceMicrophone(engine,nil,YES,NO);
         // Battle.net already open carries its own environment; this hands over the command only.
         if(play && !game)task(join(engine,@"bin/wine"),client,clientEnvironment(wineEnv(engine),sized,hud,gameMode,NO),@"battlenet-play.log");
-        if(!game)task(NSProcessInfo.processInfo.arguments[0],watchArguments(engine,gameMode),nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
+        if(!game)task(NSProcessInfo.processInfo.arguments[0],watchArguments(engine,gameMode,state()[@"log_session"]),nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
         return;
     }
     // The update Agent can legitimately outlive the client. It must not
@@ -676,14 +728,21 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     // Setup applies these; a launch puts back any that went missing (the registry tool runs
     // only then). The voice step below waits for Wine's server, as Battle.net needs.
     configureProxy(engine,proxyDetectionChosen());
+    configureOptionKey(engine);
     if(koreanSupportChosen())configureKoreanCertificate(engine,YES,YES);
     if(cjkFontsChosen())configureFonts(engine,YES);
     configureVoiceMicrophone(engine,nil,YES,YES);
     if(displays) {NSMutableDictionary *s=state();s[@"session_displays"]=displays;writeJSON(s,join(root,@"state.json"));}
-    NSDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),sized,hud,gameMode,metalfx);
-    NSTask *p=task(join(engine,@"bin/wine"),client,env,@"battlenet.log");
-    saveStage(@"battlenet_started");event(@"battlenet_open",@{@"pid":@(p.processIdentifier)});
-    task(NSProcessInfo.processInfo.arguments[0],watchArguments(engine,gameMode),nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
+    NSMutableDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),sized,hud,gameMode,metalfx);
+    [env addEntriesFromDictionary:logs];
+    NSMutableDictionary *record=[@{@"logging":logs.count ? logging : @"off",@"winedebug":env[@"WINEDEBUG"],@"dxmt_log_level":env[@"DXMT_LOG_LEVEL"],
+        @"runtime":state()[@"active_runtime"],@"region":state()[@"battlenet_region"] ?: @"global",@"korean_support":@(koreanSupportChosen()),
+        @"game_mode":@(gameMode),@"metalfx":@(metalfx),@"metal_hud":@(hud)} mutableCopy];
+    if([logging isEqual:@"custom"])record[@"logging_custom"]=loggingCustom;
+    NSString *session=startSessionLog(record);
+    NSTask *p=task(join(engine,@"bin/wine"),client,env,[NSString stringWithFormat:@"sessions/%@/battlenet.log",session]);
+    saveStage(@"battlenet_started");event(@"battlenet_open",@{@"pid":@(p.processIdentifier),@"session":session});
+    task(NSProcessInfo.processInfo.arguments[0],watchArguments(engine,gameMode,session),nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
 }
 
 /* Settings › Advanced. Battle.net and Overwatch carry both settings from when they start,
@@ -764,6 +823,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         if(monitorMode && gameApp && [gameApp hasPrefix:[join(root,@"runtimes") stringByAppendingString:@"/"]] &&
            [gameApp hasSuffix:@"/lib/wine/game-mode/Overwatch.app"] && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")])monitorGameApp=gameApp;
         monitorPrepareNow=monitorMode && [options[@"prepare-now"] isEqual:@"1"];
+        if(monitorMode && validSessionName(options[@"session"]))monitorSession=options[@"session"];
         if([command isEqual:@"preflight"])preflight();
         else if([command isEqual:@"status"]) {
             // The resolution Overwatch opens at next on the main display.
@@ -780,6 +840,8 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         else if([command isEqual:@"battlenet"])chooseBattleNet(options[@"region"],options[@"language"]);
         // Support and tests: the fonts setup and launches add for Chinese and Korean; --apply 0 only reports.
         else if([command isEqual:@"fonts"])configureFonts([options[@"apply"] isEqual:@"0"] ? nil : runtime(),cjkFontsChosen());
+        // Support and tests: Overwatch's left Option key as Alt, which setup and launches set.
+        else if([command isEqual:@"keyboard"])configureOptionKey([options[@"apply"] isEqual:@"0"] ? nil : runtime());
         else if([command isEqual:@"onboarded"]) { NSMutableDictionary *s=state();s[@"onboarding_complete"]=@YES;writeJSON(s,join(root,@"state.json"));event(@"onboarding_complete",nil); }
         else if([command isEqual:@"session"])event(@"session",@{@"processes":sessionProcesses()});
         else if([command isEqual:@"watch"])watchClient();
@@ -813,13 +875,13 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
             for(NSDictionary *p in sessionProcesses())if([p[@"kind"] isEqual:@"game"])fail(@"close_game_before_maintenance");
             if(!stopMonitor()) {event(@"shader_preparation_running",nil);}
             else {
-                NSArray *arguments=[watchArguments(engine,![options[@"game-mode"] isEqual:@"0"]) arrayByAddingObjectsFromArray:@[@"--prepare-now",@"1"]];
+                NSArray *arguments=[watchArguments(engine,![options[@"game-mode"] isEqual:@"0"],nil) arrayByAddingObjectsFromArray:@[@"--prepare-now",@"1"]];
                 task(NSProcessInfo.processInfo.arguments[0],arguments,nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
                 event(@"shader_preparation_started",nil);
             }
         }
-        // Settings › Graphics › Delete Shaders: the prepared shader cache, to rebuild after the
-        // next match. Overwatch must be closed, and a preparation running left to finish.
+        // Settings › Graphics › Clear Shader Cache: every shader Recall keeps, to build again as
+        // Overwatch uses them. Battle.net and Overwatch must be closed, and a preparation left to finish.
         else if([command isEqual:@"delete-shaders"])deleteShaders();
         // Support and tests: the microphone launch points Wine at (portable_voice.h). --uid names one
         // instead of asking Core Audio ("none": macOS's default); --apply 0 only reports.
@@ -851,8 +913,17 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         // --metal-hud 1 shows Apple's Metal Performance HUD over Overwatch (Settings); off by default.
         // --game-mode 0 starts Overwatch without macOS Game Mode (hidden app default); on by default.
         // --metalfx 1 offers DLSS on MetalFX, with --sharpening off|low|high (Settings); off by default.
-        else if([command isEqual:@"launch"])launchClient(NO,[options[@"play"] isEqual:@"1"],![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off");
-        else if([command isEqual:@"diagnostic-launch"])launchClient(YES,NO,![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off");
+        // --logging off|crashes|graphics|battlenet|custom, with --logging-custom <WINEDEBUG text> (Settings › Advanced); off by default.
+        else if([command isEqual:@"launch"])launchClient(NO,[options[@"play"] isEqual:@"1"],![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off",options[@"logging"] ?: @"off",options[@"logging-custom"]);
+        else if([command isEqual:@"diagnostic-launch"])launchClient(YES,NO,![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off",options[@"logging"] ?: @"off",options[@"logging-custom"]);
+        // Support and tests: what launch --logging (and --logging-custom) gives Wine and the graphics layer.
+        else if([command isEqual:@"logging"])event(@"logging",@{@"setting":options[@"setting"] ?: @"off",@"environment":loggingEnvironment(options[@"setting"] ?: @"off",options[@"custom"])});
+        // Support and tests: each Battle.net start's logs (logs/sessions), oldest first. --prune 1 removes
+        // the oldest while the logs would take more room than the disk has left, as each launch does.
+        else if([command isEqual:@"session-logs"]) {
+            if([options[@"prune"] isEqual:@"1"])pruneSessionLogs();
+            event(@"session_logs",@{@"sessions":sessionLogNames()});
+        }
         // Support and tests: what a launch with --enabled 0|1 (and --sharpening) sets up for MetalFX
         // upscaling (portable_metalfx.h); --apply 0 only reports.
         else if([command isEqual:@"metalfx"]) {

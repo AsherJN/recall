@@ -48,6 +48,7 @@
     "WINE_SIMULATE_WRITECOPY": "1",
     "CX_ACTIVE_GRAPHICS_BACKEND": "dxmt",
     "CX_GRAPHICS_BACKEND": "dxmt",
+    "CX_HACK_FILESYSTEM_TYPE": "1",
     "WINEDLLOVERRIDES": "d3d11,dxgi,d3d10core,winemetal=b;d3d12,nvapi64,nvngx=",
     "DXMT_CANVAS_DRAWABLES": "3",
     "DXMT_CANVAS_OVERLAY": "0",
@@ -57,6 +58,7 @@
     "DXMT_PIPELINE_CACHE_PREWARM_LIMIT": "128",
     "DXMT_PIPELINE_CACHE_PREFER_EXPENSIVE": "1",
     "WINEMAC_MOUSELOOK": "Overwatch.exe",
+    "WINEMAC_INPUT_VARIANT": "precise",
     "WINE_GAME_MODE": "Overwatch.exe",
     "DXMT_PREPARE_SHADERS": "1"
   },

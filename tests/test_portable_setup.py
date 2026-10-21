@@ -4,6 +4,7 @@ No Wine/game is launched. Fixture runtimes are data used solely to test the
 transaction/verification boundary; they are not gameplay or signing evidence.
 """
 import hashlib
+import fcntl
 import io
 import json
 import os
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -168,12 +170,65 @@ class NativeSetup(unittest.TestCase):
         (self.root/'runtimes/v1/bin/.DS_Store.dylib').write_text('not finder')
         self.assertEqual(self.call('verify',success=False)[-1]['code'],'runtime_unlisted_file')
 
-    def test_simultaneous_setup_is_rejected(self):
+    def test_persistent_setup_contention_times_out_without_mutation(self):
         self.call('status')
-        import fcntl
         with (self.root/'setup.lock').open('r+') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            self.assertEqual(self.call('status',success=False)[-1]['code'],'setup_already_running')
+            started=time.monotonic()
+            events=self.call('onboarded',success=False)
+            self.assertEqual(events[0]['stage'],'waiting_for_setup')
+            self.assertEqual(events[-1]['code'],'setup_already_running')
+            self.assertLess(time.monotonic()-started,10)
+            self.assertFalse((self.root/'state.json').exists())
+        self.assertEqual(self.call('onboarded')[-1]['stage'],'onboarding_complete')
+
+    def waiting_worker(self, command):
+        worker=subprocess.Popen([str(self.binary),command,'--root',str(self.root)],
+                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        def cleanup():
+            if worker.poll() is None:worker.kill()
+            worker.communicate()
+        self.addCleanup(cleanup)
+        # Use the worker's own event as a barrier, not a timing guess.
+        import select
+        self.assertTrue(select.select([worker.stdout],[],[],5)[0],'worker did not reach the lock')
+        self.assertEqual(json.loads(worker.stdout.readline())['stage'],'waiting_for_setup')
+        return worker
+
+    def test_transient_contention_resumes_once_before_dispatch(self):
+        self.call('status')
+        with (self.root/'setup.lock').open('r+') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            worker=self.waiting_worker('onboarded')
+            self.assertIsNone(worker.poll())
+            self.assertFalse((self.root/'state.json').exists())
+            fcntl.flock(lock,fcntl.LOCK_UN)
+            stdout,stderr=worker.communicate(timeout=5)
+        self.assertEqual(worker.returncode,0,stdout+stderr)
+        self.assertEqual([json.loads(line)['stage'] for line in stdout.splitlines()],['onboarding_complete'])
+        self.assertTrue(json.loads((self.root/'state.json').read_text())['onboarding_complete'])
+
+    def test_cancel_while_waiting_never_dispatches_or_releases_other_workers_lock(self):
+        for command in ('onboarded','watch'):
+            with self.subTest(command=command):
+                self.call('status')
+                with (self.root/'setup.lock').open('r+') as lock:
+                    fcntl.flock(lock,fcntl.LOCK_EX)
+                    worker=self.waiting_worker(command)
+                    worker.terminate()
+                    stdout,stderr=worker.communicate(timeout=3)
+                    self.assertNotEqual(worker.returncode,0,stderr)
+                    self.assertEqual(json.loads(stdout.splitlines()[-1])['code'],'cancelled')
+                    self.assertFalse((self.root/'state.json').exists())
+                    self.assertFalse((self.root/'launch-monitor.lock').exists())
+                    with (self.root/'setup.lock').open('r+') as other:
+                        with self.assertRaises(BlockingIOError):fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
+
+    def test_lock_open_failure_is_not_reported_as_temporary_contention(self):
+        self.call('status')
+        (self.root/'setup.lock').unlink()
+        (self.root/'setup.lock').mkdir()
+        self.assertEqual(self.call('onboarded',success=False)[-1]['code'],'setup_lock_failed')
 
     def test_plain_http_and_embedded_url_credentials_are_rejected(self):
         for url in ['http://example.invalid/x','https://username:password@example.invalid/x']:

@@ -1,11 +1,12 @@
 import AppKit
 import SwiftUI
 import Observation
+import UniformTypeIdentifiers
 
 @MainActor @Observable
 final class AppModel {
     enum Screen: String, CaseIterable { case welcome, moveApp, checking, battleNet, readyToInstall, preparing, launching, installer, ready, running, driveMissing, failure }
-    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate, china, changeRegion; var id: String { rawValue } }
+    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate, china, korea, changeRegion; var id: String { rawValue } }
     enum UninstallState: Equatable { case idle, working, done(appRemoved: Bool), failed(String) }
     enum UpdateState: Equatable { case idle, checking, upToDate, available(AvailableUpdate), downloading(Double), installing, failed(String) }
     var uninstall: UninstallState = .idle
@@ -38,14 +39,48 @@ final class AppModel {
     var metalFXSharpening=Sharpening(rawValue:UserDefaults.standard.string(forKey:"metalFXSharpening") ?? "") ?? .off {
         didSet { UserDefaults.standard.set(metalFXSharpening.rawValue,forKey:"metalFXSharpening") }
     }
+    /// Settings › Advanced › Logging (LoggingSetting; worker: launch --logging). Off unless the player
+    /// turns it on; Battle.net carries it from when it opens, like the HUD. While it's on the home
+    /// screen says so (LoggingReminder), and the support report and saved logs say since when.
+    var logging=LoggingSetting(rawValue:UserDefaults.standard.string(forKey:"logging") ?? "") ?? .off {
+        didSet {
+            UserDefaults.standard.set(logging.rawValue,forKey:"logging")
+            if logging == .off { UserDefaults.standard.removeObject(forKey:"loggingSince") }
+            else if oldValue == .off { UserDefaults.standard.set(Date(),forKey:"loggingSince") }
+        }
+    }
+    /// Custom's WINEDEBUG text, as Wine reads it (LoggingSetting.normalized); kept while another setting is chosen.
+    var loggingCustom=UserDefaults.standard.string(forKey:"loggingCustom") ?? "" {
+        didSet { UserDefaults.standard.set(loggingCustom,forKey:"loggingCustom") }
+    }
+    var loggingSince:Date? { UserDefaults.standard.object(forKey:"loggingSince") as? Date }
+    /// What the open Battle.net logs, as its session's record says (portable_logs.h): it keeps the
+    /// setting it opened with. Read with the session (syncSession, checkRunning).
+    var sessionLogging:LoggingSetting?
+    private func readSessionLogging() {
+        guard let name=state["log_session"] as? String,!name.contains("/"),
+              let data=try? Data(contentsOf:root.appendingPathComponent("logs/sessions/\(name)/session.json")),
+              let record=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],record["ended"] == nil else { sessionLogging=nil;return }
+        sessionLogging=LoggingSetting(rawValue:record["logging"] as? String ?? "") ?? .off
+    }
+    /// Save Logs (LogBundle): working, then the file just saved, for its "Saved" line.
+    var savingLogs=false
+    var savedLogs:(name:String,bytes:Int64)?
     enum Running { case client, game }
     /// What runs now, as Settings last checked; nil when neither Battle.net nor Overwatch does.
     var running: Running?
-    var firstMatchTipDismissed=UserDefaults.standard.bool(forKey:"firstMatchTipDismissed") {
-        didSet { UserDefaults.standard.set(firstMatchTipDismissed,forKey:"firstMatchTipDismissed") }
+    /// How far the player has put the first-matches tip away (FirstMatchTip.Hidden). A new key in
+    /// 1.5.0: closing the earlier tip ("firstMatchTipDismissed") hid it for good, so players who
+    /// did that still see this one (owner, October 19).
+    var stutterTipHidden=FirstMatchTip.Hidden(rawValue:UserDefaults.standard.string(forKey:"stutterTipHidden") ?? "") ?? .shown {
+        didSet { UserDefaults.standard.set(stutterTipHidden.rawValue,forKey:"stutterTipHidden") }
     }
+    /// Shaders Overwatch has used on this Mac, for the first-matches tip (FirstMatchTip): from the
+    /// helper's logs (ShaderRecord), then from each launch's and each after-match preparation's
+    /// numbers. nil until read, and with nothing learned yet.
+    var learnedShaders:Int?
     /// The Korean build of Overwatch is installed: its folder holds Nexon's anti-cheat (worker
-    /// status). The Play screens then suggest Korean account support until dismissed.
+    /// status). On Global, the Play screens then suggest the Korea region until dismissed.
     var nexonBuild=false
     var koreanTipDismissed=UserDefaults.standard.bool(forKey:"koreanTipDismissed") {
         didSet { UserDefaults.standard.set(koreanTipDismissed,forKey:"koreanTipDismissed") }
@@ -59,18 +94,27 @@ final class AppModel {
     /// Continue on Choose your Battle.net this session; with a choice already kept, not needed.
     private var battleNetConfirmed=false
     var needsBattleNetChoice:Bool { !clientInstalled && state["battlenet_region"] == nil && !battleNetConfirmed }
-    /// The region the installed Battle.net is for; installations from before 1.4 are Global.
-    var installedRegion:BattleNetRegion { BattleNetRegion(rawValue:state["battlenet_region"] as? String ?? "") ?? .global }
-    /// Discord is blocked in mainland China: players who choose China's Battle.net get GitHub
-    /// wherever Recall offers the Discord (GitHubHelpLink; owner, October 15).
-    var showsDiscord:Bool { battleNetRegion != .china }
+    /// The region the installation is for (BattleNetRegion.kept): installations from before 1.4.1
+    /// are Global, or Korea with Korean account support on.
+    var installedRegion:BattleNetRegion { BattleNetRegion.kept(state) }
+    /// The Battle.net the player is on: as installed, or as chosen while setting up. Help, the
+    /// Discord card and the sign-in notes follow it.
+    var currentRegion:BattleNetRegion { clientInstalled ? installedRegion : battleNetRegion }
+    /// Discord is blocked in mainland China: players on China's Battle.net get GitHub wherever
+    /// Recall offers the Discord (GitHubHelpLink; owner, October 15).
+    var showsDiscord:Bool { currentRegion != .china }
+    /// The 929PJ warm-up is a global-server code; China's servers don't take it (NetEase). Players
+    /// on China's Battle.net get the stutter heads-up without it (owner, October 19).
+    var offersWorkshopCode:Bool { currentRegion != .china }
     /// China's game folder holds NetEase's anti-cheat (worker status); support reports name it.
     var neacBuild=false
-    /// Settings › General › Battle.net region › Change: the installation going to the Trash.
+    /// Settings › General › Battle.net region, to or from China's: the installation going to the
+    /// Trash, and the region setup then starts again with.
     enum RegionChange: Equatable { case idle, working, failed(String) }
     var regionChange=RegionChange.idle
-    /// Settings › Advanced, kept by the worker (state.json): automatic proxy detection, off
-    /// unless turned on, and Korean account support, experimental.
+    var regionTarget=BattleNetRegion.global
+    /// Kept by the worker (state.json): automatic proxy detection (Settings › Advanced), off unless
+    /// turned on, and Korean account support, which is the Korea region (Settings › General).
     enum AdvancedSetting: String { case proxyAutoDetect="proxy_auto_detect", koreanSupport="korean_support" }
     var proxyAutoDetect:Bool { state[AdvancedSetting.proxyAutoDetect.rawValue] as? Bool == true }
     var koreanSupport:Bool { state[AdvancedSetting.koreanSupport.rawValue] as? Bool == true }
@@ -86,6 +130,58 @@ final class AppModel {
     var afterMatchProgress:AfterMatch.Progress?
     /// What's preparing is the one-time shader cache update (Update Now) rather than a match's.
     var updatingShaderCache=false
+    /// What else is using the Mac (BusyApps, REC-5): looked at every few seconds while the Play,
+    /// opening or running screen is on screen, so the note names what's busy as the player
+    /// starts Overwatch. Nothing is checked while this window is hidden, a match included.
+    var macLoad=MacLoad()
+    var windowVisible=true
+    /// Apps the player chose Quit for, until they end.
+    var quittingApps:Set<pid_t>=[]
+    @ObservationIgnored private var loadChecked:Date?
+    var watchesLoad:Bool { !isPreview && clientInstalled && windowVisible && [.ready,.launching,.running].contains(screen) }
+    /// Recall itself and everything under its data folders (Wine, Battle.net, Overwatch).
+    private var ownPaths:[String] { [Bundle.main.bundlePath,root.standardizedFileURL.path,InstallLocation.standard.standardizedFileURL.path].map { $0.hasSuffix("/") ? $0 : $0+"/" } }
+    func watchLoad() async {
+        let paths=ownPaths
+        var previous=await Task.detached(priority:.utility) { BusyApps.sample() }.value
+        // The first answer two seconds in, then over each five seconds: long enough that a
+        // video's or a game's use reads steady.
+        var interval=2.0
+        while watchesLoad && !Task.isCancelled {
+            try? await Task.sleep(for:.seconds(interval))
+            guard watchesLoad && !Task.isCancelled else { return }
+            let first=previous,gameRunning=screen == .running && existingName == "Overwatch"
+            let (load,next)=await Task.detached(priority:.utility) { () -> (MacLoad,BusyApps.Sample) in
+                let next=BusyApps.sample();return (BusyApps.load(from:first,to:next,excluding:paths,gameRunning:gameRunning),next)
+            }.value
+            previous=next;interval=5
+            macLoad=load;loadChecked=Date()
+            quittingApps.formIntersection(load.apps.map(\.pid))
+        }
+    }
+    /// Quit, as Cmd-Q in that app: it can still ask to save. The note updates when it has ended.
+    func quitApp(_ app:MacLoad.App) {
+        guard let running=NSRunningApplication(processIdentifier:app.pid),running.terminate() else { return }
+        quittingApps.insert(app.pid)
+    }
+    func appEnded(_ pid:pid_t) {
+        guard macLoad.apps.contains(where:{ $0.pid == pid }) else { return }
+        macLoad.apps.removeAll { $0.pid == pid };quittingApps.remove(pid)
+    }
+    /// For the Support Report: what was busy as Battle.net or Overwatch was last opened.
+    private func recordLaunchLoad() {
+        guard !isPreview else { return }
+        if let loadChecked,Date().timeIntervalSince(loadChecked) < 10 { Self.saveLaunchLoad(macLoad);return }
+        let paths=ownPaths
+        Task { Self.saveLaunchLoad(await BusyApps.check(excluding:paths)) }
+    }
+    private static func saveLaunchLoad(_ load:MacLoad) {
+        var record=load.report;record["at"]=ISO8601DateFormatter().string(from:Date())
+        UserDefaults.standard.set(try? JSONSerialization.data(withJSONObject:record),forKey:"launchLoad")
+    }
+    private var launchLoad:[String:Any]? {
+        UserDefaults.standard.data(forKey:"launchLoad").flatMap { try? JSONSerialization.jsonObject(with:$0) as? [String:Any] }
+    }
     /// Update Now was chosen: its monitor starts within seconds, or once one from before 1.4
     /// has ended (up to three minutes; portable_session.h), and the status shows meanwhile.
     private var shaderUpdateRequested:Date?
@@ -93,6 +189,12 @@ final class AppModel {
     var showsAfterMatch:Bool { preparingAfterMatch && (screen == .ready || (screen == .running && existingName != "Overwatch")) }
     func checkAfterMatch() {
         guard !isPreview && clientInstalled else { return }
+        let wasPreparing=preparingAfterMatch
+        defer {
+            // The logs are read once, and again when a preparation ends with its final numbers.
+            if let progress=afterMatchProgress { learnedShaders=max(learnedShaders ?? 0,progress.learned) }
+            else if learnedShaders == nil || (wasPreparing && !preparingAfterMatch) { readLearnedShaders() }
+        }
         let running=AfterMatch.running(root:root)
         if running || shaderUpdateRequested.map({ Date().timeIntervalSince($0) > 240 }) == true { shaderUpdateRequested=nil }
         preparingAfterMatch=running || shaderUpdateRequested != nil
@@ -120,6 +222,16 @@ final class AppModel {
         }
         sheet=nil
         return true
+    }
+    /// Clear Shader Cache keeps the helper's logs, so numbers logged before it are ignored.
+    func readLearnedShaders() {
+        let logs=["pipeline-preparation.log","pipeline-after-session.log"].compactMap {
+            (try? root.appendingPathComponent("logs/\($0)").resourceValues(forKeys:[.contentModificationDateKey]))?.contentModificationDate
+        }
+        let cleared=UserDefaults.standard.object(forKey:"shadersCleared") as? Date ?? .distantPast
+        guard let newest=logs.max(),newest > cleared else { learnedShaders=nil;return }
+        let learned=ShaderRecord.read(root:root)["learned"] as? Int
+        learnedShaders=learned.flatMap { $0 > 0 ? $0 : nil }
     }
     func whatsNewClosed() {
         guard !isPreview,clientInstalled,UserDefaults.standard.string(forKey:"shaderUpdateOffered") == nil else { return }
@@ -170,22 +282,35 @@ final class AppModel {
             catch { notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message }
         }
     }
-    /// Settings › Graphics › Delete Shaders (a confirmation there): empty the prepared shader
-    /// cache so every shader builds again after the next match. Overwatch must be closed.
-    func deleteShaders() {
-        guard !isPreview else { shaderPack=[];notice=L("Shader cache deleted.");return }
+    /// Settings › Graphics › Clear Shader Cache: how much it frees, measured off the main
+    /// thread when the panel shows (nil until then).
+    var shaderCacheBytes:Int64?
+    func measureShaderCache() {
+        guard !isPreview else { return }
+        let root=root,runtime=state["active_runtime"] as? String
         Task {
-            // Another step (a launch, say) may be using the worker; delete right after it.
+            shaderCacheBytes=await Task.detached(priority:.utility) { ShaderCache.bytes(root:root,runtime:runtime) }.value
+        }
+    }
+    /// Settings › Graphics › Clear Shader Cache (from @dagadtwok's pull request, #37; its
+    /// confirmation says what goes): every shader Recall keeps, so each builds again as
+    /// Overwatch uses it. Battle.net and Overwatch must be closed.
+    func deleteShaders() {
+        guard !isPreview else { shaderPack=[];shaderCacheBytes=0;learnedShaders=nil;stutterTipHidden = .shown;notice=L("Shader cache cleared. {0} rebuilds it after your next match.",Brand.name);return }
+        Task {
+            // Another step (a launch, say) may be using the worker; clear right after it.
             while busy { try? await Task.sleep(for:.milliseconds(200)) }
             busy=true
             defer { busy=false }
             do {
                 _ = try await service.run("delete-shaders",[])
-                shaderPack=[]
-                notice=L("Shader cache deleted. {0} rebuilds it after your gameplay session.",Brand.name)
+                shaderPack=[];shaderCacheBytes=0
+                // Overwatch learns its shaders again from nothing: the first-matches tip returns.
+                learnedShaders=nil;stutterTipHidden = .shown;UserDefaults.standard.set(Date(),forKey:"shadersCleared")
+                notice=L("Shader cache cleared. {0} rebuilds it after your next match.",Brand.name)
             } catch {
-                // What the panel shows must match what the worker kept.
-                loadShaderPack()
+                // What the panels show must match what the worker kept.
+                loadShaderPack();measureShaderCache()
                 notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
             }
         }
@@ -193,6 +318,8 @@ final class AppModel {
     /// The Help tab shown, and a topic to open with it (see openHelp).
     var helpTab=HelpTab.questions
     var helpTopic:String?
+    /// Help's search, kept here so Esc can clear it before it closes Help (Main.swift).
+    var helpQuery=""
     var updatingComponents=false
     private var updateCheck: Task<AvailableUpdate?,Error>?
     private var lastUpdateCheck: Date?
@@ -257,6 +384,7 @@ final class AppModel {
     var canChangeLocation: Bool { state["active_runtime"] == nil && !clientInstalled }
     var driveName: String { InstallLocation.driveName(root) }
     private var mountObserver: NSObjectProtocol?
+    private var quitObserver: NSObjectProtocol?
     var title: String {
         switch screen {
         case .welcome: return Brand.name
@@ -276,6 +404,8 @@ final class AppModel {
             case "insufficient_disk_space": return L("More space needed")
             case "rosetta_required": return L("Install Rosetta")
             case "close_installer_client": return L("Close Battle.net first")
+            case "setup_already_running", "app_worker_busy", "pipeline_cache_busy": return L("Another operation is finishing")
+            case "download_hash_mismatch", "client_installer_hash_mismatch", "cached_download_hash_mismatch": return L("Download verification failed")
             case "run_from_installed_app", "app_move_failed", "app_name_taken": return L("Move {0} to Applications",Brand.name)
             default: return L("Setup needs attention")
             }
@@ -299,10 +429,14 @@ final class AppModel {
     }
     func receive(_ value: [String:Any]) {
         guard let name=value["stage"] as? String else { return }
-        if name == "graphics" { graphics.update(value);return }
+        if name == "graphics" {
+            graphics.update(value)
+            if graphics.learned > 0 { learnedShaders=graphics.learned }
+            return
+        }
         if name == "pipeline_preparation_skipped" { graphics.skipped() }
         // Allowlisted stage names only; never retain arbitrary error detail/paths.
-        let labels=["downloading":L("Downloading Battle.net"), "download_verified":L("Download verified"), "installing_runtime":L("Installing game components"), "runtime_ready":L("Game components ready"), "preparing_environment":L("Preparing your game environment"), "environment_ready":L("Game environment ready"), "installing_battlenet":L("Opening the Battle.net installer"), "preparing_pipelines":L("Preparing graphics"), "battlenet_started":L("Opening Battle.net"), "pipeline_preparation_skipped":L("Opening Battle.net"), "closing_client":L("Closing Battle.net"), "displays_changed":L("Reopening Battle.net for your displays")]
+        let labels=["downloading":L("Downloading Battle.net"), "download_verified":L("Download verified"), "installing_runtime":L("Installing game components"), "runtime_ready":L("Game components ready"), "preparing_environment":L("Preparing your game environment"), "environment_ready":L("Game environment ready"), "installing_battlenet":L("Opening the Battle.net installer"), "preparing_pipelines":L("Preparing graphics"), "battlenet_started":L("Opening Battle.net"), "pipeline_preparation_skipped":L("Opening Battle.net"), "closing_client":L("Closing Battle.net"), "displays_changed":L("Reopening Battle.net for your displays"), "waiting_for_setup":L("Waiting for another operation to finish")]
         if let label=labels[name] { stage=label; lastEvents.append(name); lastEvents=Array(lastEvents.suffix(12)) }
     }
     func refresh() async throws {
@@ -317,7 +451,7 @@ final class AppModel {
         // A choice the worker keeps is the one setup goes on with, unless the player changed it
         // on Choose your Battle.net this session (setup then hands the worker the new one).
         if !battleNetConfirmed {
-            if let region=(state["battlenet_region"] as? String).flatMap(BattleNetRegion.init) { battleNetRegion=region }
+            if clientInstalled || state["battlenet_region"] != nil { battleNetRegion=installedRegion }
             if let language=(state["battlenet_language"] as? String).flatMap(BattleNetLanguage.init) { battleNetLanguage=language }
         }
         freeBytes=(status["free_bytes"] as? NSNumber)?.uint64Value ?? 0
@@ -357,6 +491,11 @@ final class AppModel {
         // Plugging the drive back in retries without another click.
         mountObserver=NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didMountNotification,object:nil,queue:.main) { [weak self] _ in
             Task { @MainActor in if self?.screen == .driveMissing { self?.recheck() } }
+        }
+        // An app the busy note names has quit (its Quit button, or the player elsewhere).
+        quitObserver=NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didTerminateApplicationNotification,object:nil,queue:.main) { [weak self] note in
+            guard let pid=(note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier else { return }
+            Task { @MainActor in self?.appEnded(pid) }
         }
         // Opened from the disk image: move to Applications before anything else.
         if AppLocation.needsMove(Bundle.main.bundleURL) { prepareMove();return }
@@ -599,19 +738,41 @@ final class AppModel {
         let args=CommandLine.arguments
         if let i=args.firstIndex(of:"--preview-macos"),args.indices.contains(i+1) { macOS=args[i+1] }
         if args.contains("--preview-korean") { nexonBuild=true;state["korean_support"]=false }
+        // The first-matches tip at a number of learned shaders (FirstMatchTip).
+        if let i=args.firstIndex(of:"--preview-learned"),args.indices.contains(i+1),let learned=Int(args[i+1]) { learnedShaders=learned > 0 ? learned : nil }
+        if let i=args.firstIndex(of:"--preview-tip"),args.indices.contains(i+1),let hidden=FirstMatchTip.Hidden(rawValue:args[i+1]) { stutterTipHidden=hidden }
         // Choose your Battle.net with a region selected, and Settings' region as installed.
         if let i=args.firstIndex(of:"--preview-region"),args.indices.contains(i+1),let region=BattleNetRegion(rawValue:args[i+1]) {
-            battleNetRegion=region;state["battlenet_region"]=region.rawValue
-            if region == .china { battleNetLanguage = .simplifiedChinese }
+            battleNetRegion=region;battleNetLanguage=region.suggestedLanguage
+            state["battlenet_region"]=region.battleNet;state["korean_support"]=region == .korea
         }
         if value == .battleNet { clientInstalled=false;gameInstalled=false }
         preparingAfterMatch=args.contains("--preview-after-match") || args.contains("--preview-shader-update")
         updatingShaderCache=args.contains("--preview-shader-update")
         afterMatchProgress=preparingAfterMatch ? AfterMatch.Progress(ready:3072,learned:17767) : nil
+        // The busy note (REC-5): Chrome and Steam busy, Low Power Mode, a hot Mac, low memory with
+        // Visual Studio Code and Safari to quit, or with nothing to quit (a restart).
+        macLoad=MacLoad()
+        if args.contains("--preview-busy") {
+            let app={ (path:String,cpu:Double,gpu:Double,memory:UInt64,reasons:[BusyApps.Reason]) in
+                MacLoad.App(pid:-1-Int32(path.count),name:FileManager.default.displayName(atPath:path).replacingOccurrences(of:".app",with:""),path:path,bundleID:nil,cpu:cpu,gpu:gpu,memory:memory,reasons:reasons)
+            }
+            macLoad.apps=[app("/Applications/Google Chrome.app",180,24,3_400_000_000,[.graphics,.processor]),app("/Applications/Steam.app",12,0,2_100_000_000,[.memory])]
+        }
+        macLoad.lowPowerMode=args.contains("--preview-low-power");if args.contains("--preview-hot") { macLoad.thermal="serious" }
+        if args.contains("--preview-low-memory-apps") {
+            macLoad.lowMemory=true
+            macLoad.apps=[("/Applications/Visual Studio Code.app",4_400_000_000 as UInt64),("/Applications/Safari.app",1_700_000_000)].map { path,memory in
+                MacLoad.App(pid:-1-Int32(path.count),name:FileManager.default.displayName(atPath:path).replacingOccurrences(of:".app",with:""),path:path,bundleID:nil,cpu:0,gpu:0,memory:memory,reasons:[.memory])
+            }
+        }
+        if args.contains("--preview-low-memory") { macLoad.lowMemory=true;macLoad.restart=true }
         // Settings › Graphics › Shader memory with the owner's pack of 2026-10-14.
         shaderUpdatePending=16911
         shaderPack=[121822128,172324720,179897488,202437120,196611296,166780256,162372016,89495856,166106304,139503200,32750624].enumerated()
             .map { ShaderMemory.Part(bytes:Int64($0.element),shaders:[856,1171,1257,1870,2048,2048,2048,2048,2048,2048,455][$0.offset]) }
+        // Clear Shader Cache with the owner's caches of 2026-10-17 (pipelines, translated shaders, macOS's).
+        shaderCacheBytes=5_300_000_000
         // The launching screen's "Preparing graphics" details: preparing, done, first,
         // or the warm-up after an update (warming, warmed).
         if value == .launching,let i=args.firstIndex(of:"--preview-graphics"),args.indices.contains(i+1) { previewGraphics(args[i+1]) }
@@ -667,31 +828,43 @@ final class AppModel {
         }
     }
     /// Choose your Battle.net's Continue. China's Battle.net first explains NetEase's sign-in and
-    /// anti-cheat (ChinaBattleNetSheet); its Continue confirms.
+    /// anti-cheat (ChinaBattleNetSheet), Korea what Recall changes for Nexon's (KoreanSupportSheet);
+    /// their Continue confirms.
     func chooseBattleNet() {
-        if battleNetRegion == .china { battleNetLanguage = .simplifiedChinese;sheet = .china;return }
-        confirmBattleNet()
+        switch battleNetRegion {
+        case .china: battleNetLanguage = .simplifiedChinese;sheet = .china
+        case .korea: sheet = .korea
+        case .global: confirmBattleNet()
+        }
     }
     func confirmBattleNet() { battleNetConfirmed=true;screen = .readyToInstall }
     /// Set up Battle.net's Change: back to the choice, as it stands.
     func editBattleNet() { guard !busy else { return };notice="";screen = .battleNet }
-    /// Settings › General › Battle.net region › Change. Accounts don't carry over between Global
-    /// and China's Battle.net, so the installation moves to the Trash (the worker's uninstall,
-    /// which closes Battle.net and refuses while Overwatch runs), and setup starts again at
-    /// Choose your Battle.net with the other region. Recall itself and its settings stay.
+    /// Settings › General › Battle.net region, apart from Global to Korea, which asks first
+    /// (KoreanSupportSheet). Between Global and Korea only Korean account support changes.
+    /// Accounts don't carry over between China's Battle.net and Global's, so changing to or from
+    /// China asks (ChangeRegionSheet) before changeRegion sets up again.
+    func chooseRegion(_ next:BattleNetRegion) {
+        guard next != installedRegion else { return }
+        if next == .china || installedRegion == .china { regionTarget=next;regionChange = .idle;sheet = .changeRegion }
+        else { setAdvanced(.koreanSupport,next == .korea) }
+    }
+    /// The installation moves to the Trash (the worker's uninstall, which closes Battle.net and
+    /// refuses while Overwatch runs), and setup starts again at Choose your Battle.net with
+    /// regionTarget. Recall itself and its settings stay.
     func changeRegion() {
-        guard !isPreview else { sheet=nil;battleNetRegion = installedRegion == .china ? .global : .china;screen = .battleNet;return }
+        let next=regionTarget
+        guard !isPreview else { sheet=nil;battleNetRegion=next;battleNetLanguage=next.suggestedLanguage;screen = .battleNet;return }
         regionChange = .working
         Task {
             // A launch wait is cancellable; let any other step finish first.
             while busy { cancel(); try? await Task.sleep(for:.milliseconds(100)) }
             busy=true; notice=""
             defer { busy=false }
-            let next:BattleNetRegion = installedRegion == .china ? .global : .china
             do { _ = try await service.run("uninstall",event:receive) }
             catch { regionChange = .failed((error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message);return }
             clientInstalled=false;gameInstalled=false;nexonBuild=false;neacBuild=false;state=[:];running=nil
-            battleNetRegion=next;battleNetLanguage = next == .china ? .simplifiedChinese : .suggested
+            battleNetRegion=next;battleNetLanguage=next.suggestedLanguage
             battleNetConfirmed=false;sheet=nil;screen = .battleNet
             regionChange = .idle
         }
@@ -706,7 +879,11 @@ final class AppModel {
             // choice, and prepare adds the fonts it needs.
             if needsBattleNetChoice { screen = .battleNet;return }
             if battleNetConfirmed {
-                _ = try await service.run("battlenet",["--region",battleNetRegion.rawValue,"--language",battleNetLanguage.rawValue])
+                _ = try await service.run("battlenet",["--region",battleNetRegion.battleNet,"--language",battleNetLanguage.rawValue])
+                // Korea is Global's Battle.net with Korean account support, which prepare applies.
+                if koreanSupport != (battleNetRegion == .korea) {
+                    _ = try await service.run("korean-support",["--enabled",battleNetRegion == .korea ? "1" : "0"])
+                }
                 try await refresh()
             }
         }
@@ -784,6 +961,7 @@ final class AppModel {
     }
     func openClient(play:Bool=false) async throws {
         screen = .launching
+        recordLaunchLoad()
         // Once, before Battle.net opens: Overwatch's voice chat uses this app's permission.
         if Microphone.undecided { stage=L("Asking to use your microphone for voice chat");await Microphone.ask() }
         stage=L("Checking your running session");graphics=GraphicsProgress()
@@ -796,7 +974,8 @@ final class AppModel {
             // defaults write org.overwatch2mac.launcher gameMode -bool false
             let gameMode=UserDefaults.standard.object(forKey:"gameMode") as? Bool ?? true
             launchEvents=try await service.run("launch",(play ? ["--play","1"] : [])+["--metal-hud",metalHUD ? "1" : "0",
-                "--metalfx",metalFXUpscaling ? "1" : "0","--sharpening",metalFXSharpening.rawValue]+(gameMode ? [] : ["--game-mode","0"]),event:receive)
+                "--metalfx",metalFXUpscaling ? "1" : "0","--sharpening",metalFXSharpening.rawValue]+(gameMode ? [] : ["--game-mode","0"]) +
+                logging.launchArguments(custom:loggingCustom),event:receive)
         } catch {
             guard stopLaunchWait else { throw error }
             canCancel=false;screen = .ready;notice=L("Cancelled. Battle.net wasn’t opened.")
@@ -804,6 +983,9 @@ final class AppModel {
         }
         // A Cancel that arrived as Battle.net was starting.
         if stopLaunchWait { try await stopLaunch(launchEvents);return }
+        // The new Battle.net's record says what it logs (LoggingReminder).
+        if let session=launchEvents.last(where:{ $0["stage"] as? String == "battlenet_open" })?["session"] as? String { state["log_session"]=session }
+        readSessionLogging()
         // The chosen resolution is larger than this main display allows (see MainDisplay.fits).
         if let fitted=launchEvents.last(where:{ $0["stage"] as? String == "display_fitted" }),
            let width=fitted["width"] as? Int,let height=fitted["height"] as? Int {
@@ -901,7 +1083,8 @@ final class AppModel {
         }
     }
     private func showSession(_ processes:[[String:Any]]) {
-        guard !processes.isEmpty else { screen = .ready;gameWindowHidden=false;return }
+        guard !processes.isEmpty else { screen = .ready;gameWindowHidden=false;sessionLogging=nil;return }
+        readSessionLogging()
         existingName=processes.contains { $0["kind"] as? String == "game" } ? "Overwatch" : "Battle.net"
         screen = .running
         watchExits(processes)
@@ -1026,9 +1209,9 @@ final class AppModel {
             }
         }
     }
-    /// Settings › Advanced. Battle.net carries both settings from when it opens, so Settings
-    /// offers them only while it and Overwatch are closed (see running); the worker refuses
-    /// otherwise. Before setup has made the Windows environment the worker only keeps the
+    /// Settings › Advanced's proxy detection, and Korean account support (the Korea region,
+    /// Settings › General). Battle.net carries both from when it opens, so Settings offers them
+    /// only while it and Overwatch are closed (see running); the worker refuses otherwise. Before setup has made the Windows environment the worker only keeps the
     /// choice, and setup applies it.
     func setAdvanced(_ setting:AdvancedSetting, _ on:Bool) {
         guard (state[setting.rawValue] as? Bool == true) != on else { return }
@@ -1054,10 +1237,11 @@ final class AppModel {
         makeReport()
         helpTab=tab ?? (screen == .failure ? .troubleshooting : .questions)
         helpTopic=topic
+        helpQuery=""
         sheet = .help
     }
-    /// The Korean card's Open Settings: Settings on its Advanced tab.
-    func openAdvancedSettings() { settingsTab = .advanced;sheet = .settings }
+    /// The Korean card's Open Settings: Settings on its General tab, where the region is.
+    func openRegionSettings() { settingsTab = .general;sheet = .settings }
     /// Troubleshooting's way back from a resolution that shows a black or wrong-sized
     /// picture: a new installation's resolution, with every other display setting
     /// written again. Graphics quality and FPS are kept. Overwatch must be closed.
@@ -1108,9 +1292,45 @@ final class AppModel {
         // Where the default web browser comes from: China's Battle.net signs in through it.
         let browser=NSWorkspace.shared.urlForApplication(toOpen:URL(string:"https://www.battlenet.com.cn/")!).flatMap { Bundle(url:$0)?.bundleIdentifier } ?? "unknown"
         let battleNet:[String:Any]=["region":installedRegion.rawValue,"language":state["battlenet_language"] as? String ?? (clientInstalled ? "enUS" : "not_chosen"),
-                                    "installed":clientInstalled,"path":battleNetPath.replacingOccurrences(of:"environment/drive_c/",with:""),"neac_build":neacBuild]
-        let data:[String:Any]=["schema":2,"battlenet":battleNet,"app_language":AppLanguage.current,"default_browser":browser,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? metalFXSharpening.rawValue : "off","install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode,"shaders":ShaderRecord.read(root:root),"shader_memory":shaderMemory]
+                                    "installed":clientInstalled,"path":battleNetPath.replacingOccurrences(of:"environment/drive_c/",with:""),"neac_build":neacBuild,
+                                    "recent_starts":BattleNetRecord.read(root:root)]
+        // Logging (REC-40): the setting, what Custom holds exactly as typed, and since when.
+        var logs:[String:Any]=["setting":logging.rawValue]
+        if logging == .custom { logs["custom"]=loggingCustom }
+        if let since=loggingSince,logging != .off { logs["since"]=ISO8601DateFormatter().string(from:since) }
+        if let sessionLogging { logs["open_session"]=sessionLogging.rawValue }
+        // Schema 3 (1.5.0): MetalFX upscaling and its sharpening apart (schema 2 gave the sharpening
+        // when on, so "off" was ambiguous); shaders.waiting_for_game_to_close; battlenet.recent_starts; logging (REC-40).
+        // Schema 4 (1.5.0): other_apps, what the busy note saw at the last launch and now (REC-5).
+        let fresh=loadChecked.map { Date().timeIntervalSince($0) < 15 } ?? false
+        let otherApps:[String:Any]=["at_last_launch":launchLoad ?? "none","now":fresh ? macLoad.report as Any : "not_checked"]
+        let data:[String:Any]=["schema":4,"other_apps":otherApps,"logging":logs,"battlenet":battleNet,"app_language":AppLanguage.current,"default_browser":browser,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? "on" : "off","metalfx_sharpening":metalFXSharpening.rawValue,"install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode,"shaders":ShaderRecord.read(root:root),"shader_memory":shaderMemory]
         report=String(data:(try? JSONSerialization.data(withJSONObject:data,options:[.prettyPrinted,.sortedKeys])) ?? Data(),encoding:.utf8) ?? ""
+    }
+    /// Save Logs (Settings › Advanced, Help › Support): the zip LogBundle makes, saved where the
+    /// player chooses and shown in Finder so it's ready to attach.
+    func saveLogs() {
+        guard !savingLogs else { return }
+        // Previews show the saved line with the size of the owner's logs of October 19 (1.7 MB).
+        guard !isPreview else { savedLogs=(LogBundle.defaultName(),1_686_655);return }
+        let panel=NSSavePanel();panel.nameFieldStringValue=LogBundle.defaultName();panel.title=L("Save logs")
+        panel.allowedContentTypes=[.zip]
+        guard panel.runModal() == .OK,let url=panel.url else { return }
+        makeReport()
+        let input=LogBundle.Input(root:root,report:report,appVersion:release?.appVersion ?? "unknown",runtime:state["active_runtime"] as? String ?? "not_installed",
+                                  logging:logging,custom:loggingCustom,since:loggingSince,readme:Bundle.main.url(forResource:"LogsReadme",withExtension:"md"))
+        savingLogs=true;savedLogs=nil
+        Task {
+            let result=await Task.detached(priority:.userInitiated) { Result { try LogBundle.save(input,to:url) } }.value
+            savingLogs=false
+            switch result {
+            case .success(let saved):
+                savedLogs=(url.lastPathComponent,saved.bytes)
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            case .failure:
+                notice=L("The logs couldn’t be saved. Choose another location and try again.")
+            }
+        }
     }
     func saveReport() {
         let panel=NSSavePanel();panel.nameFieldStringValue="\(Brand.name)-support.json";panel.title=L("Save support report")

@@ -173,13 +173,15 @@ struct LauncherTabs<Tab:Hashable & Identifiable>: View {
     let tabs:[Tab]
     @Binding var selection:Tab
     var width:CGFloat=78
+    /// Off while Help shows search results, which come from more than one tab.
+    var showsSelection=true
     let title:(Tab)->String
     let symbol:(Tab)->String
     @Environment(\.colorScheme) private var scheme
     var body:some View {
         HStack(spacing:6) {
             ForEach(tabs) { tab in
-                let selected=selection == tab
+                let selected=showsSelection && selection == tab
                 let shape=RoundedRectangle(cornerRadius:14,style:.continuous)
                 Button { selection=tab } label: {
                     VStack(spacing:5) {
@@ -207,6 +209,14 @@ extension View {
                 .opacity(0).frame(width:0,height:0).accessibilityHidden(true)
         }
     }
+    /// An ⓘ button's popover. Esc closes only it (Main.swift), never the pop-up or screen under it.
+    func infoPopover<Content:View>(isPresented:Binding<Bool>,@ViewBuilder content:@escaping ()->Content)->some View {
+        popover(isPresented:isPresented,arrowEdge:.bottom,content:content)
+            .onReceive(NotificationCenter.default.publisher(for:.closeInfoPopover)) { _ in isPresented.wrappedValue=false }
+    }
+}
+extension Notification.Name {
+    static let closeInfoPopover=Notification.Name("closeInfoPopover")
 }
 struct SheetHero: View {
     let symbol:String

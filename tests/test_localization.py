@@ -42,6 +42,14 @@ NOT_SCREEN_TEXT = {
     'Refresh already evaluated', 'no verified improvement', 'to preserve disk headroom',
     'leave no room to save', 'Archive not saved', 'No learned pipelines yet',
     'Pipeline preparation skipped', 'ran out of time',
+    'retained: Preparation cancelled or timed out', 'retained: Preparation cancelled',
+    # Battle.net's agent log lines (and their time format), which BattleNetRecord reads for the report.
+    'Concurrent operation', "OP_UPDATE for '", 'Queue operation - OP_UPDATE', "replaced by OP_UPDATE for ''",
+    "OP_UPDATE for '' completed", 'Build marked non-playable for ', 'Adding server node', 'yyyy-MM-dd HH:mm:ss',
+    # Wine's and Overwatch's log lines, which Save Logs (LogBundle) puts on its timeline.
+    'wine: Unhandled', 'Unhandled exception', 'File read failed', 'Failed to read data from TACT',
+    '**Crashing Thread**', 'Running Time:', 'Most Recent Logs:', 'Launch timer expired',
+    'Cancel requested for active operation - OP_UPDATE', "OP_UPDATE for '' done Canceling", 'done Canceling',
 }
 # Text in Hangul or Han is shown as written (the Korean notice, 국服-style names).
 OWN_SCRIPT = re.compile(r'[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af\u4e00-\u9fff]')

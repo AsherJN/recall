@@ -57,9 +57,11 @@ enum UpdateCheck {
         parts(minimum) != nil && parts(system) != nil && !isNewer(minimum,than:system)
     }
     /// The bullets under the body's "What's new" heading, Markdown emphasis and links removed. With
-    /// Recall in Chinese, those under "更新内容" (from 1.4) when the notes have that section.
-    static func notes(_ body:String, chinese:Bool=AppLanguage.isChinese) -> [String] {
-        if chinese { let items=notes(body,under:{ $0.contains("更新内容") });if !items.isEmpty { return items } }
+    /// Recall in Chinese or Korean, those under "更新内容" or "새로운 기능" (from 1.4.1) when the
+    /// notes have that section.
+    static func notes(_ body:String, language:String=AppLanguage.current) -> [String] {
+        let heading=language.hasPrefix("zh") ? "更新内容" : language.hasPrefix("ko") ? "새로운 기능" : nil
+        if let heading { let items=notes(body,under:{ $0.contains(heading) });if !items.isEmpty { return items } }
         return notes(body,under:{ $0.lowercased().contains("what") && $0.lowercased().contains("new") })
     }
     private static func notes(_ body:String, under heading:(String)->Bool) -> [String] {

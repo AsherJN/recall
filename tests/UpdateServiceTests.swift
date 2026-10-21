@@ -24,10 +24,13 @@ import Foundation
         let found=try UpdateCheck.parse(release("v1.0.1",assets:[disk("1.0.1")]),current:"1.0.0")
         precondition(found?.version == "1.0.1" && found?.sha256 == String(repeating:"a",count:64) && found?.size == 242_000_000)
         precondition(found?.notes == ["Faster. Frames take less work.","See the notes."],"\(found?.notes ?? [])")
-        // With Recall in Chinese, the notes' 更新内容 section; without one, What's new as before.
-        let bilingual="## What's new\n\n- Faster.\n\n## 更新内容\n\n- **更快。**\n\n## Install\n\n- Drag the app.\n"
-        precondition(UpdateCheck.notes(bilingual,chinese:false) == ["Faster."] && UpdateCheck.notes(bilingual,chinese:true) == ["更快。"])
-        precondition(UpdateCheck.notes(notes,chinese:true) == ["Faster. Frames take less work.","See the notes."])
+        // With Recall in Chinese or Korean, the notes' 更新内容 or 새로운 기능 section; without one,
+        // What's new as before.
+        let trilingual="## What's new\n\n- Faster.\n\n## 更新内容\n\n- **更快。**\n\n## 새로운 기능\n\n- **더 빨라졌습니다.**\n\n## Install\n\n- Drag the app.\n"
+        precondition(UpdateCheck.notes(trilingual,language:"en") == ["Faster."] && UpdateCheck.notes(trilingual,language:"zh-Hans") == ["更快。"])
+        precondition(UpdateCheck.notes(trilingual,language:"ko") == ["더 빨라졌습니다."])
+        precondition(UpdateCheck.notes(notes,language:"zh-Hans") == ["Faster. Frames take less work.","See the notes."])
+        precondition(UpdateCheck.notes(notes,language:"ko") == ["Faster. Frames take less work.","See the notes."])
         let same=try UpdateCheck.parse(release("v1.0.0",assets:[disk("1.0.0")]),current:"1.0.0")
         let draft=try UpdateCheck.parse(release("v1.0.1",assets:[disk("1.0.1")],draft:true),current:"1.0.0")
         let prerelease=try UpdateCheck.parse(release("v1.0.1",assets:[disk("1.0.1")],prerelease:true),current:"1.0.0")

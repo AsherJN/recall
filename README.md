@@ -2,7 +2,7 @@
   <img src="app/Resources/Banner.png" width="640" alt="Recall">
 </h1>
 
-<p align="center"><sub>English · <a href="README.zh-CN.md">简体中文</a></sub></p>
+<p align="center"><sub>English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ko.md">한국어</a></sub></p>
 
 <h3 align="center">Play Overwatch on your Mac.</h3>
 
@@ -136,11 +136,11 @@ You sign in to Battle.net itself, and Recall never asks for your password. Recal
 </details>
 
 <details>
-<summary><b>Why do my first matches stutter a little?</b></summary>
+<summary><b>Why do my first matches stutter?</b></summary>
 
-The first time you play, the game prepares its shaders, the small programs your Mac's graphics chip uses to draw each scene. This causes brief stutters in your first few matches and settles down the more you play.
+Your Mac builds each of Overwatch's shaders the first time the game uses it, which causes a stutter. After each match, Recall prepares what it learned, so matches get smoother. Most players are smooth within 5 to 10 matches, or about 10,000 to 15,000 shaders.
 
-To get ahead of it, play Workshop code **929PJ** from Custom Games before you queue and let it run for 5 to 10 minutes.
+To speed it up, play Workshop code **929PJ** for 5 to 10 minutes: choose **Play › Custom Games › Create › Settings › Import Code**, paste the code and start. Or open **Play › Custom Games**, search for **500%** and join a game.
 </details>
 
 <details>

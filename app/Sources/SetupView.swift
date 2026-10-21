@@ -53,6 +53,7 @@ struct SetupView: View {
             case .whatsNew: WhatsNewSheet().onDisappear { model.whatsNewClosed() }
             case .shaderUpdate: ShaderUpdateSheet(model:model)
             case .china: ChinaBattleNetSheet(confirm:model.confirmBattleNet)
+            case .korea: KoreanSupportSheet(confirm:model.confirmBattleNet)
             case .changeRegion: ChangeRegionSheet(model:model).interactiveDismissDisabled(model.regionChange == .working)
             }
         }
@@ -65,6 +66,8 @@ struct SetupView: View {
             }
         }
         .onChange(of:model.screen) { _,screen in if screen == .ready || screen == .running { model.checkAfterMatch() } }
+        // What else is using the Mac, while the Play, opening or running screen can be seen.
+        .task(id:model.watchesLoad) { if model.watchesLoad { await model.watchLoad() } }
     }
     /// Josh's support card, once Battle.net has opened for the first time.
     private var supportPlacement:Brand.Placement? {
@@ -148,9 +151,10 @@ struct SetupView: View {
                         Text(L("Taking longer than usual. Check the Dock for a Battle.net window."))
                             .font(LauncherStyle.font(13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     }
-                    PerformanceTip()
-                    if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
-                    if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
+                    if LoggingReminder.shows(model) { LoggingReminder(model:model) }
+                    PerformanceTip(model:model)
+                    if model.showKoreanTip { KoreanAccountTip(open:model.openRegionSettings) { model.koreanTipDismissed=true } }
+                    firstMatchTip
                 }
             }
         case .readyToInstall:
@@ -171,26 +175,34 @@ struct SetupView: View {
             }
         case .ready:
             VStack(spacing:16) {
+                if LoggingReminder.shows(model) { LoggingReminder(model:model) }
                 if model.lowStorage { storageWarning }
-                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) } else { PerformanceTip() }
-                if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
+                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) }
+                PerformanceTip(model:model)
+                if model.showKoreanTip { KoreanAccountTip(open:model.openRegionSettings) { model.koreanTipDismissed=true } }
                 if !model.gameInstalled { SignInNote(model:model) }
-                if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
+                firstMatchTip
             }
         case .running:
             VStack(spacing:16) {
                 if model.existingName == "Overwatch" && model.gameWindowHidden { GameClosingNote() }
-                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) } else { PerformanceTip() }
-                if model.showKoreanTip { KoreanAccountTip(open:model.openAdvancedSettings) { model.koreanTipDismissed=true } }
+                if LoggingReminder.shows(model) { LoggingReminder(model:model) }
+                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) }
+                PerformanceTip(model:model)
+                if model.showKoreanTip { KoreanAccountTip(open:model.openRegionSettings) { model.koreanTipDismissed=true } }
                 if !model.gameInstalled { SignInNote(model:model) }
-                if !model.firstMatchTipDismissed { FirstMatchTip { model.firstMatchTipDismissed=true } }
+                firstMatchTip
             }
         case .driveMissing: EmptyView()
         }
     }
+    private var firstMatchTip:some View {
+        FirstMatchTip(workshop:model.offersWorkshopCode,learned:model.learnedShaders,hidden:model.stutterTipHidden,
+                      steps:{ model.openHelp(.questions,topic:"stutter") },report:{ model.openHelp(.support) }) { model.stutterTipHidden=$0 }
+    }
     /// Choose your Battle.net: the region and the language Battle.net installs in, both filled in
     /// from the Mac (BattleNetChoice.swift) and confirmed with Continue. China's Battle.net is
-    /// Simplified Chinese only; going back to Global goes back to the Mac's language.
+    /// Simplified Chinese only; Korea suggests Korean, Global the Mac's language.
     private var battleNetPanel:some View {
         LauncherPanel {
             VStack(alignment:.leading,spacing:14) {
@@ -219,7 +231,7 @@ struct SetupView: View {
         return Button {
             guard region != model.battleNetRegion else { return }
             model.battleNetRegion=region
-            model.battleNetLanguage = region == .china ? .simplifiedChinese : .suggested
+            model.battleNetLanguage=region.suggestedLanguage
         } label: {
             HStack(alignment:.top,spacing:12) {
                 Image(systemName:selected ? "checkmark.circle.fill" : "circle").font(.system(size:18))
@@ -381,46 +393,190 @@ struct VersionStatus: View {
         }.font(LauncherStyle.font(12)).foregroundStyle(.secondary)
     }
 }
-// Every launch: other apps compete with Overwatch for the GPU, CPU and memory; players
-// who kept theirs open reported stutters.
+// Every launch: other apps compete with Overwatch for the GPU, CPU and memory; players who
+// kept theirs open reported stutters. What's using the Mac right now (BusyApps, REC-5), one row
+// each: busy apps with a Quit button, Low Power Mode and a Mac hot enough to be slowed down. A Mac
+// short of memory (its controls answer late while FPS holds) names the apps using the most, or
+// suggests a restart when macOS itself holds the memory. Nothing
+// when nothing is: the old "close other apps" line sent players looking for apps that cost no FPS.
+// Help › Troubleshooting explains each at length.
 struct PerformanceTip: View {
+    let model:AppModel
     var body:some View {
-        Label(L("For the best performance, close other apps while you play."),systemImage:"bolt")
-            .font(LauncherStyle.font(13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            .fixedSize(horizontal:false,vertical:true)
+        let load=model.macLoad
+        if load.found {
+            VStack(alignment:.leading,spacing:10) {
+                if !load.apps.isEmpty {
+                    Text(load.quitForMemory ? (load.apps.count == 1 ? L("Your Mac is low on memory. Quitting this app frees it for Overwatch.") : L("Your Mac is low on memory. Quitting these apps frees it for Overwatch."))
+                         : load.apps.count == 1 ? L("Quitting this app can raise your FPS.") : L("Quitting these apps can raise your FPS."))
+                        .fixedSize(horizontal:false,vertical:true)
+                    ForEach(load.apps.prefix(3)) { app in row(app) }
+                }
+                if load.lowPowerMode {
+                    HStack(spacing:10) {
+                        Image(systemName:"battery.25percent").frame(width:20)
+                        Text(L("Low Power Mode is on, which lowers your FPS.")).fixedSize(horizontal:false,vertical:true)
+                        Spacer(minLength:8)
+                        Button(L("Settings")) { NSWorkspace.shared.open(Self.batterySettings) }
+                            .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).foregroundStyle(.primary)
+                            .accessibilityLabel(MacLoad.hasBattery ? L("Open Battery Settings") : L("Open Energy Settings"))
+                    }
+                }
+                if load.hot {
+                    HStack(spacing:10) {
+                        Image(systemName:"thermometer.high").frame(width:20)
+                        Text(L("Your Mac is hot, so macOS is slowing it down.")).fixedSize(horizontal:false,vertical:true)
+                    }
+                }
+                if load.restart {
+                    HStack(spacing:10) {
+                        Image(systemName:"memorychip").frame(width:20)
+                        Text(L("Your Mac is low on memory. Restart it before you play.")).fixedSize(horizontal:false,vertical:true)
+                    }
+                }
+            }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+                .padding(.horizontal,16).padding(.vertical,14).frame(maxWidth:.infinity,alignment:.leading)
+                .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
+        }
     }
+    private func row(_ app:MacLoad.App)->some View {
+        let quitting=model.quittingApps.contains(app.pid)
+        return HStack(spacing:10) {
+            Image(nsImage:NSWorkspace.shared.icon(forFile:app.path)).resizable().frame(width:20,height:20).accessibilityHidden(true)
+            Text(verbatim:app.name).font(LauncherStyle.font(13,.semibold)).foregroundStyle(.primary).lineLimit(1).layoutPriority(1)
+            Text(Self.uses(app)).lineLimit(1)
+            Spacer(minLength:8)
+            Button(quitting ? L("Quitting…") : L("Quit")) { model.quitApp(app) }
+                .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).foregroundStyle(.primary).disabled(quitting)
+                .accessibilityLabel(L("Quit {0}",app.name))
+        }
+    }
+    /// What the app uses a lot of, as Activity Monitor's tabs name it.
+    static func uses(_ app:MacLoad.App)->String {
+        app.reasons.map { reason in
+            switch reason {
+            case .graphics: return L("Graphics")
+            case .processor: return L("Processor")
+            case .memory: return L("Memory: {0}",ByteCountFormatter.string(fromByteCount:Int64(app.memory),countStyle:.memory))
+            }
+        }.joined(separator:" · ")
+    }
+    /// System Settings › Battery on a MacBook, › Energy on other Macs: one pane, where Low Power Mode is.
+    static let batterySettings=URL(string:"x-apple.systempreferences:com.apple.Battery-Settings.extension")!
 }
-// Shown until dismissed on the Play, opening and running screens, from the first
-// session (while Overwatch downloads): first matches compile the game's shaders on
-// this Mac.
+// The Play, opening and running screens, from the first session (while Overwatch downloads):
+// first matches compile the game's shaders on this Mac. It counts the shaders learned so far
+// as the stutters fade (REC-13). Closing it before 10,000 keeps just the count; from 10,000 it
+// goes until 15,000, when it says once that matches should be smooth. Clear Shader Cache brings
+// it back.
 struct FirstMatchTip: View {
     /// A community custom game that shows Overwatch's effects in a few minutes, so
     /// the Mac builds their shaders before a real match.
     static let workshopCode="929PJ"
-    let dismiss:()->Void
+    /// Where players say matches get smooth: much smoother from about 10,000 learned shaders,
+    /// hardly a stutter from 15,000 (Discord, October 16–18). Players' reports, not measured,
+    /// so the tip words them as a rough guide and the bar fills at 15,000.
+    static let nearlySmooth=10_000, smooth=15_000
+    /// What the player has closed: the explanation (the count stays), the tip until 15,000, or
+    /// the last message too.
+    enum Hidden:String { case shown="", collapsed, almost, smooth }
+    /// China's servers don't take codes from the global ones (NetEase), so players on China's
+    /// Battle.net get the tip without the code (AppModel.offersWorkshopCode; owner, October 19).
+    var workshop=true
+    /// Shaders learned on this Mac (AppModel.learnedShaders); nil before the first match.
+    var learned:Int?=nil
+    var hidden=Hidden.shown
+    /// Help's answer with the steps to start the code, and Help's Support tab.
+    var steps:()->Void={}
+    var report:()->Void={}
+    let hide:(Hidden)->Void
     @State private var copied=false
+    private enum Stage { case early, nearly, smooth }
+    private var stage:Stage {
+        let count=learned ?? 0
+        return count >= Self.smooth ? .smooth : count >= Self.nearlySmooth ? .nearly : .early
+    }
     var body:some View {
+        switch (stage,hidden) {
+        case (.smooth,.smooth), (.nearly,.almost), (.nearly,.smooth): EmptyView()
+        case (.smooth,_): card(close:.smooth)
+        case (.nearly,.collapsed): if let learned { compact(learned,close:.almost) }
+        case (.nearly,_): card(close:.almost)
+        case (.early,.shown): card(close:.collapsed)
+        // Closed before 10,000 (or before a Clear Shader Cache): the count alone, once there is one.
+        case (.early,_): if let learned { compact(learned,close:nil) }
+        }
+    }
+    private func card(close:Hidden)->some View {
         HStack(alignment:.top,spacing:10) {
             Label {
                 VStack(alignment:.leading,spacing:10) {
-                    Text(L("Your first matches can stutter briefly while your Mac prepares Overwatch’s graphics. To get ahead of it, play Workshop code {0} once from Custom Games before you queue.",Self.workshopCode))
-                        .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
-                    HStack(spacing:10) {
-                        Button(copied ? L("Copied") : L("Copy Code")) {
-                            NSPasteboard.general.clearContents();NSPasteboard.general.setString(Self.workshopCode,forType:.string);copied=true
+                    Text(message).lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+                    if let learned { progress(learned) }
+                    if stage == .smooth {
+                        Button(L("Get Help"),action:report).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                    } else {
+                        Text(workshop ? L("To speed it up, play Workshop code {0} or join a 500% custom game.",Self.workshopCode)
+                                      : L("To speed it up, join a 500% custom game."))
+                            .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+                        if workshop { HStack(spacing:8) {
+                            Button(copied ? L("Copied") : L("Copy Code")) {
+                                NSPasteboard.general.clearContents();NSPasteboard.general.setString(Self.workshopCode,forType:.string);copied=true
+                            }.accessibilityLabel(copied ? L("Copied") : L("Copy Workshop code {0}",Self.workshopCode))
+                            Button(L("How to Start It"),action:steps)
                         }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
-                            .accessibilityLabel(copied ? L("Copied") : L("Copy Workshop code {0}",Self.workshopCode))
-                        Text(L("Shader warm-up by u/Working_Dealer_5102")).font(LauncherStyle.font(12)).foregroundStyle(.tertiary)
+                        Text(L("Shader warm-up by u/Working_Dealer_5102")).font(LauncherStyle.font(12)).foregroundStyle(.tertiary) }
                     }
                 }
-            } icon: { Image(systemName:"sparkles") }
+            } icon: { Image(systemName:stage == .smooth ? "checkmark.circle" : "sparkles") }
             Spacer(minLength:0)
-            Button(action:dismiss) { Image(systemName:"xmark").font(.system(size:11,weight:.bold)).frame(width:22,height:22).contentShape(Rectangle()) }
-                .buttonStyle(.borderless).foregroundStyle(.secondary).help(L("Dismiss this tip")).accessibilityLabel(L("Dismiss tip"))
+            closeButton(close)
         }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
             .padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
             .task(id:copied) { if copied { try? await Task.sleep(for:.seconds(2));copied=false } }
+    }
+    /// The count and bar alone, once the explanation is closed; it can be closed itself from 10,000.
+    private func compact(_ count:Int,close:Hidden?)->some View {
+        HStack(alignment:.center,spacing:12) {
+            Text(L("{0} shaders learned",count.formatted())).font(LauncherStyle.font(13,.semibold)).foregroundStyle(.primary)
+                .monospacedDigit().fixedSize()
+            ShaderBar(fraction:min(1,Double(count)/Double(Self.smooth))).accessibilityHidden(true)
+            if let close { closeButton(close) }
+        }.font(LauncherStyle.font(13)).padding(.horizontal,16).padding(.vertical,10).frame(maxWidth:.infinity,alignment:.leading)
+            .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:14,style:.continuous))
+    }
+    private func closeButton(_ hidden:Hidden)->some View {
+        Button { hide(hidden) } label: { Image(systemName:"xmark").font(.system(size:11,weight:.bold)).frame(width:22,height:22).contentShape(Rectangle()) }
+            .buttonStyle(.borderless).foregroundStyle(.secondary).help(L("Dismiss this tip")).accessibilityLabel(L("Dismiss tip"))
+    }
+    private var message:String {
+        switch stage {
+        case .early: return L("Your first 5 to 10 matches will stutter while your Mac learns Overwatch. It gets smoother every match.")
+        case .nearly: return L("Almost there. Stutters should be rare now.")
+        case .smooth: return L("Your Mac has learned Overwatch’s graphics. Still stuttering? Let us know.")
+        }
+    }
+    /// The count, and a bar that fills toward 15,000, the far end of where players say it's smooth.
+    private func progress(_ count:Int)->some View {
+        VStack(alignment:.leading,spacing:6) {
+            Text(L("{0} shaders learned",count.formatted())).font(LauncherStyle.font(13,.semibold)).foregroundStyle(.primary).monospacedDigit()
+            ShaderBar(fraction:min(1,Double(count)/Double(Self.smooth))).accessibilityHidden(true)
+            if stage != .smooth {
+                Text(L("Smooth at about 10,000 to 15,000")).font(LauncherStyle.font(12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal:false,vertical:true)
+            }
+        }.accessibilityElement(children:.combine)
+    }
+}
+/// The first-matches tip's bar, in the accent like the after-match ring (ProgressRing).
+struct ShaderBar:View {
+    let fraction:Double
+    var body:some View {
+        Capsule().fill(.primary.opacity(0.1)).frame(height:6)
+            .overlay(alignment:.leading) {
+                GeometryReader { box in Capsule().fill(LauncherStyle.accent).frame(width:max(6,box.size.width*fraction)) }
+            }
     }
 }
 // Overwatch is running with its window out of sight (AppModel.gameWindowHidden): usually
@@ -436,7 +592,7 @@ struct GameClosingNote: View {
 struct SignInNote: View {
     let model:AppModel
     var body:some View {
-        if model.battleNetRegion == .china {
+        if model.currentRegion == .china {
             LauncherNotice(text:L("Signing in with NetEase? If Battle.net keeps waiting after your browser says to return, see Help › Troubleshooting."),
                            symbol:"person.badge.key",action:(L("Open Help"),{ model.openHelp(.troubleshooting,topic:"netease") }))
         } else {
@@ -445,10 +601,51 @@ struct SignInNote: View {
         }
     }
 }
-// Korean accounts linked to Nexon need Korean account support (Settings › Advanced). Shown
-// on the Play, opening and running screens once the game folder holds Nexon's files and the
-// option is off, until dismissed; the option itself stays in Settings either way. In Korean
-// too, since Recall has no Korean interface yet.
+// While logging is on, or the open Battle.net still logs (it keeps the setting it opened with; REC-40):
+// the Play, opening and running screens say so in one slim row, with Save Logs and Turn Off, so it
+// stacks with the busy-apps note and the first-matches tip. Turn On warned about FPS; the row repeats
+// it on hover.
+struct LoggingReminder: View {
+    @Bindable var model:AppModel
+    static func shows(_ model:AppModel)->Bool { model.logging != .off || (model.sessionLogging ?? .off) != .off }
+    private var title:String {
+        if model.logging == .off { return L("Still logging until Battle.net closes") }
+        if model.sessionLogging == .off { return L("Logging starts next launch") }
+        return L("Logging is on")
+    }
+    /// What's recorded: the setting, or what the open Battle.net opened with once it's off.
+    private var setting:LoggingSetting { model.logging == .off ? (model.sessionLogging ?? .off) : model.logging }
+    var body:some View {
+        VStack(alignment:.leading,spacing:6) {
+            HStack(spacing:10) {
+                Image(systemName:"doc.text.magnifyingglass").accessibilityHidden(true)
+                // On one line where it fits (most of the time, in each language), else the setting below.
+                ViewThatFits(in:.horizontal) {
+                    HStack(spacing:5) { Text(title).fontWeight(.semibold).foregroundStyle(.primary);Text(verbatim:"·");Text(setting.title) }
+                        .lineLimit(1).fixedSize()
+                    VStack(alignment:.leading,spacing:1) {
+                        Text(title).fontWeight(.semibold).foregroundStyle(.primary).fixedSize(horizontal:false,vertical:true)
+                        Text(setting.title).font(LauncherStyle.font(12))
+                    }
+                }.accessibilityElement(children:.combine)
+                Spacer(minLength:8)
+                HStack(spacing:6) {
+                    Button(model.savingLogs ? L("Saving…") : L("Save Logs…"),action:model.saveLogs).disabled(model.savingLogs)
+                    if model.logging != .off { Button(L("Turn Off")) { model.logging = .off } }
+                }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).foregroundStyle(.primary).fixedSize()
+            }
+            if let saved=model.savedLogs {
+                Text(L("Saved {0} ({1}). Attach it to your GitHub issue.",saved.name,ByteCountFormatter.string(fromByteCount:saved.bytes,countStyle:.file)))
+                    .font(LauncherStyle.font(12)).fixedSize(horizontal:false,vertical:true).padding(.leading,28)
+            }
+        }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+            .padding(.horizontal,16).padding(.vertical,10).frame(maxWidth:.infinity,alignment:.leading)
+            .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:14,style:.continuous))
+            .help(L("Logging can lower your FPS while it’s on."))
+    }
+}
+// Korean accounts linked to Nexon need the Korea region (Settings › General). Shown on Global's
+// Play, opening and running screens once the game folder holds Nexon's files, until dismissed.
 struct KoreanAccountTip: View {
     let open:()->Void
     let dismiss:()->Void
@@ -456,11 +653,9 @@ struct KoreanAccountTip: View {
         HStack(alignment:.top,spacing:10) {
             Label {
                 VStack(alignment:.leading,spacing:10) {
-                    Text(L("Playing on a Korean account linked to Nexon? Turn on Korean account support in Settings › Advanced."))
+                    Text(L("Playing on a Korean account linked to Nexon? Choose Korea in Settings › General › Battle.net region."))
                         .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
-                    Text("넥슨과 연동된 한국 계정으로 플레이하시나요? 설정 › 고급에서 한국 계정 지원을 켜세요.")
-                        .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
-                    Button(L("Open Settings 설정 열기"),action:open).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                    Button(L("Open Settings"),action:open).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
                 }
             } icon: { Image(systemName:"person.crop.circle.badge.questionmark") }
             Spacer(minLength:0)

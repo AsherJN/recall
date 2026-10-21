@@ -1,17 +1,52 @@
 import Foundation
 
-/// Which Battle.net Recall installs, chosen at setup (worker: battlenet, portable_region.h): Global
-/// or China's (国服, run by NetEase). Accounts don't carry over between the two, so changing
-/// region later moves the installation to the Trash and sets up again (Settings › General).
+/// Which Battle.net account setup is for (worker: battlenet, portable_region.h): Global, Korea or
+/// China's (国服, run by NetEase). Korean accounts linked to Nexon sign in to Global's Battle.net:
+/// Korea is Global's with Korean account support on (portable_korea.h), so switching between the
+/// two changes only that. China's Battle.net is its own, and accounts don't carry over, so changing
+/// to or from China moves the installation to the Trash and sets up again (Settings › General).
 enum BattleNetRegion:String, CaseIterable, Identifiable {
-    case global, china="cn"
+    case global, korea="kr", china="cn"
     var id:String { rawValue }
-    var title:String { self == .global ? L("Global") : L("China (国服)") }
-    var detail:String {
-        self == .global ? L("Blizzard accounts everywhere outside mainland China.") : L("NetEase accounts for mainland China.")
+    var title:String {
+        switch self {
+        case .global: return L("Global")
+        case .korea: return L("Korea (한국)")
+        case .china: return L("China (国服)")
+        }
     }
-    /// What setup suggests: China's Battle.net on a Mac whose region is mainland China.
-    static var suggested:BattleNetRegion { Locale.current.region?.identifier == "CN" ? .china : .global }
+    var detail:String {
+        switch self {
+        case .global: return L("Blizzard accounts outside Korea and mainland China.")
+        case .korea: return L("Korean accounts linked to Nexon.")
+        case .china: return L("NetEase accounts for mainland China.")
+        }
+    }
+    /// The Battle.net the worker installs (battlenet --region).
+    var battleNet:String { self == .china ? "cn" : "global" }
+    /// The region a worker's state.json keeps: China's Battle.net, or Global's, which is Korea while
+    /// Korean account support is on. Installations from before 1.4.1 keep no region: Global's.
+    static func kept(_ state:[String:Any]) -> BattleNetRegion {
+        if state["battlenet_region"] as? String == "cn" { return .china }
+        return state["korean_support"] as? Bool == true ? .korea : .global
+    }
+    /// What setup suggests, from the Mac's region.
+    static var suggested:BattleNetRegion {
+        switch Locale.current.region?.identifier {
+        case "CN": return .china
+        case "KR": return .korea
+        default: return .global
+        }
+    }
+    /// The Battle.net language that goes with it: China's comes only in Simplified Chinese, Korea
+    /// suggests Korean, Global the Mac's language.
+    var suggestedLanguage:BattleNetLanguage {
+        switch self {
+        case .global: return .suggested
+        case .korea: return .korean
+        case .china: return .simplifiedChinese
+        }
+    }
 }
 
 /// The language Battle.net installs in (the installer's --lang). China's Battle.net comes only in

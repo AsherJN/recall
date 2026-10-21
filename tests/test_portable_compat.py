@@ -20,9 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 CONNECTIONS = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections'
 CERTIFICATE_KEY = r'Software\Microsoft\SystemCertificates\Root\Certificates\A99D5B79E9F1CDA59CDAB6373169D5353F5874C6'
 DIRECT = bytes.fromhex('460000000100000001000000' + '00' * 24)
+GAME_KEYBOARD = r'Software\Wine\AppDefaults\Overwatch.exe\Mac Driver'
 
-# Wine's reg.exe, as far as Recall uses it: add a binary value, delete a value or a key, and
-# import a REGEDIT4 file of REG_MULTI_SZ values (saved as Wine saves them: str(7):"a\0b\0").
+# Wine's reg.exe, as far as Recall uses it: add a binary or string value, delete a value or a
+# key, and import a REGEDIT4 file of REG_MULTI_SZ values (saved as Wine saves them:
+# str(7):"a\0b\0").
 FAKE_REG = r'''import json, os, re, sys
 from pathlib import Path
 prefix=Path(os.environ['WINEPREFIX'])
@@ -64,15 +66,18 @@ header='['+key.replace('\\','\\\\')+']'
 def ours(section): return section.lower().startswith(header.lower()+' ') or section.lower().startswith(header.lower()+'\n')
 def below(section): return section.lower().startswith(header[:-1].lower()+'\\\\')
 if action=='add':
-    name=args[args.index('/v')+1]; data=bytes.fromhex(args[args.index('/d')+1])
-    assert args[args.index('/t')+1]=='REG_BINARY'
-    hexed=','.join('%02x'%b for b in data)
-    lines,line=[],'"%s"=hex:'%name
-    for i,part in enumerate(hexed.split(',')):
-        piece=part+(',' if i<len(data)-1 else '')
-        if len(line)+len(piece)>79: lines.append(line+'\\'); line='  '
-        line+=piece
-    value='\n'.join(lines+[line])
+    name=args[args.index('/v')+1]; kind=args[args.index('/t')+1]
+    assert kind in ('REG_BINARY','REG_SZ'), kind
+    if kind=='REG_SZ': value='"%s"="%s"'%(name,args[args.index('/d')+1])
+    else:
+        data=bytes.fromhex(args[args.index('/d')+1])
+        hexed=','.join('%02x'%b for b in data)
+        lines,line=[],'"%s"=hex:'%name
+        for i,part in enumerate(hexed.split(',')):
+            piece=part+(',' if i<len(data)-1 else '')
+            if len(line)+len(piece)>79: lines.append(line+'\\'); line='  '
+            line+=piece
+        value='\n'.join(lines+[line])
     for i,s in enumerate(sections):
         if ours(s):
             body=[l for l in re.split(r'\n(?=\S)',s) if not l.startswith('"%s"='%name)]
@@ -162,6 +167,27 @@ class AdvancedSettings(unittest.TestCase):
         self.assertIsNone(self.value(CONNECTIONS, 'DefaultConnectionSettings'))
         self.assertIs(self.state()['proxy_auto_detect'], True)
         self.assertFalse(self.call('network', '--proxy-detect', '1', '--apply', '0')[-1]['changed'])
+
+    def test_left_option_key_is_alt_in_overwatch_only(self):
+        self.fixture()
+        self.assertEqual(self.call('keyboard', '--apply', '0')[-1], {'stage': 'keyboard', 'left_option_is_alt': True, 'changed': True})
+        self.assertEqual(self.call('keyboard')[-1], {'stage': 'keyboard', 'left_option_is_alt': True, 'changed': True})
+        self.assertEqual(self.calls()[-1], ['reg.exe', 'add', 'HKCU\\' + GAME_KEYBOARD, '/v', 'LeftOptionIsAlt', '/t', 'REG_SZ', '/d', 'Y', '/f'])
+        sections = {s.split(']')[0] + ']': s for s in re.split(r'\n(?=\[)', self.registry.read_text()) if s.startswith('[')}
+        self.assertIn('"LeftOptionIsAlt"="Y"', sections['[' + GAME_KEYBOARD.replace('\\', '\\\\') + ']'])
+        # Battle.net and every other program keep Wine's default: Option types characters.
+        self.assertNotIn('OptionIsAlt', sections['[Software\\\\Wine\\\\Mac Driver]'])
+        # Set already: nothing to write.
+        before = len(self.calls())
+        self.assertEqual(self.call('keyboard')[-1], {'stage': 'keyboard', 'left_option_is_alt': True, 'changed': False})
+        self.assertFalse(self.call('keyboard', '--apply', '0')[-1]['changed'])
+        self.assertEqual(len(self.calls()), before)
+
+    def test_left_option_key_failure_never_stops_the_worker(self):
+        self.fixture()
+        (self.root/'reg-fails').write_text('')
+        self.assertEqual(self.call('keyboard')[-1], {'stage': 'keyboard', 'left_option_is_alt': True, 'changed': False, 'failed': True})
+        self.assertNotIn('LeftOptionIsAlt', self.registry.read_text())
 
     def test_settings_written_by_windows_are_recognised(self):
         # Another key name case, a counter Windows advanced, the value wrapped: still direct.

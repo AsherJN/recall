@@ -26,9 +26,9 @@ struct SetupFailure: Error {
         case "read_only_volume": return L("This location is read-only. Choose another location.")
         case "insufficient_disk_space": return L("There isn’t enough free storage to finish this step. Free at least 6 GB, then retry.")
         case "close_game_before_maintenance", "close_game_before_setup", "environment_busy_retry", "environment_initialization_busy": return L("Close Overwatch and Battle.net, then retry. Your current session has been left running.")
-        case "setup_already_running", "pipeline_cache_busy": return L("Another setup or launch is finishing. Wait a moment, then retry.")
+        case "setup_already_running", "app_worker_busy", "pipeline_cache_busy": return L("Another setup or launch is finishing. Wait a moment, then retry.")
         case "download_interrupted_retry_to_resume": return L("The download was interrupted. Check your connection and retry to resume.")
-        case "download_hash_mismatch", "client_installer_hash_mismatch": return L("The download differs from the version this app expects. Retry once; if it happens again, check for a newer app release.")
+        case "download_hash_mismatch", "client_installer_hash_mismatch", "cached_download_hash_mismatch": return L("The download differs from the version this app expects. Retry once; if it happens again, check for a newer app release.")
         case "archive_hash_mismatch", "runtime_file_hash_mismatch", "runtime_missing": return L("An installation component is missing or damaged. Keep your game data and reinstall the app from the original download.")
         case "close_installer_client": return L("Close the Battle.net window opened by its installer, then choose Retry here. This app will reopen it with the required display settings.")
         case "battlenet_not_installed": return L("Finish installing Battle.net in its installer window, then choose Continue.")
@@ -43,8 +43,8 @@ struct SetupFailure: Error {
         case "app_name_taken": return L("Another app named {0} is in your Applications folders. Rename or remove that app, then try again.",Brand.name)
         case "release_unavailable": return L("This app is missing its verified setup components. Download a complete copy from the release page.")
         case "setting_change_failed": return L("This setting couldn’t be changed. Close Overwatch and Battle.net, then try again.")
-        case "shader_preparation_running": return L("A shader cache update is running. Wait for it to finish, then try again.")
-        case "shader_delete_failed": return L("The shader cache couldn’t be deleted. Close Overwatch and Battle.net, then try again.")
+        case "shader_preparation_running": return L("{0} is preparing shaders from your last match. Wait for it to finish, then try again.",Brand.name)
+        case "shader_delete_failed": return L("The shader cache couldn’t be cleared. Close Overwatch and Battle.net, then try again.")
         default: return L("This step couldn’t finish. Retry, or open Help & FAQ to save a support report. Your game data has been kept.")
         }
     }
@@ -66,7 +66,7 @@ final class SetupService {
     init(root: URL, helper: URL) { self.root=root; self.helper=helper }
     func cancel() { cancelRequested=true; if process?.isRunning == true { process?.terminate() } }
     func run(_ command: String, _ args: [String] = [], event: @escaping @MainActor ([String:Any])->Void = { _ in }) async throws -> [[String:Any]] {
-        guard process == nil else { throw SetupFailure(code:"setup_already_running") }
+        guard process == nil else { throw SetupFailure(code:"app_worker_busy") }
         let p=Process(), pipe=Pipe()
         p.executableURL=helper; p.arguments=[command,"--root",root.path]+args
         p.standardOutput=pipe; p.standardError=FileHandle.nullDevice

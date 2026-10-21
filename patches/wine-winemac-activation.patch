@@ -1,15 +1,252 @@
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index ce6a702..e9357e1 100644
+index ce6a702..4b5f308 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
-@@ -69,9 +69,20 @@
+@@ -27,6 +27,7 @@
+ #import <GameController/GameController.h>
+ #include <dlfcn.h>
+ #include <os/lock.h>
++#import <objc/runtime.h>
+ 
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+@@ -52,14 +53,75 @@
+ static unsigned long long raw_last_motion;  /* uptime ns of the latest GCMouse motion */
+ static const unsigned long long raw_silence = 250000000; /* then pointer events stand in */
+ 
++/* How raw input and key presses behave.  Variant 0 is what drivers up to
++ * Recall 1.3.1 did with input statistics off, as players run them: they timed
++ * raw input with macdrv_stat_clock(), which reads 0 then, so every move carries
++ * event time ticksForEventTime:0, every delivery waits for the timer and
++ * pointer events never stand in.  Righting all three ("fixed") seemed to make
++ * Overwatch hitch more in an October 2026 play-test (a blind test then found no
++ * difference), so test builds switch the parts one at a time
++ * (WINEMAC_INPUT_VARIANT, WINEMAC_INPUT_VARIANTS).  "precise" adds mouse
++ * buttons from raw input to "fixed". */
++enum
++{
++    INPUT_REAL_TIME   = 1,  /* moves carry the uptime of their delivery */
++    INPUT_AT_ONCE     = 2,  /* a report goes out at once when raw_interval has passed */
++    INPUT_FALLBACK    = 4,  /* pointer events stand in while GCMouse is silent, in its units, and its handlers are re-armed */
++    INPUT_KEYS_CACHED = 8,  /* key presses read input_method_cached, not the main thread */
++    INPUT_RAW_BUTTONS = 16, /* mouse buttons come from GCMouse, in order with its motion (raw_button) */
++};
++static const struct { const char* name; int flags; } input_variants[] =
++{
++    { "legacy", 0 },
++    { "stamps", INPUT_REAL_TIME },
++    { "at-once", INPUT_AT_ONCE },
++    { "fixed", INPUT_REAL_TIME | INPUT_AT_ONCE | INPUT_FALLBACK },
++    { "keys", INPUT_KEYS_CACHED },
++    { "clicks", INPUT_RAW_BUTTONS },
++    { "precise", INPUT_REAL_TIME | INPUT_AT_ONCE | INPUT_FALLBACK | INPUT_RAW_BUTTONS },
++};
++enum { INPUT_LEGACY = 0, INPUT_FIXED = 3 };
++static int input_variant;   /* index into input_variants */
++
++static int input_flags(void)
++{
++    return input_variants[__atomic_load_n(&input_variant, __ATOMIC_RELAXED)].flags;
++}
++
++static int input_variant_named(const char* name, size_t length)
++{
++    for (int i = 0; i < sizeof(input_variants) / sizeof(input_variants[0]); i++)
++        if (strlen(input_variants[i].name) == length && !strncmp(input_variants[i].name, name, length))
++            return i;
++    return -1;
++}
++
++/* The input-method state key presses read in the keys variant, refreshed on the
++ * main thread when raw input starts, when input sources change and when the
++ * application becomes active again after resigning.  -1 until known. */
++static int input_method_cached = -1;
++
++/* Statistics: uptime ns of the latest GCMouse report, and how long GCMouse may
++ * be silent before a pointer event's motion counts as missed by it. */
++static unsigned long long raw_last_report;
++static const unsigned long long raw_unmatched_gap = 50000000;
++
++/* Uptime in nanoseconds, the clock of NSEvent timestamps. */
++static unsigned long long raw_clock(void)
++{
++    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++}
++
+ /* raw_queue only */
+ static double raw_pending_x, raw_pending_y;
++static unsigned long long raw_pending_first;    /* statistics: uptime ns of the oldest pending report */
+ static unsigned long long raw_last_post;
+ static BOOL raw_flush_armed;
+ static struct
+ {
+     unsigned long long moves, posted;
+     double dx, dy;
++    long long posted_x, posted_y;   /* the whole counts delivered, Windows orientation */
+     unsigned int sources;
+ } raw_stats;
+ 
+@@ -69,9 +131,172 @@
      unsigned long long mac_moves, mac_move_ns, posted_absolute, posted_relative, dropped_after_warp;
      unsigned long long warps, warp_ns, mouselook_moves, mouselook_posted, mouselook_enters, mouselook_exits;
      unsigned long long clicks, switches, pointer_ignored, pointer_fallback;
+-    double mac_dx, mac_dy;
 +    unsigned long long activations, resigns, resyncs_skipped;
-     double mac_dx, mac_dy;
++    unsigned long long pointer_unmatched;   /* pointer motion while GCMouse was silent (raw_unmatched_gap) */
++    unsigned long long marks;               /* test marks: the player felt a hitch */
++    unsigned long long rearms, inputs_replaced;  /* GCMouse handlers set again; profiles found replaced */
++    double mac_dx, mac_dy, pointer_unmatched_dx, pointer_unmatched_dy;
  } cocoa_stats;
  
++/* Mouse buttons from raw input (INPUT_RAW_BUTTONS).  Overwatch shoots along the
++ * aim after the motion that precedes a click ("where you're aiming when you
++ * click", Blizzard, 2019), so a click must sit among the motion where it
++ * happened.  GCMouse reports a press about 0.25 ms after the mouse, in order with
++ * its motion.  AppKit's copy reaches the main thread with the next display
++ * refresh (October 19, 2026: 3.0 ms after the press on average and up to 8.6 ms
++ * at 120 Hz), by which time motion from after the press has gone ahead of it.
++ * raw_button posts the press after the motion pending before it; AppKit's copy,
++ * matched by its hardware time, is then dropped, and AppKit posts only what raw
++ * input did not.  Variants without raw buttons still note GCMouse's presses, to
++ * measure how far ahead of AppKit they were. */
++enum { RAW_BUTTONS = 5, BUTTON_RECENT = 32 };
++enum { BUTTON_APPKIT, BUTTON_RAW, BUTTON_OBSERVED };
++static const unsigned long long button_match_before = 2000000;  /* GCMouse's copy up to 2 ms before AppKit's hardware time */
++static const unsigned long long button_match_after = 40000000;  /* or up to 40 ms after it */
++struct button_change
++{
++    unsigned long long at;      /* uptime ns: GCMouse's arrival, or AppKit's hardware time */
++    long long sum_x, sum_y;     /* raw_sum_x/y at that moment */
++    signed char button, pressed, from, matched;
++};
++/* Under mouselook_lock. */
++static struct button_change button_recent[BUTTON_RECENT];
++static unsigned int button_recent_next;
++static struct
++{
++    unsigned long long raw_posted, raw_duplicates, appkit_posted, appkit_copies;
++    unsigned long long gaps, gap_ns, gap_max_ns;    /* AppKit's copy arriving after GCMouse's */
++    double gap_counts, gap_counts_max;              /* GCMouse motion in between */
++} button_stats;
++
++/* GCMouse motion so far, Windows orientation, and its size (|dx| + |dy|) while
++ * raw input was on.  raw_queue writes; other threads read. */
++static long long raw_sum_x, raw_sum_y, raw_abs_on;
++
++/* Main thread: pointer motion (|dx| + |dy| in points) ignored while GCMouse
++ * delivered, for rawCountsPerPoint; when GCMouse's handlers were last set again
++ * because it went silent; and keys for what each GCMouse was armed with. */
++static double pointer_points_raw;
++static NSTimeInterval raw_silent_rearm;
++static char raw_mouse_input_key, raw_mouse_source_key;
++
++/* Test only.  A blind sequence of input variants (WINEMAC_INPUT_VARIANTS, a
++ * comma-separated list of input_variants names), each for
++ * WINEMAC_INPUT_STRETCH_S seconds of raw input in front, after
++ * WINEMAC_INPUT_WARMUP_S seconds of warm-up in the starting variant.  The same
++ * sound marks every change, so the player cannot tell which variant runs;
++ * another marks the end, when the starting variant returns.  With
++ * WINEMAC_MOUSELOOK_SWITCH=mark, Control-Option-Command-M records a mark (the
++ * player felt a hitch) with its time.  Main thread. */
++static int test_sequence[64], test_sequence_count, test_start_variant;
++static int test_stretch;            /* 0 warming up, then 1 to test_sequence_count, then done */
++static int test_stretch_s = 75, test_warmup_s = 40, test_elapsed_s;
++static double test_marks_ms[16];    /* this second's marks, Unix ms */
++static int test_mark_count;
++
++/* Statistics: how long the main thread took to start a request from another
++ * thread (OnMainThreadAsync, as OnMainThread uses), probed every 10 ms.  A key
++ * press waits that long for macdrv_using_input_method.  Main thread. */
++static struct
++{
++    unsigned long long probes, lag_ns, lag_max_ns, over_4ms, over_16ms;
++} main_lag;
++static int main_lag_pending;
++
++static void start_main_lag_probe(void)
++{
++    dispatch_queue_attr_t attributes = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
++                                                                               QOS_CLASS_USER_INTERACTIVE, 0);
++    dispatch_queue_t queue = dispatch_queue_create("org.winehq.wine.winemac.main-lag", attributes);
++    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
++
++    dispatch_source_set_event_handler(timer, ^{
++        unsigned long long sent;
++
++        /* A probe still waiting is a stall in progress, and measures it. */
++        if (__atomic_exchange_n(&main_lag_pending, 1, __ATOMIC_ACQ_REL)) return;
++        sent = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++        OnMainThreadAsync(^{
++            unsigned long long lag = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - sent;
++
++            main_lag.probes++;
++            main_lag.lag_ns += lag;
++            if (lag > main_lag.lag_max_ns) main_lag.lag_max_ns = lag;
++            if (lag > 4000000) main_lag.over_4ms++;
++            if (lag > 16000000) main_lag.over_16ms++;
++            __atomic_store_n(&main_lag_pending, 0, __ATOMIC_RELEASE);
++        });
++    });
++    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 10000000), 10000000, 1000000);
++    dispatch_resume(timer);
++}
++
++/* Test only: a system sound, played without waiting on the main thread or
++ * loading an audio output into the process.  The first NSSound froze the game
++ * for 1.5 s in a play-test. */
++static void play_test_sound(NSString* name)
++{
++    static dispatch_queue_t queue;
++    static dispatch_once_t once;
++
++    dispatch_once(&once, ^{
++        queue = dispatch_queue_create("org.winehq.wine.winemac.test-sound", DISPATCH_QUEUE_SERIAL);
++    });
++    name = [name copy];
++    dispatch_async(queue, ^{
++        static OSStatus (*create)(CFURLRef, UInt32*);
++        static OSStatus (*set_property)(UInt32, UInt32, const void*, UInt32, const void*);
++        static void (*play)(UInt32);
++        static NSMutableDictionary* sounds;
++
++        @autoreleasepool
++        {
++            NSNumber* sound;
++
++            if (!sounds)
++            {
++                void* toolbox = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox",
++                                       RTLD_LAZY | RTLD_LOCAL);
++
++                create = toolbox ? dlsym(toolbox, "AudioServicesCreateSystemSoundID") : NULL;
++                set_property = toolbox ? dlsym(toolbox, "AudioServicesSetProperty") : NULL;
++                play = toolbox ? dlsym(toolbox, "AudioServicesPlaySystemSound") : NULL;
++                sounds = [[NSMutableDictionary alloc] init];
++            }
++            sound = sounds[name];
++            if (!sound && create)
++            {
++                NSURL* url = [NSURL fileURLWithPath:[NSString stringWithFormat:@"/System/Library/Sounds/%@.aiff", name]];
++                UInt32 soundID;
++
++                if (create((CFURLRef)url, &soundID) == noErr)
++                {
++                    /* kAudioServicesPropertyIsUISound: play even with "Play user
++                       interface sound effects" off. */
++                    UInt32 always = 0;
++
++                    if (set_property)
++                        set_property('isui', sizeof(soundID), &soundID, sizeof(always), &always);
++                    sounds[name] = sound = [NSNumber numberWithUnsignedInt:soundID];
++                }
++            }
++            if (sound && play)
++                play([sound unsignedIntValue]);
++        }
++        [name release];
++    });
++}
++
 +/* Whether the next applicationDidBecomeActive: must re-synchronise Wine's
 + * display list (sendDisplaysChanged:TRUE).  macOS re-announces an application
 + * that is already active on every left click on its window (WindowManager's
@@ -23,61 +260,666 @@ index ce6a702..e9357e1 100644
  
  /* Follows Wine's cursor, as Wine clips it, for placing the pointer when
   * mouselook ends.  Called with mouselook_lock held. */
-@@ -2016,6 +2027,7 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -92,7 +317,8 @@ static void mouselook_move_position(int x, int y)
+ static void raw_flush(void)
+ {
+     int x = raw_pending_x, y = raw_pending_y;  /* truncation keeps the remainder */
+-    unsigned long long now = macdrv_stat_clock();
++    unsigned long long now = raw_clock();
++    BOOL real_time = (input_flags() & INPUT_REAL_TIME) != 0;
+ 
+     raw_flush_armed = FALSE;
+     if (!x && !y) return;
+@@ -103,7 +329,10 @@ static void raw_flush(void)
+         macdrv_event* event = macdrv_create_event(MOUSE_MOVED_RELATIVE, raw_window);
+         event->mouse_moved.x = x;
+         event->mouse_moved.y = y;
+-        event->mouse_moved.time_ms = [[WineApplicationController sharedController] ticksForEventTime:now / 1e9];
++        event->mouse_moved.time_ms = [[WineApplicationController sharedController]
++                                      ticksForEventTime:real_time ? now / 1e9 : 0];
++        event->mouse_moved.first_ns = raw_pending_first;
++        raw_pending_first = 0;
+         [raw_window.queue postEvent:event];
+         macdrv_release_event(event);
+         mouselook_move_position(x, y);
+@@ -111,9 +340,14 @@ static void raw_flush(void)
+         raw_pending_y -= y;
+         raw_last_post = now;
+         raw_stats.posted++;
++        raw_stats.posted_x += x;
++        raw_stats.posted_y += y;
+     }
+     else
++    {
+         raw_pending_x = raw_pending_y = 0;
++        raw_pending_first = 0;
++    }
+     os_unfair_lock_unlock(&mouselook_lock);
+ }
+ 
+@@ -121,31 +355,177 @@ static void raw_flush(void)
+  * between accumulates and is never dropped. */
+ static void raw_motion(float dx, float dy, unsigned int source)
+ {
+-    unsigned long long now = macdrv_stat_clock();
++    unsigned long long now = raw_clock();
++    BOOL at_once;
+ 
+     __atomic_store_n(&raw_last_motion, now, __ATOMIC_RELAXED);
++    __atomic_store_n(&raw_last_report, macdrv_stat_clock(), __ATOMIC_RELAXED);
+     raw_stats.moves++;
+     raw_stats.dx += fabs(dx);
+     raw_stats.dy += fabs(dy);
+     raw_stats.sources |= 1u << (source % 32);
++    __atomic_store_n(&raw_sum_x, raw_sum_x + (long long)dx, __ATOMIC_RELAXED);
++    __atomic_store_n(&raw_sum_y, raw_sum_y - (long long)dy, __ATOMIC_RELAXED);
+     if (!__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE))
+     {
+         raw_pending_x = raw_pending_y = 0;
++        raw_pending_first = 0;
+         return;
+     }
++    __atomic_store_n(&raw_abs_on, raw_abs_on + (long long)(fabs(dx) + fabs(dy)), __ATOMIC_RELAXED);
+ 
+     raw_pending_x += dx;
+     raw_pending_y -= dy;  /* GCMouse's Y axis points up, Windows' down */
+-    if (!raw_interval || now - raw_last_post >= raw_interval)
++    if (!raw_pending_first) raw_pending_first = macdrv_stat_clock();
++    /* Without INPUT_AT_ONCE every delivery waits for the timer, as in legacy. */
++    at_once = (input_flags() & INPUT_AT_ONCE) != 0;
++    if (!raw_interval || (at_once && now - raw_last_post >= raw_interval))
+         raw_flush();
+     else if (!raw_flush_armed)
+     {
+         raw_flush_armed = TRUE;
+-        dispatch_source_set_timer(raw_timer, dispatch_time(DISPATCH_TIME_NOW, raw_last_post + raw_interval - now),
++        dispatch_source_set_timer(raw_timer, dispatch_time(DISPATCH_TIME_NOW,
++                                                           at_once ? raw_last_post + raw_interval - now : raw_interval),
+                                   DISPATCH_TIME_FOREVER, 0);
+     }
+ }
+ 
++/* Notes a button change: posted to Wine by AppKit or raw input, or only seen by
++ * GCMouse.  Called with mouselook_lock held. */
++static void button_remember(unsigned long long at, int button, int pressed, int from)
++{
++    struct button_change* change = &button_recent[button_recent_next++ % BUTTON_RECENT];
++
++    change->at = at;
++    change->sum_x = __atomic_load_n(&raw_sum_x, __ATOMIC_RELAXED);
++    change->sum_y = __atomic_load_n(&raw_sum_y, __ATOMIC_RELAXED);
++    change->button = button;
++    change->pressed = pressed;
++    change->from = from;
++    change->matched = 0;
++}
++
++/* The other path's unmatched copy of a button change: for AppKit's change with
++ * hardware time at, GCMouse's (posted or only seen); for GCMouse's arriving at
++ * at, AppKit's.  GCMouse's copy arrives from button_match_before ahead of
++ * AppKit's hardware time to button_match_after behind it.  The earliest wins,
++ * so quick repeated clicks pair in order.  Called with mouselook_lock held. */
++static struct button_change* button_copy(unsigned long long at, int button, int pressed, BOOL want_raw)
++{
++    struct button_change* best = NULL;
++    unsigned int i;
++
++    for (i = 0; i < BUTTON_RECENT; i++)
++    {
++        struct button_change* change = &button_recent[i];
++        unsigned long long raw_at, hardware_at;
++
++        if (!change->at || change->matched || change->button != button || change->pressed != pressed) continue;
++        if ((change->from != BUTTON_APPKIT) != want_raw) continue;
++        raw_at = want_raw ? change->at : at;
++        hardware_at = want_raw ? at : change->at;
++        if (raw_at + button_match_before < hardware_at || raw_at > hardware_at + button_match_after) continue;
++        if (!best || change->at < best->at) best = change;
++    }
++    return best;
++}
++
++/* Whether raw input posted this change within the last 5 ms: the mouse's other
++ * interface reporting it too.  Called with mouselook_lock held. */
++static BOOL button_repeat(unsigned long long at, int button, int pressed)
++{
++    unsigned int i;
++
++    for (i = 0; i < BUTTON_RECENT; i++)
++    {
++        const struct button_change* change = &button_recent[i];
++
++        if (change->from == BUTTON_RAW && change->button == button && change->pressed == pressed &&
++            change->at <= at && at - change->at < 5000000)
++            return TRUE;
++    }
++    return FALSE;
++}
++
++/* A GCMouse button change.  With INPUT_RAW_BUTTONS it goes to Wine now, after the
++ * motion pending before it, unless AppKit's copy got there first; the press is
++ * where Wine's cursor is, as mouselook clicks are.  Otherwise it is only noted. */
++static void raw_button(int button, BOOL pressed)
++{
++    unsigned long long now = raw_clock();
++    BOOL post = (input_flags() & INPUT_RAW_BUTTONS) != 0;
++    struct button_change* copy;
++
++    if (button < 0 || button >= RAW_BUTTONS || !__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE)) return;
++    if (post) raw_flush();
++
++    os_unfair_lock_lock(&mouselook_lock);
++    if (!post)
++    {
++        if (macdrv_input_stats_on) button_remember(now, button, pressed, BUTTON_OBSERVED);
++    }
++    else if ((copy = button_copy(now, button, pressed, FALSE)))
++        copy->matched = 1;
++    else if (!raw_window)
++        ;   /* mouselook just ended: AppKit posts it */
++    else if (button_repeat(now, button, pressed))
++        button_stats.raw_duplicates++;
++    else
++    {
++        macdrv_event* event = macdrv_create_event(MOUSE_BUTTON, raw_window);
++
++        event->mouse_button.button = button;
++        event->mouse_button.pressed = pressed;
++        event->mouse_button.x = floor(mouselook_position.x);
++        event->mouse_button.y = floor(mouselook_position.y);
++        event->mouse_button.time_ms = [[WineApplicationController sharedController] ticksForEventTime:now / 1e9];
++        event->mouse_button.no_move = TRUE;
++        [raw_window.queue postEvent:event];
++        macdrv_release_event(event);
++        button_remember(now, button, pressed, BUTTON_RAW);
++        button_stats.raw_posted++;
++    }
++    os_unfair_lock_unlock(&mouselook_lock);
++}
++
++/* AppKit's button change: whether raw input posted it already.  If not, AppKit
++ * posts it, and it is noted so that a later GCMouse copy is not posted again.
++ * Statistics: how far behind GCMouse's copy it arrived, and the motion in
++ * between, which the game takes before an AppKit click.  Main thread. */
++static BOOL appkit_button_is_raw_copy(int button, BOOL pressed, NSTimeInterval timestamp)
++{
++    unsigned long long now = raw_clock(), at = timestamp * 1e9;
++    struct button_change* copy;
++    BOOL posted = FALSE;
++
++    if (button < 0 || button >= RAW_BUTTONS || !raw_queue) return FALSE;
++
++    os_unfair_lock_lock(&mouselook_lock);
++    if ((copy = button_copy(at, button, pressed, TRUE)))
++    {
++        double counts = hypot(__atomic_load_n(&raw_sum_x, __ATOMIC_RELAXED) - copy->sum_x,
++                              __atomic_load_n(&raw_sum_y, __ATOMIC_RELAXED) - copy->sum_y);
++        unsigned long long gap = now > copy->at ? now - copy->at : 0;
++
++        copy->matched = 1;
++        posted = copy->from == BUTTON_RAW;
++        button_stats.gaps++;
++        button_stats.gap_ns += gap;
++        if (gap > button_stats.gap_max_ns) button_stats.gap_max_ns = gap;
++        button_stats.gap_counts += counts;
++        if (counts > button_stats.gap_counts_max) button_stats.gap_counts_max = counts;
++    }
++    if (posted)
++        button_stats.appkit_copies++;
++    else
++    {
++        button_remember(at, button, pressed, BUTTON_APPKIT);
++        if (input_flags() & INPUT_RAW_BUTTONS) button_stats.appkit_posted++;
++    }
++    os_unfair_lock_unlock(&mouselook_lock);
++    return posted;
++}
++
+ 
+ /* Whether every frame of a cursor is fully transparent.  Some clients hide
+  * the cursor by setting an empty image rather than no cursor. */
+@@ -823,6 +1203,7 @@ - (void) keyboardSelectionDidChange:(BOOL)force
+ 
+     - (void) keyboardSelectionDidChange
+     {
++        [self refreshInputMethodCache];
+         [self keyboardSelectionDidChange:NO];
+     }
+ 
+@@ -838,6 +1219,8 @@ - (void) setKeyboardType:(CGEventSourceKeyboardType)newType
+     - (void) enabledKeyboardInputSourcesChanged
+     {
+         macdrv_layout_list_needs_update = TRUE;
++        /* The distributed notification center may call on any thread. */
++        dispatch_async(dispatch_get_main_queue(), ^{ [self refreshInputMethodCache]; });
+     }
+ 
+     - (CGFloat) primaryScreenHeight
+@@ -1805,30 +2188,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
+     {
+         static int unscaled = -1;
+         double scale = retina_on ? 2.0 : 1.0;
++        BOOL standing_in = FALSE;
+         NSTimeInterval now;
+ 
+-        // Raw input carries this motion.  Pointer events stand in only while
+-        // GCMouse is silent, for example for a mouse it does not report.
++        // Raw input carries this motion.  With INPUT_FALLBACK, pointer events
++        // stand in while GCMouse is silent, for example for a mouse it does not
++        // report, in GCMouse's units; legacy never let them.
+         if (__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE))
+         {
+-            if (macdrv_stat_clock() - __atomic_load_n(&raw_last_motion, __ATOMIC_RELAXED) < raw_silence)
++            // Statistics: motion macOS saw while GCMouse had been silent for a
++            // while, which raw input may have missed.
++            if (macdrv_input_stats_on && ([anEvent deltaX] || [anEvent deltaY]) &&
++                macdrv_stat_clock() - __atomic_load_n(&raw_last_report, __ATOMIC_RELAXED) > raw_unmatched_gap)
+             {
++                cocoa_stats.pointer_unmatched++;
++                cocoa_stats.pointer_unmatched_dx += fabs([anEvent deltaX]);
++                cocoa_stats.pointer_unmatched_dy += fabs([anEvent deltaY]);
++            }
++            BOOL live = raw_clock() - __atomic_load_n(&raw_last_motion, __ATOMIC_RELAXED) < raw_silence;
++
++            if (!(input_flags() & INPUT_FALLBACK) || live)
++            {
++                if (live) pointer_points_raw += fabs([anEvent deltaX]) + fabs([anEvent deltaY]);
+                 mouselookWarpDelta = CGPointZero;
+                 cocoa_stats.pointer_ignored++;
+                 return;
+             }
+             cocoa_stats.pointer_fallback++;
++            standing_in = TRUE;
++            // The pointer moves and GCMouse is silent: set its handlers again,
++            // at most once a second, in case macOS dropped them.
++            now = [[NSProcessInfo processInfo] systemUptime];
++            if (now - raw_silent_rearm >= 1)
++            {
++                raw_silent_rearm = now;
++                [self rearmRawMice:YES];
++            }
+         }
+ 
+         // By default, keep the fullscreen canvas scale that absolute motion
+         // over the window has.  WINEMAC_MOUSELOOK_UNSCALED=1 uses the scale of
+-        // edge-pinned relative motion instead, for comparison.
++        // edge-pinned relative motion instead, for comparison.  Standing in for
++        // a mouse raw input reads, keep its sensitivity instead; with none (a
++        // trackpad alone), pointer events keep the pointer scale.
+         if (unscaled < 0)
+         {
+             const char* value = getenv("WINEMAC_MOUSELOOK_UNSCALED");
+             unscaled = value && *value == '1';
+         }
+-        if (!unscaled)
++        if (standing_in && [rawMice count])
++            scale = [self rawCountsPerPoint];
++        else if (!unscaled)
+             scale /= macdrv_v1_canvas_scale(mouselookWindow);
+ 
+         // deltaY is already top-down, like Windows.
+@@ -1880,6 +2290,32 @@ - (void) startRawInput
+             return;
+         rawStarted = TRUE;
+ 
++        {
++            const char* variant = getenv("WINEMAC_INPUT_VARIANT");
++            const char* list = getenv("WINEMAC_INPUT_VARIANTS");
++            const char* seconds;
++            int index;
++
++            if (variant && (index = input_variant_named(variant, strlen(variant))) >= 0)
++                __atomic_store_n(&input_variant, index, __ATOMIC_RELAXED);
++            test_start_variant = __atomic_load_n(&input_variant, __ATOMIC_RELAXED);
++            while (list && *list && test_sequence_count < sizeof(test_sequence) / sizeof(test_sequence[0]))
++            {
++                size_t length = strcspn(list, ",");
++
++                if ((index = input_variant_named(list, length)) >= 0)
++                    test_sequence[test_sequence_count++] = index;
++                list += length + (list[length] == ',');
++            }
++            if ((seconds = getenv("WINEMAC_INPUT_STRETCH_S")) && atoi(seconds) > 0)
++                test_stretch_s = atoi(seconds);
++            if ((seconds = getenv("WINEMAC_INPUT_WARMUP_S")) && atoi(seconds) > 0)
++                test_warmup_s = atoi(seconds);
++            if (macdrv_input_stats_on)
++                start_main_lag_probe();
++            [self refreshInputMethodCache];
++        }
++
+         framework = dlopen("/System/Library/Frameworks/GameController.framework/GameController", RTLD_LAZY | RTLD_LOCAL);
+         mouseClass = NSClassFromString(@"GCMouse");
+         connected = framework ? dlsym(framework, "GCMouseDidConnectNotification") : NULL;
+@@ -1920,22 +2356,98 @@ - (void) attachRawMouse:(GCMouse*)mouse
+         // "Magic Trackpad").
+         if ([mouse.vendorName rangeOfString:@"Trackpad" options:NSCaseInsensitiveSearch].location != NSNotFound)
+             return;
+-        if ([rawMice containsObject:mouse]) return;
++        if ([rawMice containsObject:mouse])
++        {
++            // Announced again.  With INPUT_FALLBACK, handlers its profile lost
++            // come back; the previous drivers kept none on a replaced profile.
++            if (input_flags() & INPUT_FALLBACK) [self rearmRawMouse:mouse always:NO];
++            return;
++        }
+         source = rawMiceAttached++;
+         [rawMice addObject:mouse];
++        [self armRawMouse:mouse source:source];
++    }
++
++    /* Sets a mouse's raw input handlers, which run on raw_queue: its motion, and
++       its buttons in AppKit's numbering (left, right, middle, then the side
++       buttons, which Wine sends as X buttons). */
++    - (void) armRawMouse:(GCMouse*)mouse source:(unsigned int)source
++    {
++        GCMouseInput* input = mouse.mouseInput;
++        NSMutableArray* buttons = [NSMutableArray array];
++        NSUInteger i;
++
+         mouse.handlerQueue = raw_queue;
+-        mouse.mouseInput.mouseMovedHandler = ^(GCMouseInput* input, float deltaX, float deltaY){
++        input.mouseMovedHandler = ^(GCMouseInput* profile, float deltaX, float deltaY){
+             raw_motion(deltaX, deltaY, source);
+         };
++        [buttons addObject:input.leftButton ? (id)input.leftButton : [NSNull null]];
++        [buttons addObject:input.rightButton ? (id)input.rightButton : [NSNull null]];
++        [buttons addObject:input.middleButton ? (id)input.middleButton : [NSNull null]];
++        if (input.auxiliaryButtons) [buttons addObjectsFromArray:input.auxiliaryButtons];
++        for (i = 0; i < [buttons count] && i < RAW_BUTTONS; i++)
++        {
++            int number = (int)i;
++
++            if (buttons[i] == [NSNull null]) continue;
++            ((GCControllerButtonInput*)buttons[i]).pressedChangedHandler =
++                ^(GCControllerButtonInput* button, float value, BOOL pressed){ raw_button(number, pressed); };
++        }
++        objc_setAssociatedObject(mouse, &raw_mouse_input_key, input, OBJC_ASSOCIATION_RETAIN);
++        objc_setAssociatedObject(mouse, &raw_mouse_source_key, [NSNumber numberWithUnsignedInt:source],
++                                 OBJC_ASSOCIATION_RETAIN);
++    }
++
++    /* Sets a known mouse's handlers again: always, or only if its input profile
++       was replaced or its motion handler cleared.  Handlers are set only while
++       the mouse is quiet: GCMouse's handler properties are not atomic. */
++    - (void) rearmRawMouse:(GCMouse*)mouse always:(BOOL)always
++    {
++        NSNumber* source = objc_getAssociatedObject(mouse, &raw_mouse_source_key);
++        BOOL replaced = mouse.mouseInput != objc_getAssociatedObject(mouse, &raw_mouse_input_key);
++
++        if (!source || !(always || replaced || !mouse.mouseInput.mouseMovedHandler)) return;
++        if (replaced) cocoa_stats.inputs_replaced++;
++        cocoa_stats.rearms++;
++        [self armRawMouse:mouse source:[source unsignedIntValue]];
++    }
++
++    - (void) rearmRawMice:(BOOL)always
++    {
++        for (GCMouse* mouse in rawMice)
++            [self rearmRawMouse:mouse always:always];
+     }
+ 
+     - (void) detachRawMouse:(GCMouse*)mouse
+     {
++        GCMouseInput* input = mouse.mouseInput;
++
+         if (![rawMice containsObject:mouse]) return;
+-        mouse.mouseInput.mouseMovedHandler = nil;
++        input.mouseMovedHandler = nil;
++        input.leftButton.pressedChangedHandler = nil;
++        input.rightButton.pressedChangedHandler = nil;
++        input.middleButton.pressedChangedHandler = nil;
++        for (GCControllerButtonInput* button in input.auxiliaryButtons)
++            button.pressedChangedHandler = nil;
+         [rawMice removeObject:mouse];
+     }
+ 
++    /* GCMouse counts per pointer point, so pointer events standing in for raw
++       input keep its sensitivity: as measured while both delivered (from 2,000
++       points of motion), or else the inverse of the tracking speed.  The
++       previous drivers kept the pointer scale, about 1.9 times as fast with a
++       tracking speed of 1.5 on a Retina display.  Main thread. */
++    - (double) rawCountsPerPoint
++    {
++        long long counts = __atomic_load_n(&raw_abs_on, __ATOMIC_RELAXED);
++        double speed;
++
++        if (pointer_points_raw >= 2000 && counts > 0)
++            return counts / pointer_points_raw;
++        speed = [[NSUserDefaults standardUserDefaults] doubleForKey:@"com.apple.mouse.scaling"];
++        return speed > 0 ? 1 / speed : 1;
++    }
++
+     /* Raw input delivers to the mouselook window unless it is unavailable or
+        switched off. */
+     - (void) updateRawInput
+@@ -1951,19 +2463,22 @@ - (void) updateRawInput
+         [previous release];
+     }
+ 
+-    /* Test-only (WINEMAC_MOUSELOOK_SWITCH=1): Control-Option-Command-M
+-       switches raw input off and on, so raw motion and pointer events can be
+-       compared in the same match.  A sound marks the new mode: Glass for raw
+-       input, Basso for pointer events. */
++    /* Test only, by WINEMAC_MOUSELOOK_SWITCH: Control-Option-Command-M switches
++       raw input off and on ("1": Glass for raw input, Basso for pointer
++       events), switches between the legacy and fixed variants ("timing": Glass
++       for fixed, Basso for legacy), or records a mark, the player having felt a
++       hitch ("mark": Tink). */
+     - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
+     {
+-        static int enabled = -1;
++        static int enabled = -1, timing, mark;
+         NSEventModifierFlags required = NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand;
+ 
+         if (enabled < 0)
+         {
+             const char* value = getenv("WINEMAC_MOUSELOOK_SWITCH");
+-            enabled = value && *value == '1';
++            timing = value && !strcmp(value, "timing");
++            mark = value && !strcmp(value, "mark");
++            enabled = value && (*value == '1' || timing || mark);
+         }
+         if (!enabled || !mouselook_allowed || [anEvent keyCode] != kVK_ANSI_M)
+             return NO;
+@@ -1978,16 +2493,57 @@ - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
+             return NO;
+ 
+         mouselookHotkeyDown = TRUE;
+-        if (![anEvent isARepeat])
++        if ([anEvent isARepeat])
++            return YES;
++        if (mark)
++        {
++            NSTimeInterval age = [[NSProcessInfo processInfo] systemUptime] - [anEvent timestamp];
++
++            if (test_mark_count < sizeof(test_marks_ms) / sizeof(test_marks_ms[0]))
++                test_marks_ms[test_mark_count++] = ([[NSDate date] timeIntervalSince1970] - age) * 1000;
++            cocoa_stats.marks++;
++            play_test_sound(@"Tink");
++        }
++        else if (timing)
++        {
++            int next = __atomic_load_n(&input_variant, __ATOMIC_RELAXED) == INPUT_LEGACY ? INPUT_FIXED : INPUT_LEGACY;
++
++            __atomic_store_n(&input_variant, next, __ATOMIC_RELAXED);
++            play_test_sound(next == INPUT_LEGACY ? @"Basso" : @"Glass");
++            cocoa_stats.switches++;
++        }
++        else
+         {
+             rawSwitchedOff = !rawSwitchedOff;
+             [self updateRawInput];
+-            [[NSSound soundNamed:rawSwitchedOff ? @"Basso" : @"Glass"] play];
++            play_test_sound(rawSwitchedOff ? @"Basso" : @"Glass");
+             cocoa_stats.switches++;
+         }
+         return YES;
+     }
+ 
++    /* Test only: counts a second of the blind sequence (WINEMAC_INPUT_VARIANTS)
++       when raw input was on in front, and moves to the next variant when the
++       stretch is over. */
++    - (void) advanceInputTest
++    {
++        if (!test_sequence_count || test_stretch > test_sequence_count) return;
++        if (!__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE) || ![NSApp isActive]) return;
++        if (++test_elapsed_s < (test_stretch ? test_stretch_s : test_warmup_s)) return;
++
++        test_elapsed_s = 0;
++        test_stretch++;
++        __atomic_store_n(&input_variant, test_stretch <= test_sequence_count ? test_sequence[test_stretch - 1]
++                                                                            : test_start_variant, __ATOMIC_RELAXED);
++        play_test_sound(test_stretch <= test_sequence_count ? @"Ping" : @"Hero");
++        cocoa_stats.switches++;
++    }
++
++    - (void) refreshInputMethodCache
++    {
++        __atomic_store_n(&input_method_cached, [self inputSourceIsInputMethod], __ATOMIC_RELEASE);
++    }
++
+     /* WINEMAC_INPUT_STATS=<prefix>: one JSON line per second to
+        <prefix>-<pid>.jsonl while this process is frontmost or has input
+        activity. */
+@@ -2007,7 +2563,9 @@ - (void) startInputStats
+     - (void) reportInputStats:(NSTimer*)timer
+     {
+         struct macdrv_input_stats wine;
++        char marks[sizeof(test_marks_ms) / sizeof(test_marks_ms[0]) * 24];
+         __block __typeof__(raw_stats) raw = {0};
++        __typeof__(button_stats) buttons;
+         const char* handler = !clipCursorHandler ? "none" :
+             [clipCursorHandler isKindOfClass:[WineConfinementClipCursorHandler class]] ? "confinement" : "eventtap";
+         WineWindow* key = (WineWindow*)[NSApp keyWindow];
+@@ -2016,6 +2574,11 @@ - (void) reportInputStats:(NSTimer*)timer
  #define TAKE(field) wine.field = __atomic_exchange_n(&macdrv_input_stats.field, 0, __ATOMIC_RELAXED)
          TAKE(moves_delivered); TAKE(deliver_ns); TAKE(setpos_calls); TAKE(setpos_fast); TAKE(setpos_ns);
          TAKE(setpos_max_ns); TAKE(getpos_calls); TAKE(getpos_ns); TAKE(clip_calls);
 +        TAKE(canvas_restores); TAKE(canvas_restores_suppressed); TAKE(canvas_restores_held); TAKE(canvas_fullscreen_held);
++        TAKE(moved_relative); TAKE(moved_abs); TAKE(move_age_ms); TAKE(move_age_max_ms); TAKE(moved_x); TAKE(moved_y);
++        TAKE(delivered_timed); TAKE(delivery_ns); TAKE(delivery_max_ns);
++        TAKE(main_waits); TAKE(main_wait_ns); TAKE(main_wait_max_ns);
++        TAKE(key_checks); TAKE(key_checks_cached); TAKE(key_check_ns); TAKE(key_check_max_ns); TAKE(key_query_ns);
  #undef TAKE
          wine.consumer_tid = macdrv_input_stats.consumer_tid;
          wine.setpos_tid = macdrv_input_stats.setpos_tid;
-@@ -2030,7 +2042,10 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2024,15 +2587,31 @@ - (void) reportInputStats:(NSTimer*)timer
+                 raw = raw_stats;
+                 memset(&raw_stats, 0, sizeof(raw_stats));
+             });
++        os_unfair_lock_lock(&mouselook_lock);
++        buttons = button_stats;
++        memset(&button_stats, 0, sizeof(button_stats));
++        os_unfair_lock_unlock(&mouselook_lock);
+ 
+         // The frontmost process reports every second, so seconds with a still
+         // mouse are measured too; background processes only when active.
          if (!inputStatsFile ||
              !([NSApp isActive] || cocoa_stats.mac_moves || cocoa_stats.clicks || cocoa_stats.warps ||
                cocoa_stats.mouselook_enters || cocoa_stats.mouselook_exits || cocoa_stats.switches ||
 -              raw.moves || wine.moves_delivered || wine.setpos_calls || wine.getpos_calls || wine.clip_calls))
 +              cocoa_stats.activations || cocoa_stats.resigns ||
-+              raw.moves || wine.moves_delivered || wine.setpos_calls || wine.getpos_calls || wine.clip_calls ||
++              raw.moves || buttons.raw_posted || buttons.gaps ||
++              wine.moves_delivered || wine.setpos_calls || wine.getpos_calls || wine.clip_calls ||
 +              wine.canvas_restores || wine.canvas_restores_suppressed || wine.canvas_restores_held ||
 +              wine.canvas_fullscreen_held))
              return;
  
++        {
++            int i, used = 0;
++
++            marks[0] = 0;
++            for (i = 0; i < test_mark_count && used < sizeof(marks) - 24; i++)
++                used += snprintf(marks + used, sizeof(marks) - used, "%s%.0f", i ? "," : "", test_marks_ms[i]);
++        }
++
          fprintf(inputStatsFile,
-@@ -2041,12 +2056,15 @@ - (void) reportInputStats:(NSTimer*)timer
+                 "{\"schema\":1,\"unix_ms\":%.0f,\"pid\":%d,\"exe\":\"%s\",\"allowed\":%s,\"mode\":\"%s\","
+                 "\"app_active\":%s,\"hidden\":%s,\"transparent\":%s,\"clipping\":%s,\"hidden_warp\":%s,\"clip_handler\":\"%s\","
+@@ -2041,12 +2620,30 @@ - (void) reportInputStats:(NSTimer*)timer
                  "\"posted_absolute\":%llu,\"posted_relative\":%llu,\"dropped_after_warp\":%llu,"
                  "\"warps\":%llu,\"warp_us\":%.1f,\"mouselook_moves\":%llu,\"mouselook_posted\":%llu,"
                  "\"mouselook_enters\":%llu,\"mouselook_exits\":%llu,\"clicks\":%llu,\"switches\":%llu,"
 +                "\"activations\":%llu,\"resigns\":%llu,\"resyncs_skipped\":%llu,"
                  "\"raw_started\":%s,\"raw_switched_off\":%s,\"raw_interval_us\":%.0f,\"raw_mice\":%lu,"
                  "\"raw_moves\":%llu,\"raw_posted\":%llu,\"raw_dx\":%.1f,\"raw_dy\":%.1f,\"raw_sources\":%d,"
++                "\"raw_timing\":\"%s\",\"raw_posted_x\":%lld,\"raw_posted_y\":%lld,"
                  "\"pointer_ignored\":%llu,\"pointer_fallback\":%llu,"
++                "\"pointer_unmatched\":%llu,\"pointer_unmatched_dx\":%.1f,\"pointer_unmatched_dy\":%.1f,"
                  "\"moves_delivered\":%llu,\"deliver_us\":%.1f,\"setpos_calls\":%llu,\"setpos_fast\":%llu,"
                  "\"setpos_us\":%.1f,\"setpos_max_us\":%.1f,\"getpos_calls\":%llu,\"getpos_us\":%.1f,"
 -                "\"clip_calls\":%llu,\"consumer_tid\":%u,\"setpos_tid\":%u}\n",
 +                "\"clip_calls\":%llu,\"canvas_restores\":%llu,\"canvas_restores_suppressed\":%llu,"
 +                "\"canvas_restores_held\":%llu,\"canvas_fullscreen_held\":%llu,"
++                "\"moved_relative\":%llu,\"moved_x\":%lld,\"moved_y\":%lld,\"moved_abs\":%llu,"
++                "\"move_age_ms_avg\":%.1f,\"move_age_ms_max\":%llu,"
++                "\"variant\":\"%s\",\"stretch\":%d,\"marks\":%llu,\"marks_ms\":[%s],"
++                "\"delivery_ms_avg\":%.3f,\"delivery_ms_max\":%.3f,"
++                "\"main_waits\":%llu,\"main_wait_ms\":%.3f,\"main_wait_max_ms\":%.3f,"
++                "\"key_checks\":%llu,\"key_checks_cached\":%llu,\"key_check_ms\":%.3f,\"key_check_max_ms\":%.3f,"
++                "\"key_query_ms\":%.3f,"
++                "\"main_lag_probes\":%llu,\"main_lag_ms_avg\":%.3f,\"main_lag_ms_max\":%.3f,"
++                "\"main_lag_over_4ms\":%llu,\"main_lag_over_16ms\":%llu,"
++                "\"raw_buttons\":%llu,\"raw_button_repeats\":%llu,\"appkit_buttons\":%llu,\"appkit_copies\":%llu,"
++                "\"click_gaps\":%llu,\"click_gap_ms_avg\":%.3f,\"click_gap_ms_max\":%.3f,"
++                "\"click_counts_avg\":%.1f,\"click_counts_max\":%.1f,"
++                "\"rearms\":%llu,\"inputs_replaced\":%llu,\"counts_per_point\":%.4f,"
 +                "\"consumer_tid\":%u,\"setpos_tid\":%u}\n",
                  [[NSDate date] timeIntervalSince1970] * 1000, getpid(), mouselook_process,
                  mouselook_allowed ? "true" : "false",
                  __atomic_load_n(&raw_on, __ATOMIC_ACQUIRE) ? "raw" : mouselookWindow ? "mouselook" : "legacy",
-@@ -2058,12 +2076,15 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2058,14 +2655,36 @@ - (void) reportInputStats:(NSTimer*)timer
                  cocoa_stats.posted_absolute, cocoa_stats.posted_relative, cocoa_stats.dropped_after_warp,
                  cocoa_stats.warps, cocoa_stats.warp_ns / 1e3, cocoa_stats.mouselook_moves, cocoa_stats.mouselook_posted,
                  cocoa_stats.mouselook_enters, cocoa_stats.mouselook_exits, cocoa_stats.clicks, cocoa_stats.switches,
 +                cocoa_stats.activations, cocoa_stats.resigns, cocoa_stats.resyncs_skipped,
                  raw_queue ? "true" : "false", rawSwitchedOff ? "true" : "false", raw_interval / 1e3,
                  (unsigned long)[rawMice count], raw.moves, raw.posted, raw.dx, raw.dy, __builtin_popcount(raw.sources),
++                (input_flags() & INPUT_REAL_TIME) ? "fixed" : "legacy", raw.posted_x, raw.posted_y,
                  cocoa_stats.pointer_ignored, cocoa_stats.pointer_fallback,
++                cocoa_stats.pointer_unmatched, cocoa_stats.pointer_unmatched_dx, cocoa_stats.pointer_unmatched_dy,
                  wine.moves_delivered, wine.deliver_ns / 1e3, wine.setpos_calls, wine.setpos_fast,
                  wine.setpos_ns / 1e3, wine.setpos_max_ns / 1e3, wine.getpos_calls, wine.getpos_ns / 1e3,
 -                wine.clip_calls, wine.consumer_tid, wine.setpos_tid);
 +                wine.clip_calls, wine.canvas_restores, wine.canvas_restores_suppressed,
 +                wine.canvas_restores_held, wine.canvas_fullscreen_held,
++                wine.moved_relative, wine.moved_x, wine.moved_y, wine.moved_abs,
++                wine.moved_relative ? (double)wine.move_age_ms / wine.moved_relative : 0.0, wine.move_age_max_ms,
++                input_variants[__atomic_load_n(&input_variant, __ATOMIC_RELAXED)].name, test_stretch,
++                cocoa_stats.marks, marks,
++                wine.delivered_timed ? wine.delivery_ns / 1e6 / wine.delivered_timed : 0.0, wine.delivery_max_ns / 1e6,
++                wine.main_waits, wine.main_wait_ns / 1e6, wine.main_wait_max_ns / 1e6,
++                wine.key_checks, wine.key_checks_cached, wine.key_check_ns / 1e6, wine.key_check_max_ns / 1e6,
++                wine.key_query_ns / 1e6,
++                main_lag.probes, main_lag.probes ? main_lag.lag_ns / 1e6 / main_lag.probes : 0.0,
++                main_lag.lag_max_ns / 1e6, main_lag.over_4ms, main_lag.over_16ms,
++                buttons.raw_posted, buttons.raw_duplicates, buttons.appkit_posted, buttons.appkit_copies,
++                buttons.gaps, buttons.gaps ? buttons.gap_ns / 1e6 / buttons.gaps : 0.0, buttons.gap_max_ns / 1e6,
++                buttons.gaps ? buttons.gap_counts / buttons.gaps : 0.0, buttons.gap_counts_max,
++                cocoa_stats.rearms, cocoa_stats.inputs_replaced, [rawMice count] ? [self rawCountsPerPoint] : 0.0,
 +                wine.consumer_tid, wine.setpos_tid);
          fflush(inputStatsFile);
          memset(&cocoa_stats, 0, sizeof(cocoa_stats));
++        memset(&main_lag, 0, sizeof(main_lag));
++        test_mark_count = 0;
++        [self advanceInputTest];
      }
-@@ -2895,6 +2916,7 @@ - (void) setupObservations
+ 
+     - (BOOL) isKeyPressed:(uint16_t)keyCode
+@@ -2439,6 +3058,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+                 unmatchedMouseDowns &= ~downMask;
+             }
+ 
++            // Raw input may have posted this change already, in its place
++            // among the motion.
++            if (process && appkit_button_is_raw_copy((int)[theEvent buttonNumber], pressed, [theEvent timestamp]))
++                process = FALSE;
++
+             if (process)
+             {
+                 macdrv_event* event;
+@@ -2895,6 +3519,7 @@ - (void) setupObservations
                      usingBlock:^(NSNotification *note){
              if (displaysTemporarilyUncapturedForDialog)
              {
@@ -85,7 +927,7 @@ index ce6a702..e9357e1 100644
                  [self applicationDidBecomeActive:nil];
  
                  displaysTemporarilyUncapturedForDialog = FALSE;
-@@ -3238,6 +3260,7 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3238,6 +3863,7 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          if (beenActive)
              [self unminimizeWindowIfNoneVisible];
          beenActive = TRUE;
@@ -93,7 +935,7 @@ index ce6a702..e9357e1 100644
  
          // If a Wine process terminates abruptly while it has the display captured
          // and switched to a different resolution, Mac OS X will uncapture the
-@@ -3248,8 +3271,15 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3248,8 +3874,21 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          //
          // To solve this, we synthesize a displays-changed event whenever we're
          // activated.  This will provoke a re-synchronization of Wine's notion of
@@ -105,13 +947,19 @@ index ce6a702..e9357e1 100644
 +        {
 +            activation_resync_needed = FALSE;
 +            [self sendDisplaysChanged:TRUE];
++            /* The input source may have changed in another application. */
++            [self refreshInputMethodCache];
++            /* Raw input's handlers come back if macOS replaced or cleared them
++               while another application was active (issue #32 suspect). */
++            if (input_flags() & INPUT_FALLBACK)
++                [self rearmRawMice:NO];
 +        }
 +        else
 +            cocoa_stats.resyncs_skipped++;
  
          // The cursor probably moved while we were inactive.  Accumulated mouse
          // movement deltas are invalidated.  Make sure the next mouse move event
-@@ -3257,11 +3287,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3257,11 +3896,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          forceNextMouseMoveAbsolute = TRUE;
  
          [self updateMouselook];
@@ -125,7 +973,7 @@ index ce6a702..e9357e1 100644
          [self sendDisplaysChanged:FALSE];
          [self adjustWindowLevels];
  
-@@ -3276,6 +3308,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
+@@ -3276,6 +3917,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
          macdrv_event* event;
          WineEventQueue* queue;
  
@@ -135,6 +983,85 @@ index ce6a702..e9357e1 100644
          [self updateMouselook];
          [self invalidateGotFocusEvents];
          [self releasePressedKeys];
+@@ -3791,10 +4435,38 @@ void macdrv_quit_reply(int reply)
+ bool macdrv_using_input_method(void)
+ {
+     __block bool ret;
++    unsigned long long start = macdrv_stat_clock();
++    int cached;
++
++    /* Every key down and up a client's input context sees asks this.  The
++       keys variant answers from the cache instead of waiting for the main
++       thread. */
++    if ((input_flags() & INPUT_KEYS_CACHED) &&
++        (cached = __atomic_load_n(&input_method_cached, __ATOMIC_ACQUIRE)) >= 0)
++    {
++        ret = cached;
++        MACDRV_STAT_ADD(key_checks_cached, 1);
++    }
++    else
++    {
++        __block unsigned long long query_ns = 0;
+ 
+-    OnMainThread(^{
+-        ret = [[WineApplicationController sharedController] inputSourceIsInputMethod];
+-    });
++        OnMainThread(^{
++            unsigned long long query = macdrv_stat_clock();
++
++            ret = [[WineApplicationController sharedController] inputSourceIsInputMethod];
++            if (query) query_ns = macdrv_stat_clock() - query;
++        });
++        MACDRV_STAT_ADD(key_query_ns, query_ns);
++    }
++    if (start)
++    {
++        unsigned long long took = macdrv_stat_clock() - start;
++
++        MACDRV_STAT_ADD(key_checks, 1);
++        MACDRV_STAT_ADD(key_check_ns, took);
++        MACDRV_STAT_MAX(key_check_max_ns, took);
++    }
+ 
+     return ret;
+ }
+diff --git a/dlls/winemac.drv/cocoa_event.m b/dlls/winemac.drv/cocoa_event.m
+index d2c478d..96c4a8d 100644
+--- a/dlls/winemac.drv/cocoa_event.m
++++ b/dlls/winemac.drv/cocoa_event.m
+@@ -231,6 +231,8 @@ - (void) postEventObject:(MacDrvEvent*)event
+             }
+ 
+             lastEvent->event->mouse_moved.time_ms = event->event->mouse_moved.time_ms;
++            if (!lastEvent->event->mouse_moved.first_ns)
++                lastEvent->event->mouse_moved.first_ns = event->event->mouse_moved.first_ns;
+         }
+         else
+             [events addObject:event];
+@@ -514,6 +516,7 @@ void OnMainThread(dispatch_block_t block)
+     WineEventQueue* queue = threadDict[WineEventQueueThreadDictionaryKey];
+     dispatch_semaphore_t semaphore = NULL;
+     __block BOOL finished;
++    unsigned long long start = macdrv_stat_clock();
+ 
+     if (!queue)
+     {
+@@ -559,6 +562,15 @@ void OnMainThread(dispatch_block_t block)
+         dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+         dispatch_release(semaphore);
+     }
++
++    if (start)
++    {
++        unsigned long long wait = macdrv_stat_clock() - start;
++
++        MACDRV_STAT_ADD(main_waits, 1);
++        MACDRV_STAT_ADD(main_wait_ns, wait);
++        MACDRV_STAT_MAX(main_wait_max_ns, wait);
++    }
+ }
+ }
+ 
 diff --git a/dlls/winemac.drv/cocoa_v1.h b/dlls/winemac.drv/cocoa_v1.h
 index a58f2f9..bc67bcf 100644
 --- a/dlls/winemac.drv/cocoa_v1.h
@@ -756,15 +1683,85 @@ index 7342494..c031291 100644
      .dc_funcs.pSetDeviceGammaRamp = macdrv_SetDeviceGammaRamp,
      .dc_funcs.priority = GDI_PRIORITY_GRAPHICS_DRV,
 diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
-index 4d4efaa..5845bef 100644
+index 4d4efaa..aee3568 100644
 --- a/dlls/winemac.drv/macdrv_cocoa.h
 +++ b/dlls/winemac.drv/macdrv_cocoa.h
-@@ -249,6 +249,8 @@ static inline CGPoint cgpoint_win_from_mac(CGPoint point)
+@@ -249,12 +249,35 @@ static inline CGPoint cgpoint_win_from_mac(CGPoint point)
      unsigned long long setpos_calls, setpos_fast, setpos_ns, setpos_max_ns;
      unsigned long long getpos_calls, getpos_ns;
      unsigned long long clip_calls;
 +    unsigned long long canvas_restores, canvas_restores_suppressed;
 +    unsigned long long canvas_restores_held, canvas_fullscreen_held;
++    /* Relative moves Wine sent on: their counts (signed sums and magnitude)
++       and how old their Windows event time was, in milliseconds. */
++    unsigned long long moved_relative, moved_abs, move_age_ms, move_age_max_ms;
++    long long moved_x, moved_y;
++    /* Raw moves timed from their oldest GCMouse report to Wine sending them on. */
++    unsigned long long delivered_timed, delivery_ns, delivery_max_ns;
++    /* Waits of Wine threads for the main thread (OnMainThread); and the input
++       method check of key presses (macdrv_using_input_method): how many, how
++       many from the cache, the time in all and the longest, and the main
++       thread's share of it. */
++    unsigned long long main_waits, main_wait_ns, main_wait_max_ns;
++    unsigned long long key_checks, key_checks_cached, key_check_ns, key_check_max_ns, key_query_ns;
      unsigned int consumer_tid, setpos_tid;
  };
  extern struct macdrv_input_stats macdrv_input_stats;
+ extern bool macdrv_input_stats_on;
+ #define MACDRV_STAT_ADD(field, value) \
+     do { if (macdrv_input_stats_on) __atomic_fetch_add(&macdrv_input_stats.field, (value), __ATOMIC_RELAXED); } while (0)
++static inline void macdrv_stat_max(unsigned long long *field, unsigned long long value)
++{
++    unsigned long long old = __atomic_load_n(field, __ATOMIC_RELAXED);
++    while (value > old && !__atomic_compare_exchange_n(field, &old, value, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
++}
++#define MACDRV_STAT_MAX(field, value) \
++    do { if (macdrv_input_stats_on) macdrv_stat_max(&macdrv_input_stats.field, (value)); } while (0)
++/* Times statistics only: it reads 0 while they are off, so nothing that
++   changes behaviour may be timed with it. */
+ static inline unsigned long long macdrv_stat_clock(void)
+ {
+     return macdrv_input_stats_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+@@ -419,6 +442,7 @@ static inline unsigned long long macdrv_stat_clock(void)
+             int             y;
+             bool            drag;
+             unsigned long   time_ms;
++            unsigned long long first_ns;    /* statistics: uptime of its oldest raw report, or 0 */
+         }                                           mouse_moved;
+         struct {
+             int             x_scroll;
+diff --git a/dlls/winemac.drv/mouse.c b/dlls/winemac.drv/mouse.c
+index 59f891e..40d60d1 100644
+--- a/dlls/winemac.drv/mouse.c
++++ b/dlls/winemac.drv/mouse.c
+@@ -956,6 +956,30 @@ void macdrv_mouse_moved(HWND hwnd, const macdrv_event *event)
+         macdrv_input_stats.consumer_tid = HandleToULong(NtCurrentTeb()->ClientId.UniqueThread);
+         MACDRV_STAT_ADD(moves_delivered, 1);
+         MACDRV_STAT_ADD(deliver_ns, macdrv_stat_clock() - start);
++        if (event->type == MOUSE_MOVED_RELATIVE)
++        {
++            /* Windows tick counts wrap at 32 bits; an event time a little
++               ahead of the tick count is no age at all. */
++            DWORD age = NtGetTickCount() - (DWORD)event->mouse_moved.time_ms;
++            unsigned long long age_ms = age < 0x80000000 ? age : 0;
++
++            MACDRV_STAT_ADD(moved_relative, 1);
++            MACDRV_STAT_ADD(moved_x, event->mouse_moved.x);
++            MACDRV_STAT_ADD(moved_y, event->mouse_moved.y);
++            MACDRV_STAT_ADD(moved_abs, (unsigned long long)abs(event->mouse_moved.x) + abs(event->mouse_moved.y));
++            MACDRV_STAT_ADD(move_age_ms, age_ms);
++            if (age_ms > macdrv_input_stats.move_age_max_ms)
++                macdrv_input_stats.move_age_max_ms = age_ms;
++            /* From the oldest GCMouse report in it, whatever its event time. */
++            if (event->mouse_moved.first_ns)
++            {
++                unsigned long long delay = macdrv_stat_clock() - event->mouse_moved.first_ns;
++
++                MACDRV_STAT_ADD(delivered_timed, 1);
++                MACDRV_STAT_ADD(delivery_ns, delay);
++                MACDRV_STAT_MAX(delivery_max_ns, delay);
++            }
++        }
+     }
+ }
+ 

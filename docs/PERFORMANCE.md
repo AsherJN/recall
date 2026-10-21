@@ -98,3 +98,9 @@ drawing new views, which happens in every app.
 These figures describe how each driver handles the mouse. They come from
 engineering tests of Wine's standard Mac driver and of Recall's, not from the
 benchmark runs above.
+
+**macOS mouse acceleration.** You don't need to turn it off for Overwatch. In a
+match, Recall reads your mouse's own movement, as Windows does for games, so
+macOS's mouse acceleration and tracking speed don't change your aim; your
+Overwatch sensitivity does. They still apply to the pointer in menus. A trackpad
+aims with the macOS pointer, acceleration included.

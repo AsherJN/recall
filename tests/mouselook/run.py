@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Mouselook driver probe: shooter-style cursor handling, previous behaviour versus mouselook.
 
-Runs tests/mouselook/probe.c three times on the mouselook test runtime (scripts/mouselook_session.py
+Runs tests/mouselook/probe.c four times on the mouselook test runtime (scripts/mouselook_session.py
 prepare): with mouselook not allowed (the previous behaviour, same driver), with mouselook from pointer
-events only (WINEMAC_MOUSELOOK_RAW=0), and with mouselook and raw input, the default. The probe takes
-the foreground and moves the pointer for about 15 seconds per run.
+events only (WINEMAC_MOUSELOOK_RAW=0), with mouselook and raw input, the default, and once more as
+players run it: the launch settings' input variant with the input statistics off. Only the statistics
+show which variant ran, so the third run checks that and the fourth checks the probe's own measurements.
+The probe takes the foreground and moves the pointer for about 15 seconds per run.
 Uses a scratch Windows prefix under runtime/mouselook, never the Overwatch environment.
 Exit status 1 if mouselook does not engage, raw input does not start inside Wine or find a mouse,
 raw input slows re-centring, or any cursor position the game can see changes. Real mouse motion needs the play-test: macOS gives
 the probe no way to move the mouse itself.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -27,6 +30,7 @@ EXE = WORK / 'probe/mouselook_probe.exe'
 SOURCE = Path(__file__).resolve().parent / 'probe.c'
 MINGW = ROOT / 'runtime/toolchains/llvm-mingw-20251216-ucrt-macos-universal/bin/x86_64-w64-mingw32-clang'
 ENGINE = mouselook_session.ENGINE
+PLAYERS_VARIANT = mouselook_session.players_variant()
 
 
 def environment(extra=None):
@@ -58,13 +62,15 @@ def prepare():
         server('-w')
 
 
-def run(allowed, raw=True):
+def run(allowed, raw=True, variant=None, stats=True):
     with tempfile.TemporaryDirectory() as tmp:
-        extra = {'WINEMAC_INPUT_STATS': os.path.join(tmp, 'input')}
+        extra = {'WINEMAC_INPUT_STATS': os.path.join(tmp, 'input')} if stats else {}
         if allowed:
             extra['WINEMAC_MOUSELOOK'] = EXE.name
         if allowed and not raw:
             extra['WINEMAC_MOUSELOOK_RAW'] = '0'
+        if allowed and raw and variant:
+            extra['WINEMAC_INPUT_VARIANT'] = variant
         result = wine([EXE], extra)
         server('-k')
         phases = {}
@@ -81,13 +87,20 @@ def run(allowed, raw=True):
     totals['raw_seen'] = any(line['mode'] == 'raw' for line in stats)
     totals['raw_started'] = any(line.get('raw_started') for line in stats)
     totals['raw_mice'] = max((line.get('raw_mice', 0) for line in stats), default=0)
+    totals['variant'] = sorted({line.get('variant', 'legacy') for line in stats if line['mode'] == 'raw'})
     totals['clip_handler'] = sorted({line['clip_handler'] for line in stats})
     return {'phases': phases, 'driver': totals, 'exit_status': result.returncode}
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--variant', default=PLAYERS_VARIANT,
+                        help=f"Input variant for the raw input runs (WINEMAC_INPUT_VARIANT; default the players' "
+                             f'{PLAYERS_VARIANT}, from the launch settings)')
+    args = parser.parse_args()
     prepare()
-    results = {'previous': run(False), 'pointer': run(True, raw=False), 'mouselook': run(True)}
+    results = {'previous': run(False), 'pointer': run(True, raw=False), 'mouselook': run(True, variant=args.variant),
+               'players': run(True, variant=args.variant, stats=False)}
     failures = []
     for mode, result in results.items():
         if set(result['phases']) != {'visible', 'aiming'}:
@@ -115,6 +128,8 @@ def main():
             failures.append('raw input did not start inside Wine (Game Controller framework)')
         elif not mouselook['driver']['raw_mice']:
             failures.append('raw input found no mouse (GCMouse)')
+        elif mouselook['driver']['variant'] != [args.variant]:
+            failures.append(f'raw input ran {mouselook["driver"]["variant"]}, not {args.variant}')
         # Without the Mac pointer, a re-centre is Wine's own server work only.
         fast, slow = mouselook['phases']['aiming']['setpos_median_us'], previous['phases']['aiming']['setpos_median_us']
         if fast > 150 or fast * 4 > slow:
@@ -123,6 +138,10 @@ def main():
         plain = pointer['phases']['aiming']['setpos_median_us']
         if fast > plain * 1.5 + 25:
             failures.append(f're-centring is slower with raw input ({fast:.0f} us versus {plain:.0f} us without)')
+        # As players run it, without statistics: re-centring stays as fast as with them.
+        played = results['players']['phases']['aiming']['setpos_median_us']
+        if played > 150 or played > fast * 1.5 + 25:
+            failures.append(f're-centring is slower as players run it ({played:.0f} us versus {fast:.0f} us)')
     print(f'{"run/phase":20} {"frame ms":>9} {"re-centre median":>17} {"mean":>9} {"p99":>9} {"max":>9} {"server trip":>12}')
     for mode, result in results.items():
         for name, phase in result['phases'].items():

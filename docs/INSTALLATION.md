@@ -28,13 +28,24 @@ Then open Recall from Applications and follow the setup steps. To update, run
 `brew update` and then `brew upgrade --cask recall`; **Update Now** in the app
 works too. To remove Recall and the game, run `brew uninstall --zap --cask recall`.
 
+**Why not `brew install --cask recall`?** Homebrew's official catalog doesn't
+accept apps whose GitHub repository is less than 30 days old, so for now Recall
+comes from its own tap, `asherjn/recall`. I plan to submit Recall to the catalog
+in November; once it's accepted, the shorter command will work. A tap can install
+anything its owner publishes, so only add taps from people you trust.
+
 ## Your first matches
 
-Your first matches can stutter briefly while your Mac prepares Overwatch's
-graphics. To get ahead of it, play Workshop code **929PJ** from Custom Games
-before you queue and let it run for 5 to 10 minutes. Recall shows the code after
-setup, with a **Copy Code** button. Do the same any time your matches start to
-stutter. The mode was made by u/Working_Dealer_5102.
+Your first 5 to 10 matches will stutter while your Mac learns Overwatch. It gets
+smoother every match; most players are smooth at about 10,000 to 15,000 shaders.
+Recall's Play screen shows your count.
+
+To speed it up, play Workshop code **929PJ** for 5 to 10 minutes: in Overwatch,
+choose **Play › Custom Games › Create › Settings › Import Code**, paste the code
+and start. The mode was made by u/Working_Dealer_5102. Or open **Play › Custom
+Games**, search for **500%** and join a game.
+
+Still stuttering after 15,000 shaders? See [SUPPORT.md](SUPPORT.md) to report it.
 
 ## Requirements
 

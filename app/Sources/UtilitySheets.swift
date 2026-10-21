@@ -37,6 +37,9 @@ struct SettingsSheet:View {
     @State private var confirmDeleteShaders=false
     @State private var confirmKorean=false
     @State private var aboutUpscaling=false
+    /// Logging: the setting waiting for the FPS warning's Turn On, and Custom's text being typed.
+    @State private var confirmLogging:LoggingSetting?
+    @State private var customDraft:String?
     /// Shader memory's slider: how many of the shader cache's parts Overwatch loads.
     @State private var shaderParts=1.0
     /// Follows System Settings: the main display can change while Settings is open.
@@ -86,16 +89,20 @@ struct SettingsSheet:View {
                 Button(L("Cancel"),role:.cancel) {}
                 Button(L("Repair"),action:model.repair)
             } message: { Text(L("Overwatch and Battle.net must be closed. This reinstalls the files this app adds and refreshes the Windows environment. Overwatch, its settings and your Battle.net sign-in are kept.")) }
-            .sheet(isPresented:$confirmKorean) { KoreanSupportSheet { model.setAdvanced(.koreanSupport,true) } }
+            .sheet(isPresented:$confirmKorean) { KoreanSupportSheet { model.chooseRegion(.korea) } }
             .alert(L("Reset display settings?"),isPresented:$confirmResetDisplay) {
                 Button(L("Cancel"),role:.cancel) {}
                 Button(L("Reset"),action:model.resetDisplay)
             } message: { Text(model.rememberEachDisplay ? L("Overwatch will open full screen at {0} on this display the next time it starts. Your graphics quality and FPS settings stay as they are.",DisplayResolution.initial(for:main).label)
-                                                          : L("Overwatch will open full screen at {0} the next time it starts. Your graphics quality and FPS settings stay as they are.",DisplayResolution.initial(for:main).label)) }
-            .alert(L("Delete shaders?"),isPresented:$confirmDeleteShaders) {
+                                                         : L("Overwatch will open full screen at {0} the next time it starts. Your graphics quality and FPS settings stay as they are.",DisplayResolution.initial(for:main).label)) }
+            .alert(L("Turn on logging?"),isPresented:Binding(get:{ confirmLogging != nil },set:{ if !$0 { confirmLogging=nil } })) {
                 Button(L("Cancel"),role:.cancel) {}
-                Button(L("Delete"),role:.destructive,action:model.deleteShaders)
-            } message: { Text(L("Do you really want to delete the shader cache? You might experience stuttering until the shaders are rebuilt again.")) }
+                Button(L("Turn On")) { if let next=confirmLogging { turnOnLogging(next) } }
+            } message: { Text(L("Logging can lower your FPS while it’s on. {0} shows a reminder on its home screen until you turn it off.",Brand.name)) }
+            .alert(L("Clear shader cache?"),isPresented:$confirmDeleteShaders) {
+                Button(L("Cancel"),role:.cancel) {}
+                Button(L("Clear"),role:.destructive,action:model.deleteShaders)
+            } message: { Text(clearShaderCacheMessage) }
     }
     @ViewBuilder private var page:some View {
         switch model.settingsTab {
@@ -109,12 +116,13 @@ struct SettingsSheet:View {
             upscaling
             metalHUD
             shaderMemory
-            deleteShaders
+            clearShaderCache
         case .audio:
             microphone
             sound
         case .advanced:
             troubleshooting
+            logs
             advanced
         }
     }
@@ -156,18 +164,26 @@ struct SettingsSheet:View {
             VStack(alignment:.leading,spacing:6) {
                 SettingSwitch(title:L("Open Battle.net when {0} opens",Brand.name),detail:L("Turn off to start Battle.net yourself with Open Battle.net."),
                               isOn:$model.autoOpenBattleNet)
-                // Global or China's Battle.net (BattleNetChoice.swift); changing it sets up again.
+                // Global, Korea or China's Battle.net (BattleNetChoice.swift, AppModel.chooseRegion):
+                // Korea asks first; to or from China, setup starts again. Battle.net carries Korean
+                // account support from when it opens, so the region changes while it's closed.
                 if model.clientInstalled {
                     Divider().padding(.vertical,6)
                     HStack(alignment:.center,spacing:12) {
                         VStack(alignment:.leading,spacing:2) {
                             Text(L("Battle.net region")).font(LauncherStyle.font(14,.semibold))
-                            Text(model.installedRegion.title).font(LauncherStyle.font(12)).foregroundStyle(.secondary)
+                            Text(model.installedRegion.detail).font(LauncherStyle.font(12)).foregroundStyle(.secondary)
+                                .fixedSize(horizontal:false,vertical:true)
                         }
                         Spacer(minLength:12)
-                        Button(L("Change…")) { model.regionChange = .idle;model.sheet = .changeRegion }
-                            .buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(model.busy || model.uninstall == .working)
+                        Picker(L("Battle.net region"),selection:Binding(get:{ model.installedRegion },set:{ next in
+                            if next == .korea && model.installedRegion == .global { confirmKorean=true } else { model.chooseRegion(next) }
+                        })) {
+                            ForEach(BattleNetRegion.allCases) { Text($0.title).tag($0) }
+                        }.labelsHidden().pickerStyle(.menu).fixedSize()
+                            .disabled(model.busy || model.uninstall == .working || model.running != nil)
                     }
+                    if let running=model.running { closeFirst(running,several:false) }
                 }
             }
         }
@@ -291,7 +307,7 @@ struct SettingsSheet:View {
                         Image(systemName:"info.circle").font(.system(size:14))
                     }.buttonStyle(.borderless).foregroundStyle(.secondary)
                         .help(L("About MetalFX upscaling")).accessibilityLabel(L("About MetalFX upscaling"))
-                        .popover(isPresented:$aboutUpscaling,arrowEdge:.bottom) { MetalFXInfo() }
+                        .infoPopover(isPresented:$aboutUpscaling) { MetalFXInfo() }
                 }
                 Divider().padding(.vertical,6)
                 HStack(alignment:.center,spacing:12) {
@@ -372,17 +388,34 @@ struct SettingsSheet:View {
             shaderParts=Double(max(1,ShaderMemory.loaded(model.shaderMemory,model.shaderPack)))
         }
     }
-    /// Delete Shaders, under the Shader memory panel: empty the prepared shader cache so
-    /// every shader builds again from scratch after the next match. The confirmation asks.
-    private var deleteShaders:some View {
-        LauncherPanel(inset:16) {
-            action(L("Delete Shaders"),detail:L("Clears your shader cache. Use this if you experience shader related issues."),button:L("Delete")) { confirmDeleteShaders=true }
-        }
+    /// Clear Shader Cache, under Shader memory (owner, October 17; from @dagadtwok's pull
+    /// request, #37): for crashes and glitches a damaged cache can cause. Its confirmation says
+    /// how much goes and what the next matches are like. Battle.net and Overwatch must be closed,
+    /// and a preparation after a match left to finish; with nothing saved yet there's nothing to clear.
+    private var clearShaderCache:some View {
+        let empty=model.shaderCacheBytes.map { $0 < 1<<20 } ?? false
+        return LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:6) {
+                action(L("Clear Shader Cache…"),detail:empty ? L("Nothing to clear yet.") : L("If Overwatch crashes or shows graphics glitches."),button:L("Clear"),
+                       disabled:empty || model.running != nil || model.preparingAfterMatch) { confirmDeleteShaders=true }
+                if let running=model.running { closeFirst(running,several:false,clearing:true) }
+                else if model.preparingAfterMatch && !empty {
+                    Text(L("Available once {0} finishes preparing shaders.",Brand.name))
+                        .font(LauncherStyle.font(12,.medium)).fixedSize(horizontal:false,vertical:true).padding(.top,6)
+                }
+            }
+        }.onAppear { model.measureShaderCache();model.checkAfterMatch() }
+    }
+    private var clearShaderCacheMessage:String {
+        let rebuild=L("Your next few matches will stutter again while your Mac relearns them. Your game files and settings stay as they are.")
+        guard let bytes=model.shaderCacheBytes,bytes >= 1<<20 else { return sentences(L("{0} will delete the shaders it has saved for Overwatch.",Brand.name),rebuild) }
+        return sentences(L("{0} will delete the {1} of shaders it has saved for Overwatch.",Brand.name,ByteCountFormatter.string(fromByteCount:bytes,countStyle:.file)),rebuild)
     }
     /// A setting Battle.net carries from when it opens: change it once it's closed.
-    private func closeFirst(_ running:AppModel.Running, several:Bool) -> some View {
+    private func closeFirst(_ running:AppModel.Running, several:Bool, clearing:Bool=false) -> some View {
         HStack(spacing:12) {
-            Text(running == .game ? (several ? L("Quit Overwatch to change these.") : L("Quit Overwatch to change this."))
+            Text(clearing ? (running == .game ? L("Quit Overwatch and close Battle.net to clear it.") : L("Close Battle.net to clear it."))
+                 : running == .game ? (several ? L("Quit Overwatch to change these.") : L("Quit Overwatch to change this."))
                                   : (several ? L("Close Battle.net to change these.") : L("Close Battle.net to change this.")))
                 .font(LauncherStyle.font(12,.medium)).fixedSize(horizontal:false,vertical:true)
             Spacer(minLength:8)
@@ -443,7 +476,83 @@ struct SettingsSheet:View {
             }
         }
     }
-    private func action(_ title:String, detail:String, button:String, _ perform:@escaping ()->Void) -> some View {
+    /// Logging (LoggingSetting) and Save Logs (LogBundle). Battle.net carries the setting from when it
+    /// opens, so it changes while Battle.net is closed; turning it on warns about FPS first. Custom
+    /// takes Wine's own text, checked as it's typed. Save Logs works any time, logging on or off.
+    private var logs:some View {
+        let shown=customDraft != nil ? LoggingSetting.custom : model.logging
+        return LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:6) {
+                HStack(alignment:.center,spacing:12) {
+                    VStack(alignment:.leading,spacing:2) {
+                        Text(L("Logging")).font(LauncherStyle.font(14,.semibold))
+                        Text(sentences(shown.detail,shown == .off ? L("Can lower your FPS while it’s on.") : ""))
+                            .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Spacer(minLength:12)
+                    Picker(L("Logging"),selection:Binding(get:{ shown },set:{ chooseLogging($0) })) {
+                        ForEach(LoggingSetting.allCases) { Text($0.title).tag($0) }
+                    }.labelsHidden().pickerStyle(.menu).fixedSize().disabled(model.running != nil || !model.canChangeAdvanced)
+                }
+                if shown == .custom { customLogging }
+                if let running=model.running { closeFirst(running,several:false) }
+                Divider().padding(.vertical,6)
+                HStack(alignment:.center,spacing:12) {
+                    VStack(alignment:.leading,spacing:2) {
+                        Text(L("Save Logs")).font(LauncherStyle.font(14,.medium))
+                        Text(savedLogs ?? L("Your recent sessions’ logs in one file for a bug report, with personal details removed. Works with logging off too."))
+                            .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Spacer(minLength:12)
+                    Button(model.savingLogs ? L("Saving…") : L("Save…"),action:model.saveLogs).buttonStyle(.bordered).buttonBorderShape(.capsule)
+                        .disabled(model.savingLogs).accessibilityLabel(L("Save logs"))
+                }
+            }
+        }
+    }
+    private var savedLogs:String? {
+        model.savedLogs.map { L("Saved {0} ({1}). Attach it to your GitHub issue.",$0.name,ByteCountFormatter.string(fromByteCount:$0.bytes,countStyle:.file)) }
+    }
+    /// Custom: Wine's WINEDEBUG text, as the player would type it in Terminal. It's used once it's
+    /// valid and turned on (or updated); until then the setting stays as it was.
+    private var customLogging:some View {
+        let draft=customDraft ?? model.loggingCustom
+        let text=LoggingSetting.normalized(draft)
+        let valid=LoggingSetting.valid(text)
+        let changed=model.logging != .custom || text != model.loggingCustom
+        return VStack(alignment:.leading,spacing:8) {
+            TextField(L("Logging settings"),text:Binding(get:{ customDraft ?? model.loggingCustom },set:{ customDraft=$0 }),prompt:Text(verbatim:"fixme-all,+seh,+loaddll"))
+                .font(.system(size:12,design:.monospaced)).textFieldStyle(.roundedBorder).disabled(model.running != nil)
+                .onSubmit { if valid && changed { applyCustom(text) } }
+            Text(text.isEmpty || valid ? L("As you’d set WINEDEBUG in Terminal: items separated by commas, such as +seh or warn+all.")
+                                       : L("Wine wouldn’t understand this. Use items separated by commas, such as +seh or warn+all."))
+                .font(LauncherStyle.font(12)).foregroundStyle(text.isEmpty || valid ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red)).fixedSize(horizontal:false,vertical:true)
+            if changed {
+                HStack(spacing:8) {
+                    Button(model.logging == .custom ? L("Update") : L("Turn On")) { applyCustom(text) }
+                        .buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(!valid || model.running != nil)
+                    if customDraft != nil { Button(L("Cancel")) { customDraft=nil }.buttonStyle(.borderless) }
+                }
+            }
+        }.padding(.top,4)
+    }
+    private func chooseLogging(_ next:LoggingSetting) {
+        if next == .custom { if model.logging != .custom { customDraft=model.loggingCustom };return }
+        customDraft=nil
+        if next == .off { model.logging = .off }
+        else if model.logging == .off { confirmLogging=next }
+        else { model.logging=next }
+    }
+    private func applyCustom(_ text:String) {
+        guard LoggingSetting.valid(text) else { return }
+        model.loggingCustom=text
+        if model.logging == .off { confirmLogging = .custom } else { model.logging = .custom;customDraft=nil }
+    }
+    private func turnOnLogging(_ next:LoggingSetting) {
+        model.logging=next
+        if next == .custom { customDraft=nil }
+    }
+    private func action(_ title:String, detail:String, button:String, disabled:Bool=false, _ perform:@escaping ()->Void) -> some View {
         HStack(alignment:.center,spacing:12) {
             VStack(alignment:.leading,spacing:2) {
                 Text(title).font(LauncherStyle.font(14,.medium))
@@ -451,25 +560,19 @@ struct SettingsSheet:View {
             }
             Spacer(minLength:12)
             Button(button,action:perform).buttonStyle(.bordered).buttonBorderShape(.capsule)
-                .disabled(model.busy || !model.clientInstalled)
+                .disabled(disabled || model.busy || !model.clientInstalled)
         }
     }
     /// Rarely needed: a network that hands out its proxy automatically (Recall connects
-    /// directly, issue #15), and Korean accounts linked to Nexon (#16). Battle.net and
-    /// Overwatch carry both from when they start.
+    /// directly, issue #15). Battle.net and Overwatch carry it from when they start. Korean
+    /// accounts linked to Nexon (#16) are the Korea region, in General, from 1.4.1.
     private var advanced:some View {
         let locked=model.running != nil || !model.canChangeAdvanced
         return LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
                 SettingSwitch(title:L("Detect network proxy automatically"),detail:L("Only needed on some work or school networks."),
                               isOn:Binding(get:{ model.proxyAutoDetect },set:{ model.setAdvanced(.proxyAutoDetect,$0) }),disabled:locked)
-                Divider().padding(.vertical,6)
-                // Turning it on asks first (account risk); turning it off doesn't.
-                SettingSwitch(title:L("Korean account support (한국 계정 지원)"),detail:L("For Korean accounts linked to Nexon. Experimental."),
-                              isOn:Binding(get:{ model.koreanSupport },set:{ on in
-                                  if on { confirmKorean=true } else { model.setAdvanced(.koreanSupport,false) }
-                              }),disabled:locked)
-                if let running=model.running { closeFirst(running,several:true) }
+                if let running=model.running { closeFirst(running,several:false) }
             }
         }
     }
@@ -533,45 +636,40 @@ struct MetalFXInfo:View {
             .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
     }
 }
-/// Asked before Korean account support turns on: what it changes and the account risk, in
-/// Recall's language and in Korean (Recall has no Korean interface yet). Return doesn't confirm.
+/// Shown when Korea is chosen (Choose your Battle.net's Continue, or Settings › General ›
+/// Battle.net region): what Recall changes for Korean accounts linked to Nexon (the worker's
+/// Korean account support, portable_korea.h) and the account risk. Return doesn't confirm.
 struct KoreanSupportSheet:View {
-    let turnOn:()->Void
+    let confirm:()->Void
     @Environment(\.dismiss) private var dismiss
-    static var english:[String] { [
-        L("This experimental option lets Overwatch run on Korean accounts linked to Nexon. Recall adds a security certificate the game checks when it starts. Nexon’s anti-cheat also takes screenshots of the game now and then, which Wine on a Mac can’t take, so the game crashes. Recall hands the anti-cheat a blank image instead."),
-        L("This doesn’t turn off Nexon’s anti-cheat, but Nexon doesn’t support playing on a Mac, so using it could affect your account.")] }
-    static let korean=[
-        "이 실험적 기능을 켜면 넥슨과 연동된 한국 계정으로 오버워치를 플레이할 수 있습니다. Recall은 게임이 시작할 때 확인하는 보안 인증서를 추가합니다. 또한 넥슨의 안티치트는 가끔 게임 화면을 캡처하는데, Mac의 Wine에서는 이 캡처를 할 수 없어 게임이 강제 종료됩니다. 그래서 Recall은 대신 빈 이미지를 전달합니다.",
-        "이 기능은 넥슨의 안티치트를 끄지 않습니다. 하지만 넥슨은 Mac에서의 플레이를 지원하지 않으므로, 이 기능을 사용하면 계정에 영향이 있을 수 있습니다."]
     var body:some View {
         VStack(spacing:24) {
-            SheetHero(symbol:"exclamationmark.shield",title:L("Turn on Korean account support?"),subtitle:"한국 계정 지원을 켜시겠습니까?")
+            SheetHero(symbol:"exclamationmark.shield",title:L("Play on a Korean account?"),subtitle:L("For Korean accounts linked to Nexon."))
             LauncherPanel(inset:20) {
                 VStack(alignment:.leading,spacing:12) {
-                    ForEach(Self.english,id:\.self,content:paragraph)
-                    Divider().padding(.vertical,4)
-                    ForEach(Self.korean,id:\.self,content:paragraph)
+                    paragraph(L("What changes."),L("{0} adds a security certificate the game checks when it starts. Nexon’s anti-cheat also takes screenshots of the game now and then, which Wine on a Mac can’t take, so the game would crash. {0} hands the anti-cheat a blank image instead.",Brand.name))
+                    paragraph(L("Your account."),L("Overwatch in Korea includes Nexon’s anti-cheat. {0} doesn’t turn it off, but Nexon doesn’t support playing on a Mac, so playing this way could affect your account.",Brand.name))
+                    paragraph(L("Switching later."),L("Korea uses Global’s Battle.net, so you can switch between them in Settings › General › Battle.net region and keep your installation."))
                 }
             }
             HStack(spacing:16) {
-                Button(L("Cancel 취소")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                Button(L("Cancel")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                     .controlSize(.large).keyboardShortcut(.cancelAction)
                 Spacer()
-                Button { turnOn();dismiss() } label: { Text(L("Turn On 켜기")).font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
+                Button { confirm();dismiss() } label: { Text(L("Continue")).font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
                     .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)
                     .tint(LauncherStyle.accent).foregroundStyle(LauncherStyle.ink)
             }
         }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
             .tint(.primary).background { LauncherBackground() }
     }
-    private func paragraph(_ text:String) -> some View {
-        Text(text).font(LauncherStyle.font(13)).lineSpacing(3).foregroundStyle(.secondary)
-            .frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
+    private func paragraph(_ lead:String,_ text:String) -> some View {
+        Text("\(Text(lead).fontWeight(.semibold).foregroundStyle(.primary))\(AppLanguage.gap)\(Text(text).foregroundStyle(.secondary))")
+            .font(LauncherStyle.font(13)).lineSpacing(3).frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
     }
 }
 /// Shown when China's Battle.net is chosen (Choose your Battle.net's Continue): how signing in
-/// works and the account risk, as Korean account support asks. Return doesn't confirm.
+/// works and the account risk, as Korea's asks. Return doesn't confirm.
 struct ChinaBattleNetSheet:View {
     let confirm:()->Void
     @Environment(\.dismiss) private var dismiss
@@ -601,18 +699,17 @@ struct ChinaBattleNetSheet:View {
             .font(LauncherStyle.font(13)).lineSpacing(3).frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
     }
 }
-/// Settings › General › Battle.net region › Change: what switching does, then the installation
-/// going to the Trash (AppModel.changeRegion), after which setup starts at Choose your Battle.net
-/// with the other region. Return never switches.
+/// Settings › General › Battle.net region, to or from China's: what switching does, then the
+/// installation going to the Trash (AppModel.changeRegion), after which setup starts at Choose
+/// your Battle.net with the region chosen (AppModel.regionTarget). Return never switches.
 struct ChangeRegionSheet:View {
     @Bindable var model:AppModel
     @Environment(\.dismiss) private var dismiss
-    private var target:BattleNetRegion { model.installedRegion == .china ? .global : .china }
     var body:some View {
         VStack(spacing:24) {
             switch model.regionChange {
             case .idle, .failed:
-                SheetHero(symbol:"globe",title:target == .china ? L("Switch to China’s Battle.net?") : L("Switch to Global Battle.net?"),
+                SheetHero(symbol:"globe",title:L("Switch to {0}?",model.regionTarget.title),
                           subtitle:L("Accounts don’t carry over between Global and China’s Battle.net, so each needs its own installation."))
                 LauncherPanel {
                     VStack(alignment:.leading,spacing:10) {
@@ -899,27 +996,30 @@ struct WhatsNewSheet:View {
     var body:some View {
         VStack(spacing:24) {
             SheetHero(symbol:"sparkles",title:L("What’s new in {0}",WhatsNew.version),subtitle:"\(Brand.name) \(UpdateCheck.installed)")
+            // A long list scrolls inside the panel, so the sheet fits the smallest window.
             LauncherPanel {
-                VStack(alignment:.leading,spacing:16) {
-                    ForEach(WhatsNew.items.indices,id:\.self) { index in
-                        let item=WhatsNew.items[index]
-                        HStack(alignment:.top,spacing:14) {
-                            Image(systemName:item.symbol).font(.system(size:17,weight:.medium)).foregroundStyle(LauncherStyle.accent)
-                                .frame(width:24).accessibilityHidden(true)
-                            VStack(alignment:.leading,spacing:3) {
-                                Text(item.title).font(LauncherStyle.font(14,.semibold))
-                                Text(item.detail).font(LauncherStyle.font(13)).lineSpacing(2).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                ScrollView {
+                    VStack(alignment:.leading,spacing:16) {
+                        ForEach(WhatsNew.items.indices,id:\.self) { index in
+                            let item=WhatsNew.items[index]
+                            HStack(alignment:.top,spacing:14) {
+                                Image(systemName:item.symbol).font(.system(size:17,weight:.medium)).foregroundStyle(LauncherStyle.accent)
+                                    .frame(width:24).accessibilityHidden(true)
+                                VStack(alignment:.leading,spacing:3) {
+                                    Text(item.title).font(LauncherStyle.font(14,.semibold))
+                                    Text(item.detail).font(LauncherStyle.font(13)).lineSpacing(2).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                                }
                             }
                         }
-                    }
-                }
-            }
+                    }.frame(maxWidth:.infinity,alignment:.leading)
+                }.scrollBounceBehavior(.basedOnSize).frame(maxHeight:.infinity)
+            }.frame(maxHeight:.infinity)
             HStack(spacing:16) {
                 Link(L("Release Notes"),destination:Brand.releases).font(LauncherStyle.font(13))
                 Spacer()
                 LauncherPrimaryAction(title:L("Continue")) { dismiss() }.keyboardShortcut(.defaultAction).closesOnEscape { dismiss() }
             }
-        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth,height:LauncherStyle.largeSheetHeight)
             .tint(.primary).background { LauncherBackground() }
     }
 }
