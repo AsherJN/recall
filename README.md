@@ -129,6 +129,8 @@ Yes. There's no price, trial, subscription, ad or Recall account, and the code i
 No. Recall includes everything it needs to run Overwatch on your Mac. You don't need to buy CrossOver or install Windows, and Boot Camp doesn't exist on Apple Silicon Macs.
 </details>
 
+<a name="faq-account-safety"></a>
+
 <details>
 <summary><b>Is it safe for my Blizzard account?</b></summary>
 
