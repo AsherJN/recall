@@ -1360,7 +1360,7 @@ index 23ecd6d..b4520d0 100644
  
  @end
 diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
-index 94fe12a..96c91df 100644
+index 94fe12a..65fe916 100644
 --- a/dlls/winemac.drv/cocoa_window.m
 +++ b/dlls/winemac.drv/cocoa_window.m
 @@ -528,6 +528,16 @@ - (void) updateLayer
@@ -1494,6 +1494,25 @@ index 94fe12a..96c91df 100644
          else [window setFrameFromWine:NSRectFromCGRect(cgrect_mac_from_win(*new_frame))];
      });
  }
+@@ -4188,6 +4260,7 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
+             NSUInteger localFlags = flags;
+             CGEventRef c;
+             NSEvent* event;
++            NSTextInputContext* context;
+ 
+             window.himc = himc;
+             fix_device_modifiers_by_generic(&localFlags);
+@@ -4202,7 +4275,9 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
+             CFRelease(c);
+ 
+             window.commandDone = FALSE;
+-            ret = [[[window contentView] inputContext] handleEvent:event] && !window.commandDone;
++            context = [[window contentView] inputContext];
++            if ([NSTextInputContext currentInputContext] != context) [context activate];
++            ret = [context handleEvent:event] && !window.commandDone;
+         }
+         else
+             ret = false;
 diff --git a/dlls/winemac.drv/display.c b/dlls/winemac.drv/display.c
 index 2663eb8..0be985b 100644
 --- a/dlls/winemac.drv/display.c
