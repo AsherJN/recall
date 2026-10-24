@@ -57,7 +57,7 @@
     },
     {
      "patch": "patches/wine-winemac-activation.patch",
-     "sha256": "dc1b8bc4ffe3db1ec36cdebca0c73545c6e3a65428c030a45a3f39929af555f8"
+     "sha256": "f6a661325de8ab9104408985d66fc1f14191e42a63aba9340e4f08165da32cf5"
     }
    ],
    "v1_patches_apply_after": "patches/wine-portable-directory-boolean.patch and Soju's ncrypt-persisted-keys.patch"
@@ -169,7 +169,7 @@
   },
   {
    "path": "patches/wine-winemac-activation.patch",
-   "sha256": "dc1b8bc4ffe3db1ec36cdebca0c73545c6e3a65428c030a45a3f39929af555f8"
+   "sha256": "f6a661325de8ab9104408985d66fc1f14191e42a63aba9340e4f08165da32cf5"
   }
  ]
 }

@@ -75,7 +75,7 @@ V1_PATCHES = {
     'wine-server-registry-save.patch': '8f89556d5daff60c75ae60720ae5125c68021abc244a95df5f6352468323a1a3',
     'wine-ntdll-syscall-log.patch': 'beac5bba576e36a0971e6581e812817e87f5cb8c41003c2e4edfe0e8f269623a',
     'wine-win32u-display-log.patch': '2387fa06d76891b7b5981473bb06b3b939e2c7569f79b6e3a7cbf12c21297568',
-    'wine-winemac-activation.patch': 'dc1b8bc4ffe3db1ec36cdebca0c73545c6e3a65428c030a45a3f39929af555f8',
+    'wine-winemac-activation.patch': 'f6a661325de8ab9104408985d66fc1f14191e42a63aba9340e4f08165da32cf5',
 }
 
 
