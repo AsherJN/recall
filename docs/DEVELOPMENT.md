@@ -77,6 +77,9 @@ then set `runtimeArchive`, `runtimeVersion` and `runtimeSHA256` in
 `app/Resources/release.json` to match it. Don't share a build made that way.
 
 Run the tests that need no game or engine with `python3 tests/run_portable.py`.
+Run the Mac app's setting/launch race regression with
+`python3 tests/run_advanced_settings.py`; it uses a temporary app and fixture
+worker without changing an installed Recall environment.
 
 ## Contributing
 

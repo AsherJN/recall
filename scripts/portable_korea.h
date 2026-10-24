@@ -4,11 +4,13 @@
  * stopped it; neither change touches the anti-cheat:
  * - At start the game checks that the signature on gamescale64.dll chains to DigiCert
  *   Assured ID Root CA. Windows gets there through "DigiCert Trusted Root G4" cross-signed
- *   by that root; Wine stops at the self-signed G4 that macOS's keychain provides, so the
- *   game exited ("Manager failed to start", 0xE01300B0). Recall adds the cross-signed G4
- *   to HKCU's Root store, which Wine's chain engine consults first. It is the same key as
- *   the G4 root macOS already trusts, signed by another root macOS trusts, so it adds no
- *   trust; it lives only in Recall's Windows environment and goes when the option is off.
+ *   by that root; Wine can instead stop at the self-signed G4 that macOS provides, so the
+ *   game exits ("Manager failed to start", 0xE01300B0). The cross-signed G4 alone does not
+ *   fix this when macOS no longer supplies Assured ID Root CA. Recall installs both
+ *   pinned public certificates into its Wine environment's HKCU Root store, which Wine's
+ *   chain engine consults first. This adds the named Assured root to that environment's
+ *   trust store only; macOS's keychain is untouched. Turning support off removes both
+ *   managed keys, including copies that were previously installed by hand.
  * - The anti-cheat takes screenshots of the screen now and then (GetDC(NULL) + StretchBlt).
  *   Wine's Mac driver can't read the screen back, so the call failed and the game crashed
  *   about five minutes in. With WINEMAC_SCREEN_READBACK=1 (set at launch while the option
@@ -46,45 +48,98 @@ static NSString *const crossSignedG4=
 static NSString *const crossSignedG4SHA256=@"33846b545a49c9be4903c60e01713c1bd4e4ef31ea65cd95d69e62794f30b941";
 // Its SHA-1, the key name Wine's registry store requires (uppercase).
 static NSString *const crossSignedG4Key=@"A99D5B79E9F1CDA59CDAB6373169D5353F5874C6";
+// DigiCert Assured ID Root CA (self-signed, valid 2006-11-10 to 2031-11-10).
+// Official DER and fingerprints: https://knowledge.digicert.com/general-information/digicert-trusted-root-authority-certificates
+// This completes the cross-signed G4 chain even when macOS no longer supplies this root.
+static NSString *const assuredRoot=
+    @"MIIDtzCCAp+gAwIBAgIQDOfg5RfYRv6P5WD8G/AwOTANBgkqhkiG9w0BAQUFADBlMQswCQYDVQQG"
+    @"EwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3d3cuZGlnaWNlcnQuY29tMSQw"
+    @"IgYDVQQDExtEaWdpQ2VydCBBc3N1cmVkIElEIFJvb3QgQ0EwHhcNMDYxMTEwMDAwMDAwWhcNMzEx"
+    @"MTEwMDAwMDAwWjBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQL"
+    @"ExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVkIElEIFJvb3QgQ0Ew"
+    @"ggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCtDhXO5EOAXLGH87dg+XESpa7cJpSIqvTO"
+    @"9SA5KFhgDPiA2qkVlTJhPLWxKISKityfCgyDF3qPkKyK53lTXDGEKvYPmDI2dsze3Tyoou9q+yHy"
+    @"UmHfnyDXH+Kx2f4YZNISW1/5WBg1vEfNoTb5a3/UsDg+wRvDjDPZ2C8Y/igPs6eD1sNuRMBhNZYW"
+    @"/lmci3Zt1/GiSw0r/wty2p5g0I6QNcZ4VYcgoc/lbQrISXwxmDNsIumH0DJaoroTghHtORedmTpy"
+    @"oeb6pNnVFzF1roV9Iq4/AUaG9ih5yLHa5FcXxH4cDrC0kqZWs72yl+2qp/C3xag/lRbQ/6GW6whf"
+    @"GHdPAgMBAAGjYzBhMA4GA1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBRF"
+    @"66Kv9JLLgjEtUYunpyGd823IDzAfBgNVHSMEGDAWgBRF66Kv9JLLgjEtUYunpyGd823IDzANBgkq"
+    @"hkiG9w0BAQUFAAOCAQEAog683+Lt8ONyc3pklL/3cmbYMuRCdWKuh+vy1dneVrOfzM4UKLkNl2Bc"
+    @"EkxY5NM9g0lFWJc1aRqoR+pWxnmrEthngYTffwk8lOa4JiwgvT2zKIn3X/8i4peEH+ll74fg38Fn"
+    @"SbNd67IJKusm7Xi+fT8r87cmNW1fiQG2SVufAQWbqz0lwcy2f8Lxb4bG+mRo64EtlOtCt/qMHt1i"
+    @"8b5QZ7dsvfPxH2sMNgcWfzd8qVttevESRmCD1ycEvkvOl77DZypoEd+A5wwzZr8TDRRu838fYxAe"
+    @"+o0bJW1sj6W3YQGx0qMmoRBxna3iw/nDmVG3KwcIzi7mULKn+gpFL6Lw8g==";
+static NSString *const assuredRootSHA256=@"3e9099b5015e8f486c00bcea9d111ee721faba355a89bcf1df69561e3dc6325c";
+static NSString *const assuredRootKey=@"0563B8630D62D75ABBC8AB1E4BDFB5A899B24D43";
 static NSString *const rootCertificatesKey=@"Software\\Microsoft\\SystemCertificates\\Root\\Certificates";
 static BOOL koreanSupportChosen(void) { return [state()[@"korean_support"] isEqual:@YES]; }
 // The certificate as Wine's registry store keeps it ("Blob"): its SHA-1 hash property
 // (3), then the certificate itself (32), each as {id, 1, size} and the bytes.
-static NSData *crossSignedG4Blob(void) {
-    NSData *der=[[NSData alloc] initWithBase64EncodedString:crossSignedG4 options:0];
+static NSData *koreanCertificateBlob(NSString *encoded, NSString *expectedSHA256, NSString *key) {
+    NSData *der=[[NSData alloc] initWithBase64EncodedString:encoded options:0];
     unsigned char sha256[CC_SHA256_DIGEST_LENGTH],sha1[CC_SHA1_DIGEST_LENGTH];
     if(!der)fail(@"korean_support_failed");
     CC_SHA256(der.bytes,(CC_LONG)der.length,sha256);CC_SHA1(der.bytes,(CC_LONG)der.length,sha1);
-    if(![hexString([NSData dataWithBytes:sha256 length:sizeof(sha256)]) isEqual:crossSignedG4SHA256] ||
-       ![hexString([NSData dataWithBytes:sha1 length:sizeof(sha1)]).uppercaseString isEqual:crossSignedG4Key])fail(@"korean_support_failed");
+    if(![hexString([NSData dataWithBytes:sha256 length:sizeof(sha256)]) isEqual:expectedSHA256] ||
+       ![hexString([NSData dataWithBytes:sha1 length:sizeof(sha1)]).uppercaseString isEqual:key])fail(@"korean_support_failed");
     NSMutableData *blob=[NSMutableData data];
     uint32_t hash[3]={3,1,sizeof(sha1)},certificate[3]={32,1,(uint32_t)der.length};
     [blob appendBytes:hash length:sizeof(hash)];[blob appendBytes:sha1 length:sizeof(sha1)];
     [blob appendBytes:certificate length:sizeof(certificate)];[blob appendData:der];
     return blob;
 }
-// Whether the Root store has the certificate (any Blob under its key: Wine checks the hash).
-static BOOL crossSignedG4Installed(NSDictionary *values) { return registryBinary(values[@"Blob"]).length>0; }
-/* Adds the certificate (ENABLED) or removes it. Without ENGINE it only reports what would
- * change; with KEEP, an installed certificate is never removed (setup and launch only add
- * it, so one a player added by hand stays until they turn the option off). Never fails:
+// Check the serialized certificate and its hash, not just the registry key's name. Wine
+// may add other certificate properties, so accept them and any property order, but reject
+// truncated records, an incorrect hash, or a different certificate under this key.
+static BOOL koreanCertificateInstalled(NSDictionary *values, NSData *expected) {
+    NSData *blob=registryBinary(values[@"Blob"]);
+    BOOL hash=NO,certificate=NO;NSUInteger offset=0;
+    while(offset<blob.length) {
+        uint32_t property[3];
+        if(blob.length-offset<sizeof(property))return NO;
+        [blob getBytes:property range:NSMakeRange(offset,sizeof(property))];offset+=sizeof(property);
+        if(property[1]!=1 || property[2]>blob.length-offset)return NO;
+        NSData *value=[blob subdataWithRange:NSMakeRange(offset,property[2])];
+        if(property[0]==3) {
+            if(hash || ![value isEqualToData:[expected subdataWithRange:NSMakeRange(12,20)]])return NO;
+            hash=YES;
+        }
+        else if(property[0]==32) {
+            if(certificate || ![value isEqualToData:[expected subdataWithRange:NSMakeRange(44,expected.length-44)]])return NO;
+            certificate=YES;
+        }
+        offset+=property[2];
+    }
+    return hash && certificate;
+}
+/* Adds both certificates (ENABLED) or removes their two managed keys. Without ENGINE it
+ * only reports what would change; with KEEP, installed certificates are never removed
+ * (setup and launch only add, until the player turns the option off). Never fails:
  * callers decide. Reports korean_support. */
 static BOOL configureKoreanCertificate(NSString *engine, BOOL enabled, BOOL keep) {
-    NSDictionary *values=userRegistryValues([rootCertificatesKey stringByAppendingFormat:@"\\%@",crossSignedG4Key]);
-    BOOL installed=values && crossSignedG4Installed(values),ok=YES;
-    BOOL change=enabled ? !installed : (!keep && (installed || !values));
+    NSArray *certificates=@[@[assuredRootKey,koreanCertificateBlob(assuredRoot,assuredRootSHA256,assuredRootKey)],
+                            @[crossSignedG4Key,koreanCertificateBlob(crossSignedG4,crossSignedG4SHA256,crossSignedG4Key)]];
+    BOOL ok=YES,changed=NO;
     NSMutableDictionary *details=[@{@"enabled":@(enabled),@"changed":@NO} mutableCopy];
-    if(!values)details[@"registry"]=@"unreadable";
-    if(engine && change) {
-        NSString *key=[NSString stringWithFormat:@"HKCU\\%@\\%@",rootCertificatesKey,crossSignedG4Key];
-        ok=enabled ? registryTool(engine,@[@"add",key,@"/v",@"Blob",@"/t",@"REG_BINARY",@"/d",hexString(crossSignedG4Blob()),@"/f"],@"korean-support.log")
-                   : registryTool(engine,@[@"delete",key,@"/f"],@"korean-support.log");
-        // Removing a key that was never there fails; nothing is installed then.
-        if(!ok && !enabled && values && !installed)ok=YES;
-        details[@"changed"]=@(ok);
-        if(!ok)details[@"failed"]=@YES;
+    for(NSArray *certificate in certificates) {
+        NSString *name=certificate[0];NSData *blob=certificate[1];
+        NSDictionary *values=userRegistryValues([rootCertificatesKey stringByAppendingFormat:@"\\%@",name]);
+        BOOL installed=values && koreanCertificateInstalled(values,blob),present=values.count>0;
+        // Removing support also removes malformed values under either managed key.
+        BOOL change=enabled ? !installed : (!keep && (present || !values));
+        if(!values)details[@"registry"]=@"unreadable";
+        if(engine && change) {
+            NSString *key=[NSString stringWithFormat:@"HKCU\\%@\\%@",rootCertificatesKey,name];
+            BOOL applied=enabled ? registryTool(engine,@[@"add",key,@"/v",@"Blob",@"/t",@"REG_BINARY",@"/d",hexString(blob),@"/f"],@"korean-support.log")
+                                 : registryTool(engine,@[@"delete",key,@"/f"],@"korean-support.log");
+            // Removing a key that was never there fails; nothing is installed then.
+            if(!applied && !enabled && values && !present)applied=YES;
+            changed|=applied;ok&=applied;
+        }
+        else if(!engine)changed|=change;
     }
-    else if(!engine)details[@"changed"]=@(change);
+    details[@"changed"]=@(changed);
+    if(!ok)details[@"failed"]=@YES;
     event(@"korean_support",details);
     return ok;
 }

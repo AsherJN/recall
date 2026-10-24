@@ -116,6 +116,8 @@ final class AppModel {
     /// Kept by the worker (state.json): automatic proxy detection (Settings › Advanced), off unless
     /// turned on, and Korean account support, which is the Korea region (Settings › General).
     enum AdvancedSetting: String { case proxyAutoDetect="proxy_auto_detect", koreanSupport="korean_support" }
+    @ObservationIgnored private var advancedSettingsTask:Task<Void,Never>?
+    @ObservationIgnored private var pendingAdvancedSettings=[(AdvancedSetting,Bool)]()
     var proxyAutoDetect:Bool { state[AdvancedSetting.proxyAutoDetect.rawValue] as? Bool == true }
     var koreanSupport:Bool { state[AdvancedSetting.koreanSupport.rawValue] as? Bool == true }
     /// The worker keeps these once setup has installed the game components.
@@ -471,7 +473,7 @@ final class AppModel {
     }
     func perform(_ action: @escaping @MainActor () async throws -> Void) {
         guard !isPreview else { return }
-        guard !busy else { return }; busy=true; notice=""; paused=false
+        guard !busy && advancedSettingsTask == nil else { return }; busy=true; notice=""; paused=false
         Task {
             defer { busy=false;canCancel=false;downloadedBytes=0 }
             do { try await action() }
@@ -1214,20 +1216,35 @@ final class AppModel {
     /// only while it and Overwatch are closed (see running); the worker refuses otherwise. Before setup has made the Windows environment the worker only keeps the
     /// choice, and setup applies it.
     func setAdvanced(_ setting:AdvancedSetting, _ on:Bool) {
-        guard (state[setting.rawValue] as? Bool == true) != on else { return }
-        state[setting.rawValue]=on
-        guard !isPreview else { return }
-        Task {
-            while busy { try? await Task.sleep(for:.milliseconds(200)) }
-            busy=true;notice=""
-            defer { busy=false }
-            do {
-                _ = try await service.run(setting == .proxyAutoDetect ? "network" : "korean-support",
-                                          [setting == .proxyAutoDetect ? "--proxy-detect" : "--enabled",on ? "1" : "0"])
-                try await refresh()
-            } catch {
-                state[setting.rawValue] = !on
-                notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
+        let requested=pendingAdvancedSettings.last(where:{ $0.0 == setting })?.1 ?? (state[setting.rawValue] as? Bool == true)
+        guard requested != on else { return }
+        guard !isPreview else { state[setting.rawValue]=on;return }
+        pendingAdvancedSettings.append((setting,on))
+        guard advancedSettingsTask == nil else { return }
+        // Reserve an idle worker before returning to the UI: Play must not open Battle.net
+        // with the old setting while this Task is still waiting to run. Choices made during
+        // another operation stay queued; perform blocks new work until this queue finishes.
+        let waitForOperation=busy
+        if !waitForOperation { busy=true }
+        advancedSettingsTask=Task {
+            if waitForOperation {
+                while busy { try? await Task.sleep(for:.milliseconds(200)) }
+                busy=true
+            }
+            notice=""
+            defer { busy=false;advancedSettingsTask=nil }
+            while let (setting,on)=pendingAdvancedSettings.first {
+                do {
+                    _ = try await service.run(setting == .proxyAutoDetect ? "network" : "korean-support",
+                                              [setting == .proxyAutoDetect ? "--proxy-detect" : "--enabled",on ? "1" : "0"])
+                    // Only show a saved choice after the worker succeeds. If the following
+                    // status read fails, the successful write is still the known state.
+                    state[setting.rawValue]=on
+                    try await refresh()
+                } catch {
+                    notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
+                }
+                pendingAdvancedSettings.removeFirst()
             }
         }
     }
@@ -1292,7 +1309,7 @@ final class AppModel {
         // Where the default web browser comes from: China's Battle.net signs in through it.
         let browser=NSWorkspace.shared.urlForApplication(toOpen:URL(string:"https://www.battlenet.com.cn/")!).flatMap { Bundle(url:$0)?.bundleIdentifier } ?? "unknown"
         let battleNet:[String:Any]=["region":installedRegion.rawValue,"language":state["battlenet_language"] as? String ?? (clientInstalled ? "enUS" : "not_chosen"),
-                                    "installed":clientInstalled,"path":battleNetPath.replacingOccurrences(of:"environment/drive_c/",with:""),"neac_build":neacBuild,
+                                    "installed":clientInstalled,"path":battleNetPath.replacingOccurrences(of:"environment/drive_c/",with:""),"neac_build":neacBuild,"nexon_build":nexonBuild,"korean_support":koreanSupport,
                                     "recent_starts":BattleNetRecord.read(root:root)]
         // Logging (REC-40): the setting, what Custom holds exactly as typed, and since when.
         var logs:[String:Any]=["setting":logging.rawValue]
