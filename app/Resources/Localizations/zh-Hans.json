@@ -778,7 +778,8 @@
     "My controls feel delayed": "操作感觉有延迟",
     "When your Mac runs low on memory, Overwatch has to wait for it. Your movement and aim then respond late even though your FPS looks normal, most in your first minute in a map or when you come back from another app.": "Mac 内存不足时，守望先锋不得不等待内存。这时即使帧率看起来正常，移动和瞄准也会反应迟缓，尤其是进入地图后的第一分钟，或从其他 App 切回游戏时。",
     "Quit apps you aren’t using. When your Mac is low on memory, {0} lists the apps using the most on the Play screen, with a **Quit** button.": "退出你不在使用的 App。Mac 内存不足时，{0} 会在“开始玩守望先锋”界面列出占用内存最多的 App，并附上**退出**按钮。",
-    "If you haven’t restarted your Mac in days, restart it. Over time macOS itself can hold on to memory, and a restart frees it.": "如果你已经好几天没有重启 Mac，请重启它。时间一长，macOS 本身可能会占着内存不放，重启即可释放。"
+    "If you haven’t restarted your Mac in days, restart it. Over time macOS itself can hold on to memory, and a restart frees it.": "如果你已经好几天没有重启 Mac，请重启它。时间一长，macOS 本身可能会占着内存不放，重启即可释放。",
+    "The Korean account certificates could not be prepared. Close Overwatch and Battle.net, then retry. If it happens again, save the logs in Help & FAQ.": "无法准备韩国账号所需的证书。请关闭《守望先锋》和 Battle.net 后重试。如果问题再次出现，请在帮助与常见问题中保存日志。"
   },
   "InfoPlist": {
     "Voice chat in Overwatch uses your microphone.": "守望先锋的语音聊天会使用你的麦克风。",

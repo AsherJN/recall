@@ -95,7 +95,8 @@ app shows a reminder on its home screen while it's on; turn it off when you're d
   Battle.net again from the app.
 - <a id="id-korean-accounts"></a>**Overwatch closes as it starts on a Korean account (linked to Nexon).**
   Close Battle.net, choose Korea in Settings › General › Battle.net region, then
-  play from the app. Recall adds a certificate the game checks when it starts and
+  play from the app. Recall prepares the certificate chain the game checks when it
+  starts, including DigiCert Assured ID Root CA on Macs that no longer provide it, and
   hands Nexon's anti-cheat a blank image when it takes a screenshot. It doesn't
   turn off Nexon's anti-cheat, but Nexon doesn't support playing on a Mac, so
   playing this way could affect your account.

@@ -42,6 +42,7 @@ struct SetupFailure: Error {
         case "run_from_installed_app", "app_move_failed": return L("{0} couldn’t move itself. Drag {0} to Applications, eject the disk image, then open it from Applications.",Brand.name)
         case "app_name_taken": return L("Another app named {0} is in your Applications folders. Rename or remove that app, then try again.",Brand.name)
         case "release_unavailable": return L("This app is missing its verified setup components. Download a complete copy from the release page.")
+        case "korean_support_failed": return L("The Korean account certificates could not be prepared. Close Overwatch and Battle.net, then retry. If it happens again, save the logs in Help & FAQ.")
         case "setting_change_failed": return L("This setting couldn’t be changed. Close Overwatch and Battle.net, then try again.")
         case "shader_preparation_running": return L("{0} is preparing shaders from your last match. Wait for it to finish, then try again.",Brand.name)
         case "shader_delete_failed": return L("The shader cache couldn’t be cleared. Close Overwatch and Battle.net, then try again.")

@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import struct
 import sys
 import tempfile
 import time
@@ -19,6 +20,7 @@ from build_portable_setup import build
 ROOT = Path(__file__).resolve().parents[1]
 CONNECTIONS = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections'
 CERTIFICATE_KEY = r'Software\Microsoft\SystemCertificates\Root\Certificates\A99D5B79E9F1CDA59CDAB6373169D5353F5874C6'
+ASSURED_ROOT_KEY = r'Software\Microsoft\SystemCertificates\Root\Certificates\0563B8630D62D75ABBC8AB1E4BDFB5A899B24D43'
 DIRECT = bytes.fromhex('460000000100000001000000' + '00' * 24)
 GAME_KEYBOARD = r'Software\Wine\AppDefaults\Overwatch.exe\Mac Driver'
 
@@ -102,11 +104,15 @@ path.write_text('\n'.join(s.rstrip('\n')+'\n' for s in sections))
 '''
 
 
-def certificate():
+def certificate(name='crossSignedG4'):
     """The certificate the worker embeds, decoded from its source."""
     source = (ROOT/'scripts/portable_korea.h').read_text()
-    body = source.split('crossSignedG4=', 1)[1].split(';', 1)[0]
+    body = source.split(name + '=', 1)[1].split(';', 1)[0]
     return base64.b64decode(''.join(re.findall(r'@"([^"]*)"', body)))
+
+
+def certificate_blob(der):
+    return struct.pack('<III', 3, 1, 20) + hashlib.sha1(der).digest() + struct.pack('<III', 32, 1, len(der)) + der
 
 
 class AdvancedSettings(unittest.TestCase):
@@ -147,6 +153,24 @@ class AdvancedSettings(unittest.TestCase):
 
     def state(self):
         return json.loads((self.root/'state.json').read_text())
+
+    def write_certificate_blob(self, blob, key=CERTIFICATE_KEY):
+        header = '[' + key.replace('\\', '\\\\') + ']'
+        sections = [s for s in re.split(r'\n(?=\[)', self.registry.read_text())
+                    if not s.startswith(header)]
+        sections.append(header + ' 1\n"Blob"=hex:' + ','.join('%02x' % b for b in blob) + '\n')
+        self.registry.write_text('\n'.join(sections))
+
+    def launch_fixture(self):
+        self.fixture()
+        engine = self.root/'runtimes/v1'
+        config = engine/'config/dxmt.conf'
+        config.parent.mkdir()
+        config.write_text((ROOT/'config/dxmt-source60-1200.conf').read_text())
+        client = self.root/'environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe'
+        client.parent.mkdir(parents=True)
+        client.write_text('fixture client')
+        (self.root/'state.json').write_text(json.dumps({**self.state(), 'korean_support': True}))
 
     def test_proxy_detection_is_off_until_the_player_turns_it_on(self):
         self.fixture()
@@ -223,7 +247,7 @@ class AdvancedSettings(unittest.TestCase):
         self.assertEqual(self.call('network', '--proxy-detect', 'yes', success=False)[-1]['code'], 'invalid_arguments')
         self.assertEqual(self.call('korean-support', success=False)[-1]['code'], 'invalid_arguments')
 
-    def test_korean_support_adds_and_removes_the_cross_signed_certificate(self):
+    def test_korean_support_adds_and_removes_both_certificates(self):
         der = certificate()
         self.assertEqual(hashlib.sha256(der).hexdigest(), '33846b545a49c9be4903c60e01713c1bd4e4ef31ea65cd95d69e62794f30b941')
         self.assertEqual(hashlib.sha1(der).hexdigest().upper(), CERTIFICATE_KEY.rsplit('\\', 1)[1])
@@ -237,6 +261,11 @@ class AdvancedSettings(unittest.TestCase):
                     + (32).to_bytes(4, 'little') + (1).to_bytes(4, 'little') + len(der).to_bytes(4, 'little') + der)
         self.assertEqual(blob, expected)
         self.assertEqual(len(blob), 1469)
+        root_der = certificate('assuredRoot')
+        self.assertEqual(len(root_der), 955)
+        self.assertEqual(hashlib.sha256(root_der).hexdigest(), '3e9099b5015e8f486c00bcea9d111ee721faba355a89bcf1df69561e3dc6325c')
+        self.assertEqual(hashlib.sha1(root_der).hexdigest().upper(), ASSURED_ROOT_KEY.rsplit('\\', 1)[1])
+        self.assertEqual(self.value(ASSURED_ROOT_KEY, 'Blob'), certificate_blob(root_der))
         self.assertIs(self.state()['korean_support'], True)
         status = self.call('status')[-1]
         self.assertIs(status['state']['korean_support'], True)
@@ -244,11 +273,36 @@ class AdvancedSettings(unittest.TestCase):
         # Off removes the key; turning it off again has nothing to do.
         self.call('korean-support', '--enabled', '0')
         self.assertIsNone(self.value(CERTIFICATE_KEY, 'Blob'))
+        self.assertIsNone(self.value(ASSURED_ROOT_KEY, 'Blob'))
         self.assertNotIn('A99D5B79', self.registry.read_text())
+        self.assertNotIn('0563B863', self.registry.read_text())
         self.assertIs(self.state()['korean_support'], False)
         before = len(self.calls())
         self.call('korean-support', '--enabled', '0')
         self.assertEqual(len(self.calls()), before)
+
+    def test_existing_cross_signed_g4_is_migrated_with_missing_assured_root(self):
+        self.fixture()
+        existing = certificate_blob(certificate())
+        self.write_certificate_blob(existing)
+        (self.root/'state.json').write_text(json.dumps({**self.state(), 'korean_support': True}))
+        self.assertTrue(self.call('korean-support', '--enabled', '1', '--apply', '0')[-1]['changed'])
+        self.call('korean-support', '--enabled', '1')
+        self.assertEqual(self.value(CERTIFICATE_KEY, 'Blob'), existing)
+        self.assertEqual(self.value(ASSURED_ROOT_KEY, 'Blob'), certificate_blob(certificate('assuredRoot')))
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(self.calls()[0][2], 'HKCU\\' + ASSURED_ROOT_KEY)
+        self.assertFalse(self.call('korean-support', '--enabled', '1', '--apply', '0')[-1]['changed'])
+
+    def test_invalid_assured_root_is_repaired_without_rewriting_g4(self):
+        self.fixture()
+        self.call('korean-support', '--enabled', '1')
+        self.write_certificate_blob(b'\x01', ASSURED_ROOT_KEY)
+        before = len(self.calls())
+        self.call('korean-support', '--enabled', '1')
+        self.assertEqual(len(self.calls()), before + 1)
+        self.assertEqual(self.calls()[-1][2], 'HKCU\\' + ASSURED_ROOT_KEY)
+        self.assertEqual(self.value(ASSURED_ROOT_KEY, 'Blob'), certificate_blob(certificate('assuredRoot')))
 
     def test_status_reports_the_korean_build(self):
         self.fixture()
@@ -259,6 +313,79 @@ class AdvancedSettings(unittest.TestCase):
         (retail/'grap').rmdir()
         (retail/'grap64.dll').write_text('fixture')
         self.assertIs(self.call('status')[-1]['nexon_build'], True)
+
+    def test_corrupt_certificate_blobs_are_repaired(self):
+        self.fixture()
+        self.call('korean-support', '--enabled', '1')
+        expected = self.value(CERTIFICATE_KEY, 'Blob')
+        for corrupt in (b'', b'\x01', expected[:-1], expected[:32], expected[32:],
+                        expected[:12] + b'\x00' * 20 + expected[32:],
+                        expected[:-1] + bytes([expected[-1] ^ 1]),
+                        expected[:8] + b'\xff' * 4 + expected[12:]):
+            with self.subTest(size=len(corrupt)):
+                self.write_certificate_blob(corrupt)
+                self.assertTrue(self.call('korean-support', '--enabled', '1', '--apply', '0')[-1]['changed'])
+                self.call('korean-support', '--enabled', '1')
+                self.assertEqual(self.value(CERTIFICATE_KEY, 'Blob'), expected)
+
+    def test_certificate_properties_can_be_reordered_or_extended(self):
+        self.fixture()
+        self.call('korean-support', '--enabled', '1')
+        expected = self.value(CERTIFICATE_KEY, 'Blob')
+        # Wine can persist other properties, such as a UTF-16 friendly name.
+        name = 'Korean support\0'.encode('utf-16le')
+        extra = struct.pack('<III', 11, 1, len(name)) + name
+        extended = expected[32:] + extra + expected[:32]
+        self.write_certificate_blob(extended)
+        self.assertFalse(self.call('korean-support', '--enabled', '1', '--apply', '0')[-1]['changed'])
+        before = len(self.calls())
+        self.call('korean-support', '--enabled', '1')
+        self.assertEqual(len(self.calls()), before)
+        self.assertEqual(self.value(CERTIFICATE_KEY, 'Blob'), extended)
+
+    def test_disabling_removes_an_invalid_certificate_blob(self):
+        self.fixture()
+        self.write_certificate_blob(b'\x01')
+        self.assertTrue(self.call('korean-support', '--enabled', '0', '--apply', '0')[-1]['changed'])
+        (self.root/'reg-fails').write_text('')
+        self.assertEqual(self.call('korean-support', '--enabled', '0', success=False)[-1]['code'], 'setting_change_failed')
+        self.assertEqual(self.value(CERTIFICATE_KEY, 'Blob'), b'\x01')
+        (self.root/'reg-fails').unlink()
+        self.call('korean-support', '--enabled', '0')
+        self.assertIsNone(self.value(CERTIFICATE_KEY, 'Blob'))
+
+    def test_launch_stops_if_required_certificate_cannot_be_installed(self):
+        self.launch_fixture()
+        (self.root/'reg-fails').write_text('')
+        events = self.call('launch', '--play', '1', success=False)
+        self.assertEqual(events[-1]['code'], 'korean_support_failed')
+        self.assertNotIn('battlenet_open', [event['stage'] for event in events])
+        self.assertNotIn('battlenet_started', [event['stage'] for event in events])
+        self.assertTrue(self.calls())
+        self.assertTrue(all(call[0] == 'reg.exe' for call in self.calls()))
+        self.assertIs(self.state()['korean_support'], True)
+
+    def test_prepare_stops_if_required_certificate_cannot_be_installed(self):
+        self.launch_fixture()
+        engine = self.root/'runtimes/v1'
+        names = ['lib/external/libd3dshared.dylib', 'lib/wine/x86_64-unix/winemetal.so',
+                 'lib/wine/x86_64-unix/winemac.so']
+        names += ['lib/wine/' + arch + '/' + name for arch in ('x86_64-windows', 'i386-windows')
+                  for name in ('winemac.drv', 'mountmgr.sys', 'nsiproxy.sys', 'kernel32.dll', 'ntdll.dll')]
+        for name in names:
+            path = engine/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'fixture only')
+        manifest = {'version': 'v1', 'files': {
+            str(path.relative_to(engine)): {'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+            for path in engine.rglob('*') if path.is_file() and path.name != 'runtime.json'}}
+        (engine/'runtime.json').write_text(json.dumps(manifest))
+        (self.root/'environment-owned.json').write_text('{"schema":1,"runtime":"v1"}')
+        (self.root/'reg-fails').write_text('')
+        events = self.call('prepare', success=False)
+        self.assertEqual(events[-1]['code'], 'korean_support_failed')
+        self.assertNotIn('environment_ready', [event['stage'] for event in events])
+        self.assertNotIn('prepared_runtime', self.state())
 
     def test_battlenet_installer_starts_with_a_direct_connection(self):
         self.fixture()

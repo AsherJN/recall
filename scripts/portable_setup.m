@@ -405,11 +405,11 @@ static void prepare(void) {
     configureRetina();
     // The player's network and Korean account choices (portable_network.h, portable_korea.h),
     // the fonts for Chinese or Korean (portable_region.h) and Overwatch's left Option key
-    // (portable_network.h), before Battle.net's installer first goes online. None stops setup;
-    // launches retry.
+    // (portable_network.h), before Battle.net's installer first goes online. The Korean
+    // certificate is required when chosen: stop here if it cannot be installed.
     configureProxy(engine,proxyDetectionChosen());
     configureOptionKey(engine);
-    if(koreanSupportChosen())configureKoreanCertificate(engine,YES,YES);
+    if(koreanSupportChosen() && !configureKoreanCertificate(engine,YES,YES))fail(@"korean_support_failed");
     if(cjkFontsChosen())configureFonts(engine,YES);
     if(!registrySaved(engine,60))fail(@"environment_initialization_busy");
     // An update keeps a resolution chosen in the game since the last launch.
@@ -686,6 +686,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
         event(@"displays_changed",nil);closeClient(@"close_game_before_maintenance");existing=@[];
     }
     if(focusSession(existing)) {
+        if(play && !game && koreanSupportChosen() && !configureKoreanCertificate(engine,YES,YES))fail(@"korean_support_failed");
         // Overwatch reads its default microphone when it starts; one already running keeps its own.
         if(!game)configureVoiceMicrophone(engine,nil,YES,NO);
         // Battle.net already open carries its own environment; this hands over the command only.
@@ -729,7 +730,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     // only then). The voice step below waits for Wine's server, as Battle.net needs.
     configureProxy(engine,proxyDetectionChosen());
     configureOptionKey(engine);
-    if(koreanSupportChosen())configureKoreanCertificate(engine,YES,YES);
+    if(koreanSupportChosen() && !configureKoreanCertificate(engine,YES,YES))fail(@"korean_support_failed");
     if(cjkFontsChosen())configureFonts(engine,YES);
     configureVoiceMicrophone(engine,nil,YES,YES);
     if(displays) {NSMutableDictionary *s=state();s[@"session_displays"]=displays;writeJSON(s,join(root,@"state.json"));}
