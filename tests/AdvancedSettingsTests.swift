@@ -45,6 +45,16 @@ import Foundation
         let model=AppModel()
         model.root=root;model.service.root=root
 
+        // Display's HUD is live, persisted, and never invokes a game/setup worker.
+        _ = NSApplication.shared
+        let savedHUD=model.systemStatsHUD
+        model.systemStatsHUD=true
+        precondition(model.statsHUD.isEnabled && AppModel().systemStatsHUD)
+        model.systemStatsHUD=false
+        precondition(!model.statsHUD.isEnabled && !model.statsHUD.isVisible && !AppModel().systemStatsHUD)
+        model.systemStatsHUD=savedHUD
+        precondition(!fm.fileExists(atPath:root.appendingPathComponent("calls").path))
+
         func calls() -> [String] {
             ((try? String(contentsOf:root.appendingPathComponent("calls"),encoding:.utf8)) ?? "").split(separator:"\n").map(String.init)
         }

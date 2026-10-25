@@ -114,6 +114,7 @@ def build(output,workspace,runtime_archive,icon=None,identity=None,preview=False
                 if member.isfile() and member.name.startswith('licenses/') and '..' not in Path(member.name).parts:
                     target=resources/'Licenses'/Path(member.name).relative_to('licenses')
                     target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(archive.extractfile(member).read())
+    shutil.copy2(ROOT/'licenses/STATS-MIT',resources/'STATS-MIT.txt')
     shutil.copy2(ROOT/'licenses/PROJECT-APACHE-2.0',resources/'PROJECT-LICENSE.txt')
     shutil.copy2(ROOT/'licenses/PROJECT-NOTICE',resources/'NOTICE.txt')
     shutil.copy2(ROOT/'licenses/GITHUB-MARK-NOTICE.txt',resources/'GITHUB-MARK-NOTICE.txt')

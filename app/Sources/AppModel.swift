@@ -27,6 +27,14 @@ final class AppModel {
     var metalHUD=UserDefaults.standard.bool(forKey:"metalHUD") {
         didSet { UserDefaults.standard.set(metalHUD,forKey:"metalHUD") }
     }
+    /// Settings › Display: live, click-through system metrics; no game restart required.
+    @ObservationIgnored let statsHUD=StatsHUD()
+    var systemStatsHUD=UserDefaults.standard.bool(forKey:"systemStatsHUD") {
+        didSet {
+            UserDefaults.standard.set(systemStatsHUD,forKey:"systemStatsHUD")
+            statsHUD.setEnabled(systemStatsHUD)
+        }
+    }
     /// MetalFX upscaling (worker: launch --metalfx, portable_metalfx.h): Overwatch offers NVIDIA
     /// DLSS in its Video settings, and Recall runs it on Apple's MetalFX. Off by default. Like the
     /// HUD, Battle.net carries it from when it opens.
@@ -501,6 +509,7 @@ final class AppModel {
         }
         // Opened from the disk image: move to Applications before anything else.
         if AppLocation.needsMove(Bundle.main.bundleURL) { prepareMove();return }
+        statsHUD.setEnabled(systemStatsHUD)
         if automaticUpdates { checkForUpdates(manual:false) }
         screen = .checking
         perform {
