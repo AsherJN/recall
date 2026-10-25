@@ -21,7 +21,7 @@ ROOT=Path(__file__).resolve().parents[1]
 # The bundle and executable name players see; Brand.swift holds the in-app
 # copy. The bundle identifier keeps its original value so updates carry over.
 APP_NAME='Recall'
-APP_BUILD='81'
+APP_BUILD='84'
 # Overwatch's voice chat runs under this app's microphone permission (Microphone.swift); the
 # hardened runtime gives an app signed without the entitlement silence, with no prompt.
 ENTITLEMENTS={'com.apple.security.device.audio-input':True}

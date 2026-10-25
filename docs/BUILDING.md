@@ -177,11 +177,12 @@ its client (`sechost.dll`, 64-bit and 32-bit) replaced, all three built with
 and program paths read back in Windows' form, so Battle.net's update agent no longer downloads itself
 again on every other start.
 
-Runtime `phase2-20261024.10` is `phase2-20261024.6` with only the Mac driver `winemac.so` replaced,
+Runtime `phase2-20261025.1` is `phase2-20261024.6` with only the Mac driver `winemac.so` replaced,
 built with `patches/wine-winemac-activation.patch` (`scripts/build_wine_native.py winemac`, then
 `scripts/derive_runtime.py --native winemac`): after a switch away from the game in fullscreen, the
 game's window stays fullscreen until the player comes back, and on the way back the game is restored
-and made the active window.
+and made the active window. With the High-precision mouse, movement that macOS is briefly late to
+confirm is held for up to half a second and delivered when macOS's input arrives, instead of dropped.
 
 Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
 replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py

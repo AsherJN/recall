@@ -53,8 +53,9 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               (1.6, Settings › General › Mouse, Classic) keeps it with the stand-in and
               re-arming. WINEMAC_RAW_SOURCE=hid (1.6, Mouse, High-precision) has raw input
               read the mouse's own reports through IOHID instead of GCMouse, with the app's
-              Input Monitoring permission, while macOS still gives the process mouse input;
-              GCMouse's input is then only counted. Korean and other input methods get the
+              Input Monitoring permission, while macOS still gives the process mouse input
+              (movement it is late to confirm waits for it up to 0.5 s, 1.6.1); GCMouse's
+              input is then only counted. Korean and other input methods get the
               key after the window's input context is made current (PR #41, @sookcha).
               While the player is away from the game in fullscreen its window stays
               fullscreen: the game's request to leave it and its minimize are held, and a

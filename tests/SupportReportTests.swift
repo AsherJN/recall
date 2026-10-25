@@ -86,12 +86,14 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         }
         for (upscaling,sharpening,expected) in [("YES","off","on"),("YES","high","on"),("NO","off","off"),("NO","low","off")] {
             let fields=try report(upscaling,sharpening)
-            precondition(fields["schema"] as? Int == 5)
+            precondition(fields["schema"] as? Int == 6)
             // Game Mode (REC-51, REC-55): on unless the player turned it off.
             precondition(fields["game_mode"] as? String == "on","\(fields)")
             // The mouse (REC-52, REC-57): Standard unless the player chose another, with Input
             // Monitoring as macOS has it for this process.
             precondition(fields["mouse_input"] as? String == "standard","\(fields)")
+            // Mouse › Advanced (REC-63): every report unless the player lowers it.
+            precondition(fields["mouse_rate"] as? String == "all","\(fields)")
             precondition(["allowed","denied","undecided"].contains(fields["input_monitoring"] as? String ?? ""),"\(fields)")
             // Other apps (REC-5): nothing launched from this copy, and its busy note never looked.
             let other=fields["other_apps"] as? [String:Any]
@@ -110,6 +112,10 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         for choice in ["classic","high-precision"] {
             let chosen=try report("NO","off",["-mouseInput",choice])
             precondition(chosen["mouse_input"] as? String == choice,"\(chosen)")
+        }
+        for (chosen,expected) in [("500","500"),("250","250"),("8000","all")] {
+            let fields=try report("NO","off",["-mouseRate",chosen])
+            precondition(fields["mouse_rate"] as? String == expected,"\(chosen): \(fields)")
         }
         // Build 76's switch is gone: its default no longer chooses anything.
         let old=try report("NO","off",["-highPrecisionMouse","YES"])

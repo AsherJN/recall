@@ -29,7 +29,8 @@ Read `index.json` first. It has:
   Its seconds count from when the Mac started; `session.json` gives `wine_clock_ms` (Wine's count)
   at `started` (the time of day), so time of day = `started` + (seconds × 1000 − `wine_clock_ms`) ms.
 - `recall/sessions/<start>/session.json`: what the session started with (`logging`, `winedebug`,
-  `dxmt_log_level`, MetalFX, Game Mode), when Overwatch ran (`games`) and when it `ended`.
+  `dxmt_log_level`, MetalFX, Game Mode, the mouse's `mouse_input` and `mouse_rate`), when Overwatch
+  ran (`games`) and when it `ended`.
 - `recall/sessions/<start>/input-<pid>.jsonl` (logging's Mouse preset): the mouse report, one JSON
   line a second for each Wine process that was frontmost or had input. `unix_ms` is the time, `exe`
   the program, `app_active` whether it was frontmost and `mode` whether mouselook was on.
@@ -40,10 +41,16 @@ Read `index.json` first. It has:
     `hid_open` the result of opening the mice, `hid_mice` how many are open and `hid_reports` and
     `hid_buttons` what they sent). While `hid` delivers, `hid_shadow_moves`, `hid_shadow_dx` and
     `hid_shadow_dy` are what GCMouse gave at the same time, not delivered: the difference is what
-    GCMouse would have lost. `hid_withheld` counts reports and presses held back because macOS
-    had given Overwatch no mouse input for 50 ms (another app most likely had the mouse).
+    GCMouse would have lost. When macOS has given Overwatch no mouse input for 50 ms, HID's movement
+    is held: `hid_released` counts reports held and delivered once macOS's input came back within
+    half a second (it was only late), `hid_withheld` the reports held longer and the presses held
+    back (another app most likely had the mouse).
   - `variant` is how clicks and timing work: `precise` for Standard and High-precision, `classic`
     for Classic (Recall 1.4's).
+  - `raw_interval_us`: the least time between deliveries to Overwatch, in microseconds, from
+    Settings › General › Mouse › Advanced. 0 is every report (the default from Recall 1.6.1);
+    1000 is 1,000 a second, as in 1.6.0 and always with Classic. Movement in between is added to
+    the next delivery.
   - `mac_dx`, `mac_dy`: how far the macOS pointer moved in points, which follows the pointer's speed
     and acceleration settings.
   - `moved_x`, `moved_y`, `moved_abs`: what reached Overwatch through Wine.

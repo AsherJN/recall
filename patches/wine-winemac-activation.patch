@@ -11,7 +11,7 @@ index 4da4676..49a6d47 100644
      - (BOOL) handleEvent:(NSEvent*)anEvent;
      - (void) didSendEvent:(NSEvent*)anEvent;
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index ce6a702..f95d5fc 100644
+index ce6a702..0f91f5d 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -25,8 +25,12 @@
@@ -106,7 +106,7 @@ index ce6a702..f95d5fc 100644
      unsigned int sources;
  } raw_stats;
  
-@@ -69,9 +137,246 @@
+@@ -69,9 +137,258 @@
      unsigned long long mac_moves, mac_move_ns, posted_absolute, posted_relative, dropped_after_warp;
      unsigned long long warps, warp_ns, mouselook_moves, mouselook_posted, mouselook_enters, mouselook_exits;
      unsigned long long clicks, switches, pointer_ignored, pointer_fallback;
@@ -190,13 +190,25 @@ index ce6a702..f95d5fc 100644
 + * 2026), most likely routing the mouse to another application; HID input then
 + * would have turned the camera behind it.  Input after a quiet spell goes at
 + * once, and its first hid_confirm_window waits for no confirmation; then HID
-+ * withholds input until macOS's arrives.  A release always follows a press HID
-+ * delivered.  While it is the source, GCMouse's input is counted (hid_shadow),
-+ * to compare, and not delivered.  raw_queue only, except where atomic. */
++ * holds its motion until macOS's input arrives and then delivers it at once,
++ * since macOS's input is sometimes only late: in a
++ * match, Overwatch in front, GCMouse and AppKit once both went quiet for 0.3 s
++ * and GCMouse then caught up (October 25, 2026).  Motion held for longer than
++ * hid_hold_limit, and all that follows until macOS's input arrives, is dropped,
++ * as is motion held when raw input stopped.  Presses are withheld (AppKit's copy
++ * posts them when it arrives); a release always follows a press HID delivered.
++ * While HID is the source, GCMouse's input is counted (hid_shadow), to compare,
++ * and not delivered.  raw_queue only, except where atomic. */
 +enum { HID_DEVICES = 16, HID_SOURCE = 16 };
 +static unsigned long long macos_mouse_last;     /* uptime ns of macOS's latest mouse input here; atomic */
 +static const unsigned long long hid_confirm_window = 50000000;
 +static unsigned long long hid_unconfirmed_since;    /* uptime ns: HID input without macOS's since then */
++static const unsigned long long hid_hold_limit = 500000000;
++static unsigned long long hid_held_since;       /* uptime ns of the first motion held; 0: none */
++static unsigned long long hid_held_reports;
++static double hid_held_x, hid_held_y;           /* the motion held, HID orientation (Y down) */
++static int hid_held_source;
++static int hid_holding;                 /* motion is held: AppKit's input hands it over; atomic */
 +static unsigned int hid_buttons_down;           /* buttons whose press HID delivered */
 +static IOHIDManagerRef hid_manager;
 +static int hid_access = -1;             /* IOHIDAccessType, -1 when the setting is off; atomic */
@@ -215,7 +227,7 @@ index ce6a702..f95d5fc 100644
 +static BOOL hid_report_scheduled;
 +static struct
 +{
-+    unsigned long long reports, buttons, withheld;
++    unsigned long long reports, buttons, withheld, released;
 +} hid_stats;
 +static struct
 +{
@@ -354,7 +366,7 @@ index ce6a702..f95d5fc 100644
  
  /* Follows Wine's cursor, as Wine clips it, for placing the pointer when
   * mouselook ends.  Called with mouselook_lock held. */
-@@ -92,7 +397,8 @@ static void mouselook_move_position(int x, int y)
+@@ -92,7 +409,8 @@ static void mouselook_move_position(int x, int y)
  static void raw_flush(void)
  {
      int x = raw_pending_x, y = raw_pending_y;  /* truncation keeps the remainder */
@@ -364,7 +376,7 @@ index ce6a702..f95d5fc 100644
  
      raw_flush_armed = FALSE;
      if (!x && !y) return;
-@@ -103,7 +409,10 @@ static void raw_flush(void)
+@@ -103,7 +421,10 @@ static void raw_flush(void)
          macdrv_event* event = macdrv_create_event(MOUSE_MOVED_RELATIVE, raw_window);
          event->mouse_moved.x = x;
          event->mouse_moved.y = y;
@@ -376,7 +388,7 @@ index ce6a702..f95d5fc 100644
          [raw_window.queue postEvent:event];
          macdrv_release_event(event);
          mouselook_move_position(x, y);
-@@ -111,9 +420,14 @@ static void raw_flush(void)
+@@ -111,9 +432,14 @@ static void raw_flush(void)
          raw_pending_y -= y;
          raw_last_post = now;
          raw_stats.posted++;
@@ -391,7 +403,7 @@ index ce6a702..f95d5fc 100644
      os_unfair_lock_unlock(&mouselook_lock);
  }
  
-@@ -121,31 +435,363 @@ static void raw_flush(void)
+@@ -121,31 +447,426 @@ static void raw_flush(void)
   * between accumulates and is never dropped. */
  static void raw_motion(float dx, float dy, unsigned int source)
  {
@@ -584,6 +596,67 @@ index ce6a702..f95d5fc 100644
 +    return now - hid_unconfirmed_since < hid_confirm_window;
 +}
 +
++/* Motion macOS hasn't confirmed: held, or dropped once held for hid_hold_limit. */
++static void hid_hold(int device, uint32_t usage, CFIndex amount, BOOL fresh)
++{
++    unsigned long long now = raw_clock();
++
++    if (!hid_held_since)
++    {
++        hid_held_since = now;
++        __atomic_store_n(&hid_holding, 1, __ATOMIC_RELAXED);
++    }
++    if (now - hid_held_since > hid_hold_limit)
++    {
++        hid_stats.withheld += hid_held_reports + (fresh ? 1 : 0);
++        hid_held_reports = 0;
++        hid_held_x = hid_held_y = 0;
++        return;
++    }
++    if (usage == kHIDUsage_GD_X) hid_held_x += amount;
++    else hid_held_y += amount;
++    if (fresh) hid_held_reports++;
++    hid_held_source = HID_SOURCE + device;
++}
++
++/* Once macOS confirms HID's input again: the motion held goes with the next report,
++ * unless it was held for longer than hid_hold_limit (raw input stopped meanwhile). */
++static void hid_release_held(void)
++{
++    if (!hid_held_since) return;
++    if (raw_clock() - hid_held_since <= hid_hold_limit)
++    {
++        hid_pending_x += hid_held_x;
++        hid_pending_y += hid_held_y;
++        if (hid_held_x || hid_held_y) hid_pending_source = hid_held_source;
++        hid_stats.released += hid_held_reports;
++    }
++    else hid_stats.withheld += hid_held_reports;
++    hid_held_since = hid_held_reports = 0;
++    hid_held_x = hid_held_y = 0;
++    __atomic_store_n(&hid_holding, 0, __ATOMIC_RELAXED);
++}
++
++/* macOS's input arrived (GCMouse's handlers, on raw_queue too, or AppKit's through
++ * hid_hand_over): the motion held goes at once, even when the mouse has stopped since. */
++static void hid_deliver_held(void* context)
++{
++    if (!hid_held_since) return;
++    hid_release_held();
++    if ((hid_pending_x || hid_pending_y) && !hid_report_scheduled)
++    {
++        hid_report_scheduled = TRUE;
++        dispatch_async_f(raw_queue, NULL, hid_report_done);
++    }
++}
++
++/* AppKit's mouse event (main thread), once its time is recorded: only while motion is
++ * held does it cost more than a load. */
++static inline void hid_hand_over(void)
++{
++    if (__atomic_load_n(&hid_holding, __ATOMIC_RELAXED)) dispatch_async_f(raw_queue, NULL, hid_deliver_held);
++}
++
 +static void hid_value(void* context, IOReturn result, void* sender, IOHIDValueRef value)
 +{
 +    IOHIDElementRef element = IOHIDValueGetElement(value);
@@ -612,6 +685,7 @@ index ce6a702..f95d5fc 100644
 +        if (amount) hid_buttons_down |= bit;
 +        else hid_buttons_down &= ~bit;
 +        /* The motion before the change goes first, as GCMouse's does. */
++        if (amount || hid_confirmed()) hid_release_held();
 +        hid_report_done(NULL);
 +        raw_button(usage - 1, amount != 0, TRUE);
 +        return;
@@ -626,9 +700,10 @@ index ce6a702..f95d5fc 100644
 +    }
 +    if (!hid_confirmed())
 +    {
-+        if (fresh) hid_stats.withheld++;
++        hid_hold(i, usage, amount, fresh);
 +        return;
 +    }
++    hid_release_held();
 +    /* HID becomes the source with its first motion, not when a mouse opens: an
 +       opened mouse that never reports leaves GCMouse delivering. */
 +    if (!__atomic_load_n(&hid_active, __ATOMIC_RELAXED))
@@ -758,7 +833,7 @@ index ce6a702..f95d5fc 100644
  
  /* Whether every frame of a cursor is fully transparent.  Some clients hide
   * the cursor by setting an empty image rather than no cursor. */
-@@ -823,6 +1469,7 @@ - (void) keyboardSelectionDidChange:(BOOL)force
+@@ -823,6 +1544,7 @@ - (void) keyboardSelectionDidChange:(BOOL)force
  
      - (void) keyboardSelectionDidChange
      {
@@ -766,7 +841,7 @@ index ce6a702..f95d5fc 100644
          [self keyboardSelectionDidChange:NO];
      }
  
-@@ -838,6 +1485,8 @@ - (void) setKeyboardType:(CGEventSourceKeyboardType)newType
+@@ -838,6 +1560,8 @@ - (void) setKeyboardType:(CGEventSourceKeyboardType)newType
      - (void) enabledKeyboardInputSourcesChanged
      {
          macdrv_layout_list_needs_update = TRUE;
@@ -775,7 +850,7 @@ index ce6a702..f95d5fc 100644
      }
  
      - (CGFloat) primaryScreenHeight
-@@ -1034,8 +1683,57 @@ - (void) adjustWindowLevels
+@@ -1034,8 +1758,57 @@ - (void) adjustWindowLevels
          [self adjustWindowLevels:[NSApp isActive]];
      }
  
@@ -833,7 +908,7 @@ index ce6a702..f95d5fc 100644
          if (capture_displays_for_fullscreen && [NSApp isActive])
          {
              BOOL anyFullscreen = FALSE;
-@@ -1805,30 +2503,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
+@@ -1805,30 +2578,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
      {
          static int unscaled = -1;
          double scale = retina_on ? 2.0 : 1.0;
@@ -896,7 +971,7 @@ index ce6a702..f95d5fc 100644
              scale /= macdrv_v1_canvas_scale(mouselookWindow);
  
          // deltaY is already top-down, like Windows.
-@@ -1869,6 +2594,7 @@ - (void) startRawInput
+@@ -1869,6 +2669,7 @@ - (void) startRawInput
      {
          const char* setting = getenv("WINEMAC_MOUSELOOK_RAW");
          const char* interval = getenv("WINEMAC_MOUSELOOK_RAW_INTERVAL_US");
@@ -904,7 +979,7 @@ index ce6a702..f95d5fc 100644
          NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
          NSString* const* connected;
          NSString* const* disconnected;
-@@ -1880,6 +2606,32 @@ - (void) startRawInput
+@@ -1880,6 +2681,32 @@ - (void) startRawInput
              return;
          rawStarted = TRUE;
  
@@ -937,7 +1012,7 @@ index ce6a702..f95d5fc 100644
          framework = dlopen("/System/Library/Frameworks/GameController.framework/GameController", RTLD_LAZY | RTLD_LOCAL);
          mouseClass = NSClassFromString(@"GCMouse");
          connected = framework ? dlsym(framework, "GCMouseDidConnectNotification") : NULL;
-@@ -1900,6 +2652,9 @@ - (void) startRawInput
+@@ -1900,6 +2727,9 @@ - (void) startRawInput
          dispatch_source_set_timer(raw_timer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
          dispatch_resume(raw_timer);
  
@@ -947,7 +1022,7 @@ index ce6a702..f95d5fc 100644
          rawMice = [[NSMutableArray alloc] init];
          [center addObserverForName:*connected object:nil queue:[NSOperationQueue mainQueue]
                          usingBlock:^(NSNotification* note){ [self attachRawMouse:note.object]; }];
-@@ -1920,22 +2675,116 @@ - (void) attachRawMouse:(GCMouse*)mouse
+@@ -1920,22 +2750,120 @@ - (void) attachRawMouse:(GCMouse*)mouse
          // "Magic Trackpad").
          if ([mouse.vendorName rangeOfString:@"Trackpad" options:NSCaseInsensitiveSearch].location != NSNotFound)
              return;
@@ -985,6 +1060,7 @@ index ce6a702..f95d5fc 100644
 +                    hid_shadow.moves++;
 +                    hid_shadow.dx += fabs(deltaX);
 +                    hid_shadow.dy += fabs(deltaY);
++                    hid_deliver_held(NULL);
 +                }
 +                return;
 +            }
@@ -1005,7 +1081,10 @@ index ce6a702..f95d5fc 100644
 +                    if (!__atomic_load_n(&hid_active, __ATOMIC_ACQUIRE))
 +                        raw_button(number, pressed, FALSE);
 +                    else if (__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE))
++                    {
 +                        hid_shadow.buttons++;
++                        hid_deliver_held(NULL);
++                    }
 +                };
 +        }
 +        objc_setAssociatedObject(mouse, &raw_mouse_input_key, input, OBJC_ASSOCIATION_RETAIN);
@@ -1067,7 +1146,7 @@ index ce6a702..f95d5fc 100644
      /* Raw input delivers to the mouselook window unless it is unavailable or
         switched off. */
      - (void) updateRawInput
-@@ -1951,19 +2800,22 @@ - (void) updateRawInput
+@@ -1951,19 +2879,22 @@ - (void) updateRawInput
          [previous release];
      }
  
@@ -1096,7 +1175,7 @@ index ce6a702..f95d5fc 100644
          }
          if (!enabled || !mouselook_allowed || [anEvent keyCode] != kVK_ANSI_M)
              return NO;
-@@ -1978,16 +2830,57 @@ - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
+@@ -1978,16 +2909,57 @@ - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
              return NO;
  
          mouselookHotkeyDown = TRUE;
@@ -1156,7 +1235,7 @@ index ce6a702..f95d5fc 100644
      /* WINEMAC_INPUT_STATS=<prefix>: one JSON line per second to
         <prefix>-<pid>.jsonl while this process is frontmost or has input
         activity. */
-@@ -2007,7 +2900,11 @@ - (void) startInputStats
+@@ -2007,7 +2979,11 @@ - (void) startInputStats
      - (void) reportInputStats:(NSTimer*)timer
      {
          struct macdrv_input_stats wine;
@@ -1168,7 +1247,7 @@ index ce6a702..f95d5fc 100644
          const char* handler = !clipCursorHandler ? "none" :
              [clipCursorHandler isKindOfClass:[WineConfinementClipCursorHandler class]] ? "confinement" : "eventtap";
          WineWindow* key = (WineWindow*)[NSApp keyWindow];
-@@ -2016,6 +2913,14 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2016,6 +2992,14 @@ - (void) reportInputStats:(NSTimer*)timer
  #define TAKE(field) wine.field = __atomic_exchange_n(&macdrv_input_stats.field, 0, __ATOMIC_RELAXED)
          TAKE(moves_delivered); TAKE(deliver_ns); TAKE(setpos_calls); TAKE(setpos_fast); TAKE(setpos_ns);
          TAKE(setpos_max_ns); TAKE(getpos_calls); TAKE(getpos_ns); TAKE(clip_calls);
@@ -1183,7 +1262,7 @@ index ce6a702..f95d5fc 100644
  #undef TAKE
          wine.consumer_tid = macdrv_input_stats.consumer_tid;
          wine.setpos_tid = macdrv_input_stats.setpos_tid;
-@@ -2023,16 +2928,43 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2023,16 +3007,43 @@ - (void) reportInputStats:(NSTimer*)timer
              dispatch_sync(raw_queue, ^{
                  raw = raw_stats;
                  memset(&raw_stats, 0, sizeof(raw_stats));
@@ -1228,7 +1307,7 @@ index ce6a702..f95d5fc 100644
          fprintf(inputStatsFile,
                  "{\"schema\":1,\"unix_ms\":%.0f,\"pid\":%d,\"exe\":\"%s\",\"allowed\":%s,\"mode\":\"%s\","
                  "\"app_active\":%s,\"hidden\":%s,\"transparent\":%s,\"clipping\":%s,\"hidden_warp\":%s,\"clip_handler\":\"%s\","
-@@ -2041,12 +2973,37 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2041,12 +3052,37 @@ - (void) reportInputStats:(NSTimer*)timer
                  "\"posted_absolute\":%llu,\"posted_relative\":%llu,\"dropped_after_warp\":%llu,"
                  "\"warps\":%llu,\"warp_us\":%.1f,\"mouselook_moves\":%llu,\"mouselook_posted\":%llu,"
                  "\"mouselook_enters\":%llu,\"mouselook_exits\":%llu,\"clicks\":%llu,\"switches\":%llu,"
@@ -1238,7 +1317,7 @@ index ce6a702..f95d5fc 100644
 +                "\"raw_timing\":\"%s\",\"raw_posted_x\":%lld,\"raw_posted_y\":%lld,"
 +                "\"raw_source\":\"%s\",\"hid_access\":\"%s\",\"hid_open\":\"0x%08x\",\"hid_mice\":%d,"
 +                "\"hid_reports\":%llu,\"hid_buttons\":%llu,\"hid_shadow_moves\":%llu,\"hid_shadow_buttons\":%llu,"
-+                "\"hid_shadow_dx\":%.1f,\"hid_shadow_dy\":%.1f,\"hid_withheld\":%llu,"
++                "\"hid_shadow_dx\":%.1f,\"hid_shadow_dy\":%.1f,\"hid_withheld\":%llu,\"hid_released\":%llu,"
                  "\"pointer_ignored\":%llu,\"pointer_fallback\":%llu,"
 +                "\"pointer_unmatched\":%llu,\"pointer_unmatched_dx\":%.1f,\"pointer_unmatched_dy\":%.1f,"
                  "\"moves_delivered\":%llu,\"deliver_us\":%.1f,\"setpos_calls\":%llu,\"setpos_fast\":%llu,"
@@ -1267,7 +1346,7 @@ index ce6a702..f95d5fc 100644
                  [[NSDate date] timeIntervalSince1970] * 1000, getpid(), mouselook_process,
                  mouselook_allowed ? "true" : "false",
                  __atomic_load_n(&raw_on, __ATOMIC_ACQUIRE) ? "raw" : mouselookWindow ? "mouselook" : "legacy",
-@@ -2058,14 +3015,43 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2058,14 +3094,43 @@ - (void) reportInputStats:(NSTimer*)timer
                  cocoa_stats.posted_absolute, cocoa_stats.posted_relative, cocoa_stats.dropped_after_warp,
                  cocoa_stats.warps, cocoa_stats.warp_ns / 1e3, cocoa_stats.mouselook_moves, cocoa_stats.mouselook_posted,
                  cocoa_stats.mouselook_enters, cocoa_stats.mouselook_exits, cocoa_stats.clicks, cocoa_stats.switches,
@@ -1277,7 +1356,7 @@ index ce6a702..f95d5fc 100644
 +                (input_flags() & INPUT_REAL_TIME) ? "fixed" : "legacy", raw.posted_x, raw.posted_y,
 +                __atomic_load_n(&hid_active, __ATOMIC_ACQUIRE) ? "hid" : "gcmouse", hid_access_name(),
 +                (unsigned int)__atomic_load_n(&hid_open_result, __ATOMIC_RELAXED), __atomic_load_n(&hid_mice, __ATOMIC_RELAXED),
-+                hid.reports, hid.buttons, shadow.moves, shadow.buttons, shadow.dx, shadow.dy, hid.withheld,
++                hid.reports, hid.buttons, shadow.moves, shadow.buttons, shadow.dx, shadow.dy, hid.withheld, hid.released,
                  cocoa_stats.pointer_ignored, cocoa_stats.pointer_fallback,
 +                cocoa_stats.pointer_unmatched, cocoa_stats.pointer_unmatched_dx, cocoa_stats.pointer_unmatched_dy,
                  wine.moves_delivered, wine.deliver_ns / 1e3, wine.setpos_calls, wine.setpos_fast,
@@ -1312,7 +1391,7 @@ index ce6a702..f95d5fc 100644
      }
  
      - (BOOL) isKeyPressed:(uint16_t)keyCode
-@@ -2439,6 +3425,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+@@ -2439,6 +3504,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
                  unmatchedMouseDowns &= ~downMask;
              }
  
@@ -1324,23 +1403,25 @@ index ce6a702..f95d5fc 100644
              if (process)
              {
                  macdrv_event* event;
-@@ -2664,6 +3655,7 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+@@ -2664,6 +3734,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
          {
              unsigned long long start = macdrv_stat_clock();
  
 +            __atomic_store_n(&macos_mouse_last, raw_clock(), __ATOMIC_RELAXED);
++            hid_hand_over();
              [self handleMouseMove:anEvent];
              ret = mouseCaptureWindow && ![windowsBeingDragged count];
              if (macdrv_input_stats_on)
-@@ -2678,6 +3670,7 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+@@ -2678,6 +3750,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
                   type == NSEventTypeRightMouseDown || type == NSEventTypeRightMouseUp ||
                   type == NSEventTypeOtherMouseDown || type == NSEventTypeOtherMouseUp)
          {
 +            __atomic_store_n(&macos_mouse_last, raw_clock(), __ATOMIC_RELAXED);
++            hid_hand_over();
              [self handleMouseButton:anEvent];
              ret = mouseCaptureWindow && ![windowsBeingDragged count];
          }
-@@ -2895,6 +3888,7 @@ - (void) setupObservations
+@@ -2895,6 +3969,7 @@ - (void) setupObservations
                      usingBlock:^(NSNotification *note){
              if (displaysTemporarilyUncapturedForDialog)
              {
@@ -1348,7 +1429,7 @@ index ce6a702..f95d5fc 100644
                  [self applicationDidBecomeActive:nil];
  
                  displaysTemporarilyUncapturedForDialog = FALSE;
-@@ -3235,9 +4229,18 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3235,9 +4310,18 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          [self updateFullscreenWindows];
          [self adjustWindowLevels:YES];
  
@@ -1367,7 +1448,7 @@ index ce6a702..f95d5fc 100644
  
          // If a Wine process terminates abruptly while it has the display captured
          // and switched to a different resolution, Mac OS X will uncapture the
-@@ -3248,8 +4251,21 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3248,8 +4332,21 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          //
          // To solve this, we synthesize a displays-changed event whenever we're
          // activated.  This will provoke a re-synchronization of Wine's notion of
@@ -1391,7 +1472,7 @@ index ce6a702..f95d5fc 100644
  
          // The cursor probably moved while we were inactive.  Accumulated mouse
          // movement deltas are invalidated.  Make sure the next mouse move event
-@@ -3257,11 +4273,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3257,11 +4354,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          forceNextMouseMoveAbsolute = TRUE;
  
          [self updateMouselook];
@@ -1405,7 +1486,7 @@ index ce6a702..f95d5fc 100644
          [self sendDisplaysChanged:FALSE];
          [self adjustWindowLevels];
  
-@@ -3276,6 +4294,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
+@@ -3276,6 +4375,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
          macdrv_event* event;
          WineEventQueue* queue;
  
@@ -1415,7 +1496,7 @@ index ce6a702..f95d5fc 100644
          [self updateMouselook];
          [self invalidateGotFocusEvents];
          [self releasePressedKeys];
-@@ -3791,10 +4812,38 @@ void macdrv_quit_reply(int reply)
+@@ -3791,10 +4893,38 @@ void macdrv_quit_reply(int reply)
  bool macdrv_using_input_method(void)
  {
      __block bool ret;

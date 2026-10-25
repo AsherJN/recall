@@ -1,11 +1,13 @@
 // Shown once after an update and from the Help menu, offline. Edit for each
 // release with the public release notes: the same items, in the same order
-// (most important first); short, plain sentences.
+// (most important first); short, plain sentences. 1.6.1 follows 1.6.0 closely and
+// most players update from 1.5, so it keeps 1.6.0's items, with Mouse options
+// worded for 1.6.1 (owner, October 25).
 enum WhatsNew {
-    static let version="1.6.0"
+    static let version="1.6.1"
     static var items:[(symbol:String, title:String, detail:String)] { [
         ("computermouse",L("Mouse options"),
-         L("Choose how Overwatch reads your mouse in Settings › General › Mouse: Standard, Classic (the mouse as it worked in Recall 1.4) or High-precision. High-precision is experimental: it reads every movement straight from your mouse and needs Input Monitoring.")),
+         L("Choose how Overwatch reads your mouse in Settings › General › Mouse: Standard, Classic (the mouse as it worked in Recall 1.4) or High-precision, recommended for playing with a mouse. High-precision reads your mouse directly, skipping macOS’s mouse layer, and needs Input Monitoring.")),
         ("wrench.and.screwdriver",L("Fixes"),
          L("Fixed Overwatch freezing or the camera ignoring your mouse after Cmd-Tab in fullscreen, and Cmd-Tab bouncing back to Overwatch with Game Mode on. Improved display and monitor support. Fixed Battle.net reinstalling its update agent, Korean typing in Overwatch’s chat, and Overwatch closing at start on Korean accounts on macOS 27. You can go back to your external drive after choosing Set Up on This Mac Instead, and updates now show during setup and on error screens.")),
         ("headphones",L("Switch sound output any time"),

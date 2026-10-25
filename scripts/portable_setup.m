@@ -572,13 +572,23 @@ static NSMutableDictionary *battleNetSize(NSMutableDictionary *env, NSString *in
  * contract's input variant ("precise", 1.5's). Classic sets the window driver's "classic", 1.4's
  * clicks and timing with 1.5's stand-in. High-precision sets WINEMAC_RAW_SOURCE=hid: the driver
  * reads the mouse's own reports through IOHID instead of GCMouse, with Recall's Input Monitoring
- * permission; without it the driver keeps GCMouse. */
-static NSString *mouseInput=@"standard";
+ * permission; without it the driver keeps GCMouse.
+ * With Standard and High-precision, launch --mouse-rate (Mouse › Advanced; REC-63) sets the most
+ * deliveries a second: the driver's WINEMAC_MOUSELOOK_RAW_INTERVAL_US, 0 for every report (the
+ * default, and anything unknown) or a million over 2000, 1000, 500 or 250. Classic leaves the
+ * driver's own 1 ms, its 1.4 timing. */
+static NSString *mouseInput=@"standard",*mouseRate=@"all";
+static NSString *mouseIntervalMicroseconds(void) {
+    return [mouseRate isEqual:@"all"] ? @"0" : [NSString stringWithFormat:@"%d",1000000/mouseRate.intValue];
+}
 static NSMutableDictionary *clientEnvironment(NSMutableDictionary *env, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx) {
     if(sized)battleNetSize(env,nil);
     if(metalfx)[env addEntriesFromDictionary:candidateMetalFXEnvironment()];
     if([mouseInput isEqual:@"classic"])env[@"WINEMAC_INPUT_VARIANT"]=@"classic";
-    else if([mouseInput isEqual:@"high-precision"])env[@"WINEMAC_RAW_SOURCE"]=@"hid";
+    else {
+        if([mouseInput isEqual:@"high-precision"])env[@"WINEMAC_RAW_SOURCE"]=@"hid";
+        env[@"WINEMAC_MOUSELOOK_RAW_INTERVAL_US"]=mouseIntervalMicroseconds();
+    }
     if(koreanSupportChosen())env[@"WINEMAC_SCREEN_READBACK"]=@"1";
     if(!gameMode)[env removeObjectForKey:@"WINE_GAME_MODE"];
     if(hud)[env addEntriesFromDictionary:@{@"MTL_HUD_ENABLED":@"1",@"MTL_HUD_DISABLE_MENU_BAR":@"1",
@@ -762,7 +772,8 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     NSArray *chosen=loggingChoice(logging);
     NSMutableDictionary *record=[@{@"logging":loggingName(chosen),@"winedebug":env[@"WINEDEBUG"],@"dxmt_log_level":env[@"DXMT_LOG_LEVEL"],
         @"runtime":state()[@"active_runtime"],@"region":state()[@"battlenet_region"] ?: @"global",@"korean_support":@(koreanSupportChosen()),
-        @"game_mode":@(gameMode),@"metalfx":@(metalfx),@"metal_hud":@(hud),@"mouse_input":mouseInput} mutableCopy];
+        @"game_mode":@(gameMode),@"metalfx":@(metalfx),@"metal_hud":@(hud),@"mouse_input":mouseInput,
+        @"mouse_rate":[mouseInput isEqual:@"classic"] ? @"classic" : mouseRate} mutableCopy];
     if([chosen containsObject:@"custom"])record[@"logging_custom"]=loggingCustom;
     NSString *session=startSessionLog(record);
     // Mouse (REC-51): the window driver writes its report beside the session's record, one file per
@@ -854,6 +865,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         monitorPrepareNow=monitorMode && [options[@"prepare-now"] isEqual:@"1"];
         if(monitorMode && validSessionName(options[@"session"]))monitorSession=options[@"session"];
         if([@[@"classic",@"high-precision"] containsObject:options[@"mouse"] ?: @""])mouseInput=options[@"mouse"];
+        if([@[@"2000",@"1000",@"500",@"250"] containsObject:options[@"mouse-rate"] ?: @""])mouseRate=options[@"mouse-rate"];
         if([command isEqual:@"preflight"])preflight();
         else if([command isEqual:@"status"]) {
             // The resolution Overwatch opens at next on the main display.

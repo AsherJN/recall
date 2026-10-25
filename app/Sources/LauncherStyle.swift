@@ -148,6 +148,24 @@ private struct LauncherActionStyle: ButtonStyle {
             .animation(reduceMotion ? nil : .easeOut(duration:0.16),value:configuration.isPressed)
     }
 }
+/// A card's or pop-up's main button in the primary action's colours, ink on the accent (the
+/// system's prominent button draws white on it, too faint to read): small for a card (the
+/// High-precision card), large for a pop-up's confirming button.
+struct AccentButtonStyle: ButtonStyle {
+    var large=false
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.isFocused) private var focused
+    func makeBody(configuration:Configuration)->some View {
+        configuration.label.font(LauncherStyle.font(large ? 15 : 12,.semibold))
+            .padding(.horizontal,large ? 22 : 12).padding(.vertical,large ? 8 : 4)
+            .frame(minHeight:large ? 32 : 22)
+            .foregroundStyle(enabled ? LauncherStyle.ink : Color.secondary)
+            .background(enabled ? LauncherStyle.accent : Color.secondary.opacity(0.12),in:Capsule())
+            .contentShape(Capsule())
+            .overlay { Capsule().strokeBorder(focused ? Color.primary.opacity(0.8) : .clear,lineWidth:2).padding(-3) }
+            .opacity(configuration.isPressed ? 0.82 : 1)
+    }
+}
 struct LauncherNotice: View {
     let text:String
     var symbol="info.circle"

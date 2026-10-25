@@ -378,6 +378,17 @@ class DisplaySetup(setup.NativeSetup):
         self.assertEqual((precise['WINEMAC_INPUT_VARIANT'],precise['WINEMAC_RAW_SOURCE']),('precise','hid'))
         other=launched('--mouse','legacy')
         self.assertEqual((other['WINEMAC_INPUT_VARIANT'],'WINEMAC_RAW_SOURCE' in other),('precise',False))
+        # Mouse › Advanced (REC-63): Overwatch gets every report unless the player lowers it, then at
+        # most that many a second (the driver's interval in microseconds). Classic keeps the driver's
+        # own 1 ms, its 1.4 timing; a rate the app doesn't offer is every report.
+        rate='WINEMAC_MOUSELOOK_RAW_INTERVAL_US'
+        self.assertEqual((hud[rate],precise[rate],other[rate]),('0','0','0'))
+        self.assertNotIn(rate,classic)
+        for chosen,interval in [('all','0'),('2000','500'),('1000','1000'),('500','2000'),('250','4000'),('8000','0'),('','0')]:
+            self.assertEqual(launched('--mouse-rate',chosen)[rate],interval,chosen)
+        lowered=launched('--mouse','high-precision','--mouse-rate','500')
+        self.assertEqual((lowered['WINEMAC_RAW_SOURCE'],lowered[rate]),('hid','2000'))
+        self.assertNotIn(rate,launched('--mouse','classic','--mouse-rate','500'))
     def test_battlenet_keeps_windows_dpi_on_a_main_display_without_retina(self):
         # Without Retina mode (a main display that isn't Retina, portable_retina.h) a Windows
         # pixel is a point already: Battle.net at 192 DPI would come out twice its size.
@@ -428,12 +439,15 @@ class DisplaySetup(setup.NativeSetup):
         self.assertEqual(report(mouse),(str((self.root/'logs/sessions'/session).resolve()),'input'))
         self.assertEqual(mouse.get('WINEDEBUG'),quiet.get('WINEDEBUG'))  # no Wine logging of its own
         record=setup.json.loads((self.root/'logs/sessions'/session/'session.json').read_text())
-        self.assertEqual((record['logging'],record['mouse_input']),('mouse','standard'))
-        session,both=launched('--logging','mouse,crashes','--mouse','classic')
+        self.assertEqual((record['logging'],record['mouse_input'],record['mouse_rate']),('mouse','standard','all'))
+        session,_=launched('--logging','mouse','--mouse-rate','1000')
+        record=setup.json.loads((self.root/'logs/sessions'/session/'session.json').read_text())
+        self.assertEqual(record['mouse_rate'],'1000')
+        session,both=launched('--logging','mouse,crashes','--mouse','classic','--mouse-rate','1000')
         self.assertEqual(report(both),(str((self.root/'logs/sessions'/session).resolve()),'input'))
         self.assertIn('+seh',both['WINEDEBUG'])
         record=setup.json.loads((self.root/'logs/sessions'/session/'session.json').read_text())
-        self.assertEqual((record['logging'],record['mouse_input']),('crashes,mouse','classic'))
+        self.assertEqual((record['logging'],record['mouse_input'],record['mouse_rate']),('crashes,mouse','classic','classic'))
     # Overwatch's own record of the graphics card, as on the owner's Mac (CRLF, with the
     # stray line feed an early seed left in [Render.13]).
     M1=b'[GPU.6]\r\nGPUIndex = "0"\r\nGPUName = "Apple M1 Pro"\r\nGPUScaler = "31.000000"\r\nGPUVenderID = "4203"\r\nLastUsedGPUVendorID = "4203"\r\n\r\n'

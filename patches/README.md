@@ -172,7 +172,9 @@ patches above:
   opens only devices with a mouse collection, trackpads excepted, and reads only
   their X, Y and button elements, never keys. Their input reaches the game only
   while macOS still gives the game mouse input of its own, so the camera never
-  turns while another app has the mouse. Without the permission or a mouse, the
+  turns while another app has the mouse. When macOS's own input is only late, the
+  movement in between is held for up to half a second and delivered when it
+  arrives. Without the permission or a mouse, the
   Game Controller input stays;
 - Korean and other input methods get each key after the window's input context
   is made the current one, so typing in the game's chat works (contributed by

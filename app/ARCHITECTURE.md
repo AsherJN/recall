@@ -110,11 +110,17 @@ chooses; setup doesn't ask) is one of three, passed as `launch --mouse`. Standar
 launch contract's input variant, `precise` (1.5's: clicks from Apple's mouse input for games,
 GCMouse, in order with its movement). Classic (REC-57) has the worker set the window driver's
 `classic`: 1.4's clicks and timing, with 1.5's stand-in while GCMouse is silent. High-precision
-(REC-52, experimental) has it set `WINEMAC_RAW_SOURCE=hid`: the driver reads the mouse's own
-reports through IOHID instead of GCMouse, which loses some in game. Choosing it first opens
-`HighPrecisionMouseSheet`, which explains it, why macOS will ask for Input Monitoring and how
-to undo it, and links the Discord post for feedback (GitHub on China's Battle.net). Its
-Continue chooses it and shows macOS's prompt the first time. IOHID needs Input Monitoring,
+(REC-52; recommended from 1.6.1, REC-64) has it set `WINEMAC_RAW_SOURCE=hid`: the driver reads
+the mouse's own reports through IOHID instead of GCMouse, which loses some in game. Choosing it
+first opens `HighPrecisionMouseSheet`, which explains it in plain words, why macOS will ask to
+let Recall "receive keystrokes", how to undo it and what macOS shows next, and links the
+Discord post for feedback (GitHub on China's Battle.net). Its Turn On
+(`AppModel.turnOnHighPrecision`) chooses it and shows macOS's prompt the first time, or after
+a no opens System Settings, since macOS asks only once. The Play screen's card
+(`HighPrecisionCard`, `HighPrecisionInvite`) invites players to it once Overwatch is installed,
+while Battle.net is closed and a mouse is connected (the driver's rule, read from the I/O
+Registry, which needs no permission), and after it is chosen reminds them to finish the
+permission; closing it, or leaving High-precision, hides it for good. IOHID needs Input Monitoring,
 the app's permission as the microphone is (`InputMonitoring.swift`): the panel links to the
 switch in System Settings until it is allowed, and the game's process, which the app
 started, has the app's answer. Without it the driver keeps GCMouse and asks nothing. The
@@ -122,6 +128,16 @@ driver opens only devices with a mouse collection, trackpads excepted, reads onl
 buttons, passes their input on only while macOS still gives the game mouse input of its own
 (so not while another app has the mouse), and counts GCMouse's input beside it for
 comparison (the Mouse logging preset's `hid_shadow_*`).
+
+Mouse › Advanced (`AppModel.MouseRate`, REC-63), closed until the player opens it, sets at
+most how many times a second Overwatch gets the mouse's movement: every report (the default
+from 1.6.1), or 2,000, 1,000 (1.6.0's), 500 or 250, passed as `launch --mouse-rate`. The worker
+sets the window driver's `WINEMAC_MOUSELOOK_RAW_INTERVAL_US` (0, or a million over the rate);
+the driver adds up what comes in between, so no movement is lost, only later. Classic keeps
+the driver's own 1 ms, its 1.4 timing, so the worker leaves the variable out there and the
+section says so in place of the slider. In the owner's test of October 25 (4,000 Hz,
+High-precision) every report brought movement 1.6 ms sooner than 1,000 a second, at no FPS
+cost. The Support Report (`mouse_rate`) and the session record name the choice.
 
 Overwatch's voice chat uses the app's microphone permission: to macOS the game runs
 as part of the app, and the app and Wine are signed with the microphone entitlement.

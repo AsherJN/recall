@@ -61,6 +61,7 @@ struct SetupView: View {
             case .korea: KoreanSupportSheet(confirm:model.confirmBattleNet)
             case .changeRegion: ChangeRegionSheet(model:model).interactiveDismissDisabled(model.regionChange == .working)
             case .otherInstallation: OtherInstallationSheet(model:model)
+            case .highPrecision: HighPrecisionMouseSheet(access:model.inputMonitoring,discord:model.showsDiscord,confirm:model.turnOnHighPrecision)
             }
         }
         .task { model.startup() }
@@ -191,6 +192,11 @@ struct SetupView: View {
                 PerformanceTip(model:model)
                 if model.showKoreanTip { KoreanAccountTip(open:model.openRegionSettings) { model.koreanTipDismissed=true } }
                 if !model.gameInstalled { SignInNote(model:model) }
+                if let stage=model.highPrecisionInvite {
+                    HighPrecisionCard(stage:stage,open:{
+                        if stage == .invite { model.sheet = .highPrecision } else { NSWorkspace.shared.open(InputMonitoring.privacySettings) }
+                    },close:model.closeHighPrecisionInvite)
+                }
                 firstMatchTip
             }
         case .running:
@@ -704,6 +710,36 @@ struct KoreanAccountTip: View {
         }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
             .padding(16).frame(maxWidth:.infinity,alignment:.leading)
             .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
+    }
+}
+// REC-64: the Play screen's invitation to the High-precision mouse and, once it's chosen, the
+// reminder to finish macOS's permission (HighPrecisionInvite, AppModel.highPrecisionInvite). Its
+// close button hides it for good.
+struct HighPrecisionCard: View {
+    let stage:HighPrecisionInvite
+    let open:()->Void
+    let close:()->Void
+    var body:some View {
+        HStack(alignment:.top,spacing:14) {
+            Image(systemName:"cursorarrow.motionlines").font(.system(size:18,weight:.medium)).foregroundStyle(.primary)
+                .frame(width:40,height:40).background(LauncherStyle.accent.opacity(0.22),in:RoundedRectangle(cornerRadius:12,style:.continuous))
+                .accessibilityHidden(true)
+            VStack(alignment:.leading,spacing:4) {
+                Text(stage == .invite ? L("Try the High-precision mouse") : L("One more step for High-precision"))
+                    .font(LauncherStyle.font(14,.semibold)).foregroundStyle(.primary).accessibilityAddTraits(.isHeader)
+                Text(stage == .invite ? L("Overwatch reads your mouse directly, skipping macOS’s mouse layer, for the most precise aim.")
+                                      : L("Switch on {0} in System Settings › Privacy & Security › Input Monitoring. Until then, your mouse works as Standard does.",Brand.name))
+                    .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+                Button(stage == .invite ? L("Turn On…") : L("Open System Settings"),action:open)
+                    .buttonStyle(AccentButtonStyle()).padding(.top,8)
+            }
+            Spacer(minLength:0)
+            Button(action:close) { Image(systemName:"xmark").font(.system(size:11,weight:.bold)).frame(width:22,height:22).contentShape(Rectangle()) }
+                .buttonStyle(.borderless).foregroundStyle(.secondary).help(L("Dismiss this tip")).accessibilityLabel(L("Dismiss tip"))
+        }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+            .padding(16).frame(maxWidth:.infinity,alignment:.leading)
+            .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
+            .overlay { RoundedRectangle(cornerRadius:16,style:.continuous).strokeBorder(LauncherStyle.accent.opacity(0.25),lineWidth:1) }
     }
 }
 // The footer's three destinations, sized as buttons.
