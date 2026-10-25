@@ -26,3 +26,16 @@ as required by the individual component licenses.
 This repository does not grant rights to any third-party trademarks or game
 assets. Source availability is distinct from permission to redistribute Apple
 components or to market the complete runtime for a particular intended use.
+
+## Stats system readers
+
+`app/Sources/StatsHUD.swift` adapts the CPU tick-delta calculation and host reader,
+IOAccelerator utilization lookup, and IOPS battery/time-to-empty lookup from
+[exelban/Stats](https://github.com/exelban/stats/tree/ffdf63741af0e801318c129ed29253f4e3679c4f):
+`Modules/CPU/readers.swift`, `Modules/GPU/reader.swift`,
+`Modules/Battery/readers.swift`, and `Kit/helpers.swift`.
+Copyright (c) 2019 Serhiy Mytrovtsiy; MIT license in `licenses/STATS-MIT`, also
+included in built apps. Adaptations remove Stats' module/UI dependencies, include
+nice CPU time, discard the first CPU sample, release the host port, and distinguish
+unavailable readings from zero. Battery estimates come from macOS's existing
+estimator; GPU usage is the busiest reporting device, CPU usage is system-wide.

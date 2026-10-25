@@ -1,5 +1,16 @@
 {
   "Localizable": {
+    "Shows CPU, GPU, battery and local time while Overwatch is active.": "在《守望先锋》处于前台时显示 CPU、GPU、电池和当地时间。",
+    "AC Power": "外接电源",
+    "GPU": "GPU",
+    "CPU": "CPU",
+    "Plugged in": "已接通电源",
+    "Charging": "正在充电",
+    "{0} until full": "距充满还需 {0}",
+    "Fully charged": "已充满",
+    "Estimating…": "正在估算…",
+    "≈ {0} remaining": "预计剩余 {0}",
+    "System Stats HUD": "系统状态 HUD",
     "Shader cache cleared. {0} rebuilds it after your next match.": "着色器缓存已清除。{0} 会在你的下一局比赛后重新构建。",
     "Move {0} to Applications": "将 {0} 移到“应用程序”",
     "{0} is already installed": "{0} 已安装",

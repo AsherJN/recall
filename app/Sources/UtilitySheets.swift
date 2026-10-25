@@ -111,6 +111,7 @@ struct SettingsSheet:View {
             battleNet
         case .display:
             display
+            systemStatsHUD
             resetDisplay
         case .graphics:
             upscaling
@@ -327,6 +328,13 @@ struct SettingsSheet:View {
                 }
                 if let running=model.running { closeFirst(running,several:true) }
             }
+        }
+    }
+    private var systemStatsHUD:some View {
+        LauncherPanel(inset:16) {
+            SettingSwitch(title:L("System Stats HUD"),
+                          detail:L("Shows CPU, GPU, battery and local time while Overwatch is active."),
+                          isOn:$model.systemStatsHUD)
         }
     }
     /// Overwatch gets the HUD from Battle.net, which starts it; so the switch changes only

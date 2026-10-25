@@ -97,3 +97,27 @@ review. It is not a guarantee that arbitrary text contains no sensitive data.
 When contributing changes to a third-party project, follow that project's own
 contribution policy. This integration repository does not claim authorship of
 upstream rendering or compatibility implementations.
+
+## System stats HUD
+
+**Settings → Display → System Stats HUD** toggles a small click-through strip at
+the upper left of each display while Recall’s Overwatch app is active, including
+fullscreen Spaces. Switching apps hides it and stops sampling. It defaults to off,
+remembers the choice, and applies immediately without restarting the game.
+CPU and GPU usage are system-wide, not game-only.
+Battery time is macOS's estimate and can take time to adjust after starting a game;
+`…` means the OS has no estimate, and `—` means a metric is unavailable.
+
+Build Recall normally as described above. Test a fullscreen match at 16:9 and
+16:10, switch Spaces, alt-tab, toggle it during a match, and confirm clicks/aim
+still pass through the strip. Layout previews alone cannot establish in-game
+window ordering or input behavior.
+
+Reader edge cases, live API smoke checks, and panel show/hide checks:
+
+```sh
+mkdir -p build
+xcrun swiftc -parse-as-library app/Sources/StatsHUD.swift app/Sources/Localization.swift \
+  tests/StatsHUDTests.swift -o build/StatsHUDTests
+build/StatsHUDTests
+```

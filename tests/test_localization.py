@@ -35,6 +35,7 @@ STATE = re.compile(r'^[a-z][a-z0-9_-]*$')
 UNITS = {'ms', 'Hz', 'GB', 'MB', 'FPS'}
 # Literals that read like sentences but never reach the screen.
 NOT_SCREEN_TEXT = {
+    'Device Utilization %', 'GPU Activity(%)',  # IORegistry keys in StatsHUD, never UI text
     'Overwatch 2 Mac',  # the app's old name, replaced when Recall moves into Applications
     'Light appearance', 'Dark appearance',  # preview builds' developer menu
     # The pipeline helper's log lines, which ShaderRecord turns into support report codes.

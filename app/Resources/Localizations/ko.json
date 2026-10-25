@@ -1,5 +1,16 @@
 {
   "Localizable": {
+    "Shows CPU, GPU, battery and local time while Overwatch is active.": "오버워치가 활성화되어 있을 때 CPU, GPU, 배터리 및 현지 시간을 표시합니다.",
+    "AC Power": "외부 전원",
+    "GPU": "GPU",
+    "CPU": "CPU",
+    "Plugged in": "전원 연결됨",
+    "Charging": "충전 중",
+    "{0} until full": "완충까지 {0}",
+    "Fully charged": "완전히 충전됨",
+    "Estimating…": "예상 시간 계산 중…",
+    "≈ {0} remaining": "약 {0} 남음",
+    "System Stats HUD": "시스템 상태 HUD",
     "Shader cache cleared. {0} rebuilds it after your next match.": "셰이더 캐시를 지웠습니다. 다음 경기가 끝나면 {0}이 다시 만듭니다.",
     "Move {0} to Applications": "{0}을 응용 프로그램 폴더로 이동",
     "{0} is already installed": "{0}이 이미 설치되어 있습니다",
