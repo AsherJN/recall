@@ -19,8 +19,13 @@ struct SetupView: View {
                             LauncherHeading(title:model.title,subtitle:subtitle)
                         }
                         details
+                        if model.offersOtherInstallation { OtherInstallationNote(model:model) }
                         VStack(spacing:12) { actions }
-                        if !model.notice.isEmpty { LauncherNotice(text:model.notice) }
+                        if !model.notice.isEmpty {
+                            if let topic=model.noticeTopic {
+                                LauncherNotice(text:model.notice,action:(L("Open Help"),{ model.openHelp(.troubleshooting,topic:topic) }))
+                            } else { LauncherNotice(text:model.notice) }
+                        }
                         // Below Cancel, above the support card: collapsed to one line by default.
                         if model.screen == .launching && model.graphics.phase != nil { GraphicsDetails(progress:model.graphics) }
                     }.frame(maxWidth:LauncherStyle.contentWidth).padding(.top,model.screen == .welcome ? 28 : 34)
@@ -55,6 +60,7 @@ struct SetupView: View {
             case .china: ChinaBattleNetSheet(confirm:model.confirmBattleNet)
             case .korea: KoreanSupportSheet(confirm:model.confirmBattleNet)
             case .changeRegion: ChangeRegionSheet(model:model).interactiveDismissDisabled(model.regionChange == .working)
+            case .otherInstallation: OtherInstallationSheet(model:model)
             }
         }
         .task { model.startup() }
@@ -160,9 +166,9 @@ struct SetupView: View {
         case .readyToInstall:
             VStack(spacing:16) {
                 if !model.clientInstalled { battleNetSummary }
-                if model.canChangeLocation { locationPanel }
+                if showsLocation { locationPanel }
                 if model.lowStorage { storageWarning }
-                else if !model.gameInstalled && !model.canChangeLocation { Text(L("A new installation needs about 85–95 GB of free space.")).foregroundStyle(.secondary).font(LauncherStyle.font(13)) }
+                else if !model.gameInstalled && !showsLocation { Text(L("A new installation needs about 85–95 GB of free space.")).foregroundStyle(.secondary).font(LauncherStyle.font(13)) }
                 if model.lowMemory && !model.gameInstalled { memoryWarning }
             }
         case .installer:
@@ -172,6 +178,10 @@ struct SetupView: View {
         case .failure:
             if model.failure.code == "rosetta_required" {
                 Text(L("macOS will guide you through Apple’s installation.")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+            } else if model.failure.isFolderAccess {
+                // REC-54: the folder to fix, as Finder will show it.
+                Text(verbatim:(model.folderToFix.path as NSString).abbreviatingWithTildeInPath)
+                    .font(LauncherStyle.font(13)).foregroundStyle(.secondary).multilineTextAlignment(.center).textSelection(.enabled)
             }
         case .ready:
             VStack(spacing:16) {
@@ -261,30 +271,41 @@ struct SetupView: View {
         }
     }
     // Already filled in with the internal default: an optional change, not a
-    // required decision. "Choose Another Location…" opens a folder picker.
-    private enum LocationChoice: Hashable { case standard, current, other }
+    // required decision. "Choose Another Location…" opens a folder picker. Once setup has
+    // installed something here, the menu stays only to go back to another installation (REC-44).
+    private var showsLocation:Bool { model.canChangeLocation || model.otherInstallation != nil }
+    private enum LocationChoice: Hashable { case standard, current, installation, other }
     private var locationPanel:some View {
         let choice=Binding<LocationChoice>(
             get: { InstallLocation.isStandard(model.root) ? .standard : .current },
             set: { value in
                 switch value {
                 case .standard: model.useLocation(InstallLocation.standard)
+                case .installation: DispatchQueue.main.async { model.chooseOtherInstallation() }
                 case .other: DispatchQueue.main.async { model.chooseOtherLocation() }
                 case .current: break
                 }
             })
+        let standardOffered=InstallLocation.isStandard(model.root) || (model.canChangeLocation && model.otherInstallation.map(InstallLocation.isStandard) != true)
         return LauncherPanel {
             VStack(alignment:.leading,spacing:8) {
                 HStack(spacing:12) {
                     Text(L("Install location")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
                     Spacer(minLength:8)
                     Picker(L("Install location"),selection:choice) {
-                        Label(InstallLocation.title(InstallLocation.standard),systemImage:"internaldrive").tag(LocationChoice.standard)
+                        if standardOffered {
+                            Label(InstallLocation.title(InstallLocation.standard),systemImage:"internaldrive").tag(LocationChoice.standard)
+                        }
                         if !InstallLocation.isStandard(model.root) {
                             Label(InstallLocation.title(model.root),systemImage:InstallLocation.symbol(model.root)).tag(LocationChoice.current)
                         }
-                        Divider()
-                        Text(L("Choose Another Location…")).tag(LocationChoice.other)
+                        if let other=model.otherInstallation {
+                            Label(InstallLocation.title(other),systemImage:InstallLocation.driveSymbol(other)).tag(LocationChoice.installation)
+                        }
+                        if model.canChangeLocation {
+                            Divider()
+                            Text(L("Choose Another Location…")).tag(LocationChoice.other)
+                        }
                     }.labelsHidden().pickerStyle(.menu).fixedSize().disabled(model.busy)
                         .help(model.root.path)
                 }
@@ -352,6 +373,13 @@ struct SetupView: View {
             if model.failure.code == "rosetta_required" {
                 LauncherPrimaryAction(title:L("Install Rosetta"),action:model.installRosetta).keyboardShortcut(.defaultAction).disabled(model.busy)
                 Button(L("Check Again"),action:retry).buttonStyle(.borderless).disabled(model.busy)
+            } else if model.failure.isFolderAccess {
+                // REC-54: Retry alone can never get past a folder macOS keeps locked.
+                LauncherPrimaryAction(title:L("Show in Finder"),action:model.showFolder).keyboardShortcut(.defaultAction)
+                HStack(spacing:24) {
+                    Button(L("How to Fix It")) { model.openHelp(.troubleshooting,topic:InstallLocation.folderAccessTopic) }.buttonStyle(.borderless)
+                    Button(L("Try Again"),action:retry).buttonStyle(.borderless).disabled(model.busy)
+                }
             } else {
                 LauncherPrimaryAction(title:model.failure.code == "cancelled" ? L("Resume Setup") : L("Try Again"),action:retry).keyboardShortcut(.defaultAction).disabled(model.busy)
             }
@@ -587,6 +615,18 @@ struct GameClosingNote: View {
                        symbol:"hourglass",action:(L("Force Quit…"),{ NSApp.sendAction(#selector(AppDelegate.forceQuit),to:nil,from:nil) }))
     }
 }
+// REC-44: after Set Up on This Mac Instead, the installation on the other drive is one button
+// away on every screen where setup waits for the player.
+struct OtherInstallationNote: View {
+    let model:AppModel
+    var body:some View {
+        if let other=model.otherInstallation {
+            let name=InstallLocation.driveName(other)
+            LauncherNotice(text:L("Your installation on “{0}” is still there.",name),symbol:InstallLocation.driveSymbol(other),
+                           action:(L("Use “{0}”",name),model.chooseOtherInstallation))
+        }
+    }
+}
 // Before Overwatch is installed, while the player signs in to Battle.net (issue #33). China's
 // Battle.net signs in with a NetEase account through the browser, with the same hand-off back.
 struct SignInNote: View {
@@ -607,31 +647,31 @@ struct SignInNote: View {
 // it on hover.
 struct LoggingReminder: View {
     @Bindable var model:AppModel
-    static func shows(_ model:AppModel)->Bool { model.logging != .off || (model.sessionLogging ?? .off) != .off }
+    static func shows(_ model:AppModel)->Bool { !model.logging.isOff || !(model.sessionLogging ?? .off).isOff }
     private var title:String {
-        if model.logging == .off { return L("Still logging until Battle.net closes") }
+        if model.logging.isOff { return L("Still logging until Battle.net closes") }
         if model.sessionLogging == .off { return L("Logging starts next launch") }
         return L("Logging is on")
     }
     /// What's recorded: the setting, or what the open Battle.net opened with once it's off.
-    private var setting:LoggingSetting { model.logging == .off ? (model.sessionLogging ?? .off) : model.logging }
+    private var setting:LoggingSetting { model.logging.isOff ? (model.sessionLogging ?? .off) : model.logging }
     var body:some View {
         VStack(alignment:.leading,spacing:6) {
             HStack(spacing:10) {
                 Image(systemName:"doc.text.magnifyingglass").accessibilityHidden(true)
                 // On one line where it fits (most of the time, in each language), else the setting below.
                 ViewThatFits(in:.horizontal) {
-                    HStack(spacing:5) { Text(title).fontWeight(.semibold).foregroundStyle(.primary);Text(verbatim:"·");Text(setting.title) }
+                    HStack(spacing:5) { Text(title).fontWeight(.semibold).foregroundStyle(.primary);Text(verbatim:"·");Text(setting.title()) }
                         .lineLimit(1).fixedSize()
                     VStack(alignment:.leading,spacing:1) {
                         Text(title).fontWeight(.semibold).foregroundStyle(.primary).fixedSize(horizontal:false,vertical:true)
-                        Text(setting.title).font(LauncherStyle.font(12))
+                        Text(setting.title()).font(LauncherStyle.font(12))
                     }
                 }.accessibilityElement(children:.combine)
                 Spacer(minLength:8)
                 HStack(spacing:6) {
                     Button(model.savingLogs ? L("Saving…") : L("Save Logs…"),action:model.saveLogs).disabled(model.savingLogs)
-                    if model.logging != .off { Button(L("Turn Off")) { model.logging = .off } }
+                    if !model.logging.isOff { Button(L("Turn Off")) { model.logging = .off } }
                 }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).foregroundStyle(.primary).fixedSize()
             }
             if let saved=model.savedLogs {

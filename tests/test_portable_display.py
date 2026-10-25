@@ -1,5 +1,6 @@
 """Real native display edits preserve unrelated game preferences and ownership."""
 import json
+import os
 import re
 import subprocess
 import sys
@@ -66,8 +67,9 @@ class DisplaySetup(setup.NativeSetup):
         self.assertNotIn('forged',[e.get('code') for e in events])
     def test_launch_names_the_game_app_whose_shaders_are_warmed(self):
         # With Game Mode the game runs as the engine's game app, which keeps its own
-        # shader cache; the pipeline helper warms it. Without the app or Game Mode the
-        # helper gets the installation only.
+        # shader cache; the pipeline helper warms it. Without Game Mode it runs as Wine's
+        # own loader, which keeps another (REC-51). With neither in the engine the helper
+        # gets the installation only.
         self.profile(b'[Render.13]\n')
         engine=self.root/'runtimes/v1'
         (engine/'config/dxmt.conf').write_text((setup.ROOT/'config/dxmt-source60-1200.conf').read_text())
@@ -87,6 +89,10 @@ class DisplaySetup(setup.NativeSetup):
         (app/'Contents').mkdir(parents=True);(app/'Contents/Info.plist').write_text('<plist/>')
         self.assertEqual(arguments(),[str(self.root),str(app)])
         self.assertEqual(arguments('--game-mode','0'),[str(self.root)])
+        loader=engine/'lib/wine/x86_64-unix/wine'
+        loader.parent.mkdir(parents=True,exist_ok=True);loader.write_text('#!/bin/sh\n');loader.chmod(0o755)
+        self.assertEqual(arguments('--game-mode','0'),[str(self.root),str(loader)])
+        self.assertEqual(arguments('--game-mode','1'),[str(self.root),str(app)])
     def test_launch_first_stops_the_last_sessions_preparation(self):
         # After a match the session's monitor prepares the archive, which takes minutes.
         # A launch stops it (it holds launch-monitor.lock, its pid in the cache) before
@@ -302,6 +308,30 @@ class DisplaySetup(setup.NativeSetup):
         self.call('launch',success=False)
         self.assertTrue(ended())
         self.assertEqual(self.call('status')[-1]['state']['session_displays'],displays)
+    def test_launch_ends_a_session_before_changing_retina_mode(self):
+        # Retina mode follows the main display and changes only between sessions; one kept
+        # alive by Battle.net's update Agent is ended first, as for a display change.
+        self.profile(b'[Render.13]\n')
+        engine=self.root/'runtimes/v1'
+        (engine/'config/dxmt.conf').write_text((setup.ROOT/'config/dxmt-source60-1200.conf').read_text())
+        environment=self.root/'environment'
+        (environment/'user.reg').write_text('[Software\\\\Wine\\\\Mac Driver]\n"RetinaMode"="Y"\n')
+        client=environment/'drive_c/Program Files (x86)/Battle.net/Battle.net.exe'
+        client.parent.mkdir(parents=True);client.write_text('fixture')
+        calls=self.base/'wineserver-calls'
+        server=engine/'bin/wineserver';server.write_text(f'#!/bin/sh\necho "$1" >> "{calls}"\nexit 0\n');server.chmod(0o755)
+        wine=engine/'bin/wine'
+        wine.write_text('#!/bin/sh\ncase "$*" in *RetinaMode*) /usr/bin/sed -i "" "s/RetinaMode\\"=\\"Y/RetinaMode\\"=\\"N/" "$WINEPREFIX/user.reg";; esac\nexit 0\n')
+        wine.chmod(0o755)
+        self.addCleanup(subprocess.run,['pkill','-f',f'ow2-setup watch --root {self.root}'])
+        self.call('launch')  # a first session under these displays
+        calls.unlink(missing_ok=True)
+        os.environ['OW2_SETUP_TEST_DISPLAY_SCALE']='1'
+        self.addCleanup(os.environ.__setitem__,'OW2_SETUP_TEST_DISPLAY_SCALE','2')
+        events={e['stage']:e for e in self.call('launch')}
+        self.assertIn('-k',calls.read_text().split())
+        self.assertEqual(events['retina_configured'],{'stage':'retina_configured','retina':False})
+        self.assertIn('"RetinaMode"="N"',(environment/'user.reg').read_text())
     def test_metal_hud_and_game_mode_reach_battlenet_as_chosen(self):
         # Battle.net starts Overwatch with its own environment, so the HUD and Game Mode travel in it.
         self.profile(b'[Render.13]\n')
@@ -328,13 +358,82 @@ class DisplaySetup(setup.NativeSetup):
         self.assertEqual((hud['MTL_HUD_ENABLED'],hud['MTL_HUD_DISABLE_MENU_BAR']),('1','1'))
         self.assertEqual(hud['MTL_HUD_ELEMENTS'].split(','),['device','rosetta','layersize','memory','gamemode','fps','gputime','frameinterval','frameintervalgraph','shaders'])
         self.assertEqual(hud['WINEMAC_MOUSELOOK'],'Overwatch.exe')  # the contract's environment is unchanged
+        self.assertEqual(hud['WINE_APP_DPI'],'192:Battle.net.exe;Battle.net Launcher.exe;BlizzardError.exe')
         self.assertFalse([key for key in launched('--metal-hud','0') if key.startswith('MTL_HUD')])
-        # Game Mode is on unless the app's hidden default turns it off, and the HUD does not change it.
+        # Game Mode is on unless the app passes --game-mode 0 (its switch, off by default from 1.6;
+        # REC-51), and the HUD does not change it.
         self.assertEqual(hud['WINE_GAME_MODE'],'Overwatch.exe')
         self.assertEqual(launched('--game-mode','1')['WINE_GAME_MODE'],'Overwatch.exe')
         off=launched('--game-mode','0','--metal-hud','1')
         self.assertNotIn('WINE_GAME_MODE',off)
         self.assertEqual((off['MTL_HUD_ENABLED'],off['WINEMAC_MOUSELOOK']),('1','Overwatch.exe'))
+        # The mouse (REC-52, REC-57): Standard keeps the contract's input variant (1.5's); Classic
+        # has the window driver keep 1.4's clicks and timing; High-precision has it read the mouse's
+        # own reports. Anything else is Standard.
+        self.assertEqual((hud['WINEMAC_INPUT_VARIANT'],'WINEMAC_RAW_SOURCE' in hud),('precise',False))
+        self.assertEqual(launched('--mouse','standard')['WINEMAC_INPUT_VARIANT'],'precise')
+        classic=launched('--mouse','classic')
+        self.assertEqual((classic['WINEMAC_INPUT_VARIANT'],'WINEMAC_RAW_SOURCE' in classic),('classic',False))
+        precise=launched('--mouse','high-precision')
+        self.assertEqual((precise['WINEMAC_INPUT_VARIANT'],precise['WINEMAC_RAW_SOURCE']),('precise','hid'))
+        other=launched('--mouse','legacy')
+        self.assertEqual((other['WINEMAC_INPUT_VARIANT'],'WINEMAC_RAW_SOURCE' in other),('precise',False))
+    def test_battlenet_keeps_windows_dpi_on_a_main_display_without_retina(self):
+        # Without Retina mode (a main display that isn't Retina, portable_retina.h) a Windows
+        # pixel is a point already: Battle.net at 192 DPI would come out twice its size.
+        self.profile(b'[Render.13]\n')
+        engine=self.root/'runtimes/v1'
+        (engine/'config/dxmt.conf').write_text((setup.ROOT/'config/dxmt-source60-1200.conf').read_text())
+        environment=self.root/'environment'
+        (environment/'user.reg').write_text('[Software\\\\Wine\\\\Mac Driver]\n"RetinaMode"="N"\n')
+        client=environment/'drive_c/Program Files (x86)/Battle.net/Battle.net.exe'
+        client.parent.mkdir(parents=True);client.write_text('fixture')
+        seen=self.base/'battlenet-environment'
+        wine=engine/'bin/wine';wine.write_text(f'#!/bin/sh\ncase "$1" in *Battle.net.exe) env > "{seen}.part" && mv "{seen}.part" "{seen}";; esac\n');wine.chmod(0o755)
+        self.addCleanup(subprocess.run,['pkill','-f',f'ow2-setup watch --root {self.root}'])
+        os.environ['OW2_SETUP_TEST_DISPLAY_SCALE']='1'
+        self.addCleanup(os.environ.__setitem__,'OW2_SETUP_TEST_DISPLAY_SCALE','2')
+        self.assertEqual(self.call('launch')[-1]['stage'],'battlenet_open')
+        for _ in range(100):
+            if seen.exists():break
+            time.sleep(0.05)
+        launched=dict(line.split('=',1) for line in seen.read_text().splitlines() if '=' in line)
+        self.assertNotIn('WINE_APP_DPI',launched)
+        self.assertIn('"RetinaMode"="N"',(environment/'user.reg').read_text())
+    def test_the_mouse_preset_writes_its_report_into_the_sessions_folder(self):
+        # Logging's Mouse preset (REC-51) turns on the window driver's mouse report and no Wine
+        # logging; the driver adds -<pid>.jsonl to the prefix, in the folder of this Battle.net start.
+        self.profile(b'[Render.13]\n')
+        engine=self.root/'runtimes/v1'
+        (engine/'config/dxmt.conf').write_text((setup.ROOT/'config/dxmt-source60-1200.conf').read_text())
+        environment=self.root/'environment'
+        (environment/'user.reg').write_text('[Software\\\\Wine\\\\Mac Driver]\n"RetinaMode"="Y"\n')
+        client=environment/'drive_c/Program Files (x86)/Battle.net/Battle.net.exe'
+        client.parent.mkdir(parents=True);client.write_text('fixture')
+        seen=self.base/'battlenet-environment'
+        wine=engine/'bin/wine';wine.write_text(f'#!/bin/sh\ncase "$1" in *Battle.net.exe) env > "{seen}.part" && mv "{seen}.part" "{seen}";; esac\n');wine.chmod(0o755)
+        self.addCleanup(subprocess.run,['pkill','-f',f'ow2-setup watch --root {self.root}'])
+        def launched(*args):
+            seen.unlink(missing_ok=True)
+            events=self.call('launch',*args)
+            self.assertEqual(events[-1]['stage'],'battlenet_open')
+            for _ in range(100):
+                if seen.exists():break
+                time.sleep(0.05)
+            return events[-1]['session'],dict(line.split('=',1) for line in seen.read_text().splitlines() if '=' in line)
+        _,quiet=launched()
+        self.assertNotIn('WINEMAC_INPUT_STATS',quiet)
+        session,mouse=launched('--logging','mouse')
+        report=lambda env:(str(setup.Path(env['WINEMAC_INPUT_STATS']).parent.resolve()),setup.Path(env['WINEMAC_INPUT_STATS']).name)
+        self.assertEqual(report(mouse),(str((self.root/'logs/sessions'/session).resolve()),'input'))
+        self.assertEqual(mouse.get('WINEDEBUG'),quiet.get('WINEDEBUG'))  # no Wine logging of its own
+        record=setup.json.loads((self.root/'logs/sessions'/session/'session.json').read_text())
+        self.assertEqual((record['logging'],record['mouse_input']),('mouse','standard'))
+        session,both=launched('--logging','mouse,crashes','--mouse','classic')
+        self.assertEqual(report(both),(str((self.root/'logs/sessions'/session).resolve()),'input'))
+        self.assertIn('+seh',both['WINEDEBUG'])
+        record=setup.json.loads((self.root/'logs/sessions'/session/'session.json').read_text())
+        self.assertEqual((record['logging'],record['mouse_input']),('crashes,mouse','classic'))
     # Overwatch's own record of the graphics card, as on the owner's Mac (CRLF, with the
     # stray line feed an early seed left in [Render.13]).
     M1=b'[GPU.6]\r\nGPUIndex = "0"\r\nGPUName = "Apple M1 Pro"\r\nGPUScaler = "31.000000"\r\nGPUVenderID = "4203"\r\nLastUsedGPUVendorID = "4203"\r\n\r\n'
@@ -391,7 +490,8 @@ class DisplaySetup(setup.NativeSetup):
         self.assertEqual(self.resolution(path),(2560,1600))
         self.assertNotIn('display_from_game',self.launch())
         self.assertEqual(self.resolution(path),(2560,1600))
-        # The rest of the display settings are Recall's as before.
+        # The rest of the display settings are Recall's as before (the refresh rate is the
+        # display's: 120 Hz here, test_the_players_refresh_rate_stays).
         text=path.read_text()
         for line in ('WindowMode = "0"','FullscreenWindow = "0"','DynamicRenderScale = "0"','FullScreenRefresh = "120"','UseCustomWorldScale = "1"'):
             self.assertIn(line,text)
@@ -412,6 +512,145 @@ class DisplaySetup(setup.NativeSetup):
         self.played(path,2560,1600)
         self.assertIn('display_from_game',self.launch())
         self.assertEqual(self.resolution(path),(2560,1600))
+    MODE_KEYS=('WindowMode','WindowedFullscreen','WindowedWidth','WindowedHeight','WindowedPosX','WindowedPosY')
+    def mode(self,path):
+        text=path.read_text()
+        return dict(zip(self.MODE_KEYS,(re.search(r'\n'+key+r' = "([^"]*)"',text).group(1) for key in self.MODE_KEYS)))
+    def chose_mode(self,path,**values):
+        """The game saved a display mode (chosen in its Video settings)."""
+        text=path.read_bytes()
+        for key,value in values.items():
+            text=re.sub(rb'\n'+key.encode()+rb' = "[^"]*"',b'\n'+key.encode()+b' = "'+value.encode()+b'"',text)
+        path.write_bytes(text)
+    def test_the_players_display_mode_stays(self):
+        # REC-45: until 1.6 every launch put Overwatch back in Fullscreen, so Windowed or
+        # Borderless lasted one session.
+        path=self.launchable(self.M1+b'[Render.13]\r\n')
+        self.call('display','--width','1920','--height','1080')
+        self.launch()
+        self.assertEqual(self.mode(path)['WindowMode'],'0')
+        # Windowed, chosen in the game, with the window's size and place it saved.
+        windowed={'WindowMode':'2','WindowedFullscreen':'0','WindowedWidth':'1920','WindowedHeight':'1016',
+                  'WindowedPosX':'100','WindowedPosY':'164'}
+        self.chose_mode(path,**windowed)
+        for _ in range(2):  # and again: Recall's own record must not undo it
+            self.assertEqual(self.launch()['display_saved']['mode'],'windowed')
+            self.assertEqual(self.mode(path),windowed)
+        # A resolution chosen in Settings is the window's size; the mode and place stay.
+        self.call('display','--width','2560','--height','1440')
+        self.assertEqual(self.mode(path),dict(windowed,WindowedWidth='2560',WindowedHeight='1440'))
+        # Borderless, chosen in the game (as Overwatch saved it on 2026-10-22).
+        self.chose_mode(path,WindowMode='1',WindowedFullscreen='1')
+        self.assertEqual(self.launch()['display_saved']['mode'],'borderless')
+        self.assertEqual((self.mode(path)['WindowMode'],self.mode(path)['WindowedFullscreen']),('1','1'))
+        # Overwatch resetting its display settings for a card it takes to be new is undone,
+        # the display mode included.
+        nvidia=b'[GPU.6]\r\nGPUIndex = "0"\r\nGPUName = "NVIDIA GeForce RTX 4090"\r\nGPUVenderID = "4318"\r\nLastUsedGPUVendorID = "4318"\r\n\r\n'
+        self.played(path,1800,1125,gpu=nvidia)
+        self.chose_mode(path,WindowMode='2',WindowedFullscreen='0')
+        self.assertIn('display_restored',self.launch())
+        self.assertEqual((self.mode(path)['WindowMode'],self.mode(path)['WindowedFullscreen']),('1','1'))
+        # Reset Display Settings: Fullscreen, at the resolution it sets.
+        self.call('display','--width','1920','--height','1080','--reset','1')
+        self.assertEqual({k:self.mode(path)[k] for k in ('WindowMode','WindowedFullscreen','WindowedWidth','WindowedHeight')},
+                         {'WindowMode':'0','WindowedFullscreen':'0','WindowedWidth':'1920','WindowedHeight':'1080'})
+        # A window larger than the main display as Wine sees it takes the resolution.
+        self.chose_mode(path,WindowMode='2',WindowedWidth='16000',WindowedHeight='9000')
+        self.launch()
+        self.assertEqual((self.mode(path)['WindowMode'],self.mode(path)['WindowedWidth'],self.mode(path)['WindowedHeight']),('2','1920','1080'))
+    def refresh(self,path):
+        text=path.read_text()
+        return tuple(re.search(key+r' = "(\d+)"',text).group(1) for key in ('FullScreenRefresh','WindowedRefresh'))
+    def test_the_players_refresh_rate_stays(self):
+        # REC-56: until 1.6 every launch wrote FullScreenRefresh 120, so a 144 Hz monitor went
+        # back to 120 Hz each session. A new installation starts at the main display's rate.
+        os.environ['OW2_SETUP_TEST_DISPLAY_REFRESH']='144'
+        self.addCleanup(os.environ.__setitem__,'OW2_SETUP_TEST_DISPLAY_REFRESH','120')
+        path=self.launchable(self.M1+b'[Render.13]\r\n')
+        self.call('display','--width','1920','--height','1080')
+        self.launch()
+        self.assertEqual(self.refresh(path),('144','144'))
+        # Chosen in the game, kept launch after launch, 120 included.
+        for rate in ('60','120','120'):
+            text=path.read_text().replace(f'FullScreenRefresh = "{self.refresh(path)[0]}"',f'FullScreenRefresh = "{rate}"')
+            path.write_text(text);self.launch()
+            self.assertEqual(self.refresh(path)[0],rate)
+        # A resolution chosen in Settings keeps it too.
+        self.call('display','--width','2560','--height','1440')
+        self.assertEqual(self.refresh(path)[0],'120')
+        # Overwatch resetting its display settings for a card it takes to be new is undone.
+        nvidia=b'[GPU.6]\r\nGPUIndex = "0"\r\nGPUName = "NVIDIA GeForce RTX 4090"\r\nGPUVenderID = "4318"\r\nLastUsedGPUVendorID = "4318"\r\n\r\n'
+        self.played(path,1800,1125,gpu=nvidia)
+        path.write_text(path.read_text().replace('FullScreenRefresh = "120"','FullScreenRefresh = "60"'))
+        self.assertIn('display_restored',self.launch())
+        self.assertEqual(self.refresh(path)[0],'120')
+        # Reset Display Settings: the display's own rate.
+        self.call('display','--width','1920','--height','1080','--reset','1')
+        self.assertEqual(self.refresh(path)[0],'144')
+        # Nothing usable in the game's settings: the display's rate.
+        path.write_text(path.read_text().replace('FullScreenRefresh = "144"','FullScreenRefresh = "fast"'))
+        self.launch()
+        self.assertEqual(self.refresh(path)[0],'144')
+    def test_an_update_replaces_the_120_hz_recall_wrote_before_1_6(self):
+        # Recall 1.5 and the 1.6 test builds wrote 120 with no record of it, so 120 there is
+        # Recall's, not the player's; once recorded, a 120 chosen later stays.
+        path=self.launchable(self.M1+b'[Render.13]\r\n')
+        self.call('display','--width','1920','--height','1080')
+        self.launch()
+        before_1_6={'game_refresh':None,'display_refresh':None}
+        self.saved(**before_1_6)
+        os.environ['OW2_SETUP_TEST_DISPLAY_REFRESH']='144'
+        self.addCleanup(os.environ.__setitem__,'OW2_SETUP_TEST_DISPLAY_REFRESH','120')
+        self.launch()
+        self.assertEqual(self.refresh(path)[0],'144')
+        path.write_text(path.read_text().replace('FullScreenRefresh = "144"','FullScreenRefresh = "120"'))
+        self.launch()
+        self.assertEqual(self.refresh(path)[0],'120')
+        # Another rate in the game under the old record was the player's.
+        self.saved(**before_1_6)
+        path.write_text(path.read_text().replace('FullScreenRefresh = "120"','FullScreenRefresh = "100"'))
+        self.launch()
+        self.assertEqual(self.refresh(path)[0],'100')
+    def test_each_display_keeps_its_own_refresh_rate(self):
+        # A 144 Hz monitor and a MacBook's 120 Hz screen: moving between them needs no trip to
+        # Overwatch's Video settings. The test Mac has one main display ("lg" here, 144 Hz); the
+        # other ("macbook") is played on through Recall's records, as for the resolution.
+        os.environ['OW2_SETUP_TEST_DISPLAY_REFRESH']='144'
+        self.addCleanup(os.environ.__setitem__,'OW2_SETUP_TEST_DISPLAY_REFRESH','120')
+        path=self.launchable(self.M1+b'[Render.13]\r\n')
+        screen=self.screen()
+        self.call('display','--width','1920','--height','1080')
+        self.launch()
+        self.assertEqual(self.refresh(path)[0],'144')
+        # The last game opened on the MacBook, where Recall wrote 120 and the player then chose
+        # 100. Back here: this display's 144, and the MacBook keeps its 100.
+        self.saved(game_display_screen='macbook',game_refresh='120')
+        path.write_text(path.read_text().replace('FullScreenRefresh = "144"','FullScreenRefresh = "100"'))
+        self.launch()
+        self.assertEqual(self.refresh(path)[0],'144')
+        state=json.loads((self.root/'state.json').read_text())
+        self.assertEqual(state['display_refresh'],{'macbook':'100'})
+        self.assertEqual((state['game_display_screen'],state['game_refresh']),(screen,'144'))
+        # A choice in the game here stays with this display only, launch after launch.
+        path.write_text(path.read_text().replace('FullScreenRefresh = "144"','FullScreenRefresh = "120"'))
+        for _ in range(2):
+            self.launch()
+            self.assertEqual(self.refresh(path)[0],'120')
+        self.assertEqual(json.loads((self.root/'state.json').read_text())['display_refresh'],{'macbook':'100',screen:'120'})
+        # A display with no choice gets its own rate; Reset Display Settings forgets this one's.
+        self.saved(display_refresh={'macbook':'100'})
+        self.launch()
+        self.assertEqual(self.refresh(path)[0],'144')
+        self.saved(display_refresh={'macbook':'100',screen:'120'})
+        self.call('display','--width','1920','--height','1080','--reset','1')
+        self.assertEqual(self.refresh(path)[0],'144')
+        self.assertEqual(json.loads((self.root/'state.json').read_text())['display_refresh'],{'macbook':'100'})
+        # Display memory off concerns the resolution: refresh rates stay each display's.
+        self.call('display-memory','--enabled','0')
+        self.saved(game_display_screen='macbook',game_refresh='100')
+        path.write_text(path.read_text().replace('FullScreenRefresh = "144"','FullScreenRefresh = "100"'))
+        self.launch()
+        self.assertEqual(self.refresh(path)[0],'144')
     def test_a_first_game_and_an_update_from_1_0_keep_the_choice(self):
         # A new installation: Recall seeds the game's settings before Overwatch first
         # runs, and Overwatch records the card (and may pick its own size) on that start.

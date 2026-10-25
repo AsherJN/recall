@@ -14,10 +14,10 @@ Help & FAQ and About buttons, while `UtilitySheets.swift` owns Settings, About
 (with Licenses: the bundled NOTICE and Apache 2.0 text, and the third-party
 license files in Finder), Uninstall, the update sheet and What's New (content in `WhatsNew.swift`,
 bundled). Settings is in tabs (`SettingsTab`), and reopens on the last one shown:
-General (updates, opening Battle.net with the app; Battle.net's size follows the main
+General (updates, opening Battle.net with the app, the mouse; Battle.net's size follows the main
 display by itself, so there is no switch for it), Display (fullscreen
 resolution, Reset Display Settings), Graphics (MetalFX upscaling and Sharpening, with an
-info button explaining them; the Metal HUD; Shader memory), Audio (microphone; how Bluetooth headphones
+info button explaining them; the Metal HUD; Game Mode; Shader memory), Audio (microphone; how Bluetooth headphones
 and the sound output are handled) and Advanced (Force Quit, Repair, Logging and Save Logs, proxy detection).
 Uninstall stays at the foot of every tab. `HelpSheet.swift` owns Help &
 FAQ, in the same tabs (`LauncherTabs`): FAQ and Troubleshooting (`HelpTopic`: an answer, numbered
@@ -88,9 +88,40 @@ coordinates resumable worker operations. `SetupService.swift` runs the native
 worker off the UI thread and consumes bounded JSON events. `InstallLocation.swift`
 holds the install-location rules: the internal default, the optional folder
 choice before setup starts (APFS/Mac OS Extended, not case-sensitive, not
-read-only, network or cloud-synced) and disconnected-drive detection. The worker
+read-only, network or cloud-synced) and disconnected-drive detection. A refusal can
+name a Help topic, which the setup screen's notice opens (a case-sensitive drive gets
+Help's steps to add a volume or partition that isn't, instead of erasing it). An installation
+the player moves away from with Set Up on This Mac Instead is remembered
+(`otherInstallLocation`, `AppModel.otherInstallation`) while its folder still holds one: the
+setup screens' note, the Install location menu and Settings › General take the player back
+(`OtherInstallationSheet` asks whether the setup here moves to the Trash, through the worker's
+`uninstall`, or stays and is offered back; `tests/OtherInstallationTests.swift`). The worker
 enforces the same drive rules for any new data folder and never creates a
 missing parent, so an unplugged drive cannot become a stray internal folder.
+When macOS won't let the worker create, own or write in the data folder (its
+`SetupFailure.folderAccessCodes`, such as `directory_creation_failed` under a locked
+Application Support), the failure screen says so: "Recall can't use its folder", the
+folder to fix (`InstallLocation.folderToFix`: the data folder, or the nearest folder above
+it that exists), Show in Finder, which selects it for File › Get Info, and Help's
+`folder-access` steps. Retry and reinstalling can't get past it (REC-54).
+
+The mouse (Settings › General › Mouse, `AppModel.MouseInput`, Standard unless the player
+chooses; setup doesn't ask) is one of three, passed as `launch --mouse`. Standard keeps the
+launch contract's input variant, `precise` (1.5's: clicks from Apple's mouse input for games,
+GCMouse, in order with its movement). Classic (REC-57) has the worker set the window driver's
+`classic`: 1.4's clicks and timing, with 1.5's stand-in while GCMouse is silent. High-precision
+(REC-52, experimental) has it set `WINEMAC_RAW_SOURCE=hid`: the driver reads the mouse's own
+reports through IOHID instead of GCMouse, which loses some in game. Choosing it first opens
+`HighPrecisionMouseSheet`, which explains it, why macOS will ask for Input Monitoring and how
+to undo it, and links the Discord post for feedback (GitHub on China's Battle.net). Its
+Continue chooses it and shows macOS's prompt the first time. IOHID needs Input Monitoring,
+the app's permission as the microphone is (`InputMonitoring.swift`): the panel links to the
+switch in System Settings until it is allowed, and the game's process, which the app
+started, has the app's answer. Without it the driver keeps GCMouse and asks nothing. The
+driver opens only devices with a mouse collection, trackpads excepted, reads only X, Y and
+buttons, passes their input on only while macOS still gives the game mouse input of its own
+(so not while another app has the mouse), and counts GCMouse's input beside it for
+comparison (the Mouse logging preset's `hid_shadow_*`).
 
 Overwatch's voice chat uses the app's microphone permission: to macOS the game runs
 as part of the app, and the app and Wine are signed with the microphone entitlement.
@@ -185,7 +216,9 @@ Developer ID team, carries the same bundle identifier and the release's version.
 It is copied beside the installed app, verified again, swapped in place
 (`FileManager.replaceItemAt`) and reopened after this process exits. Any failure
 changes nothing and offers the release page. At launch the check waits at most
-three seconds before Battle.net opens. After an update that brings new game
+three seconds before Battle.net opens. During setup and on error screens, which never
+reach that launch, the sheet opens as soon as the check finds an update and nothing is
+running, once a launch (`AppModel.offerUpdate`, `tests/UpdateOfferTests.swift`). After an update that brings new game
 components, they install without a click and What's New shows once.
 `Resources/release.json` is reviewed release input sealed by app signing. The
 runtime SHA is trusted from this app resource, not fetched alongside a download.
@@ -240,10 +273,17 @@ Its progress lines (each shader from the preparation tool's diagnostic log) reac
 the launching screen's "Preparing graphics" details as `graphics` events.
 With Game Mode the game runs as the engine's game app, and macOS keeps compiled
 shaders per app, so that app's cache starts empty after the update that brings it
-and after each macOS update. The worker passes the game app's path, and a second
-helper, `pipeline-warm`, compiles every learned pipeline into that app's cache
-(`MTLSetShaderCachePath`, 16 at a time in one process) once per app, macOS version
-and GPU (`cache/warmed.json`). Since 1.4 the pack holds every learned pipeline
+and after each macOS update. Settings › Graphics › Game Mode (`AppModel.gameMode`,
+on by default; 1.6's test builds had it off, REC-51, until REC-55; support's `gameMode`
+default from 1.1 is the same setting) passes `launch --game-mode 0` when off, and the game then runs as Wine's own
+loader (`lib/wine/x86_64-unix/wine`, whose embedded Info.plist names it
+`com.codeweavers.CrossOver.wineloader`, a cache it shares with CrossOver). The worker
+passes the program the game runs as (`gameProgram`), and a second helper,
+`pipeline-warm`, compiles every learned pipeline into that program's cache
+(`MTLSetShaderCachePath`, 16 at a time in one process) once per program, macOS version
+and GPU (`cache/warmed.json`); switching the setting names the other program, whose cache is
+then warmed in turn. Clear Shader Cache removes the game app's cache only, never the
+loader's, which CrossOver uses too. Since 1.4 the pack holds every learned pipeline
 (`dxmt-shader-pack.patch`): the game keeps learning until the disk is nearly full,
 archives have no total size limit and are hashed in 1 MiB pieces, all at once on every
 core, and nothing learned is forgotten. A game holds what it loads of the pack in memory
@@ -264,8 +304,8 @@ pipelines aren't prepared yet (`ShaderUpdateSheet`): `prepare-shaders` replaces 
 waiting for a match (`cache/monitor.pid`) with one that prepares now, marked by
 `cache/shader-update` so the main window says "Updating your shader cache", then watches the
 session like any monitor; a launch stops it like any preparation. After each
-session the helper also warms every learned pipeline into the game app's shader cache
-(`warm`, Game Mode only; the monitor passes the app with `watch --game-app`), which costs
+session the helper also warms every learned pipeline into the shader cache of the program the
+game ran as (`warm`; the monitor passes it with `watch --game-app`), which costs
 no memory until the game uses one and covers what a game doesn't load. Preparation adds batches: each is one more archive of up to 2048
 pipelines or about 150 seconds of first builds, slowest (and of those, most recently
 used) first, made in a clone by the tool's append mode, verified in a fresh process
@@ -294,9 +334,14 @@ waiting for the game to close, and how the last after-match preparation ended, a
 (`tests/SupportReportTests.swift`).
 
 Settings › Advanced › Logging (`LoggingSetting`, `Logging.swift`; REC-40) is off unless the player
-turns it on: presets named for a kind of problem (Crashes and freezes, Graphics, Battle.net) or
-Custom, Wine's own WINEDEBUG text, checked as it's typed against Wine's grammar. Battle.net carries
-it from when it opens (worker: `launch --logging`, `scripts/portable_logs.h`), as it does the HUD.
+turns it on: presets named for a kind of problem (Crashes and freezes, Graphics, Battle.net, Mouse),
+any mix of them at once (REC-51; kept as their names joined with commas, which reads 1.5's single
+setting as it was), and Custom, Wine's own WINEDEBUG text, checked as it's typed against Wine's
+grammar, whose items come after the presets'. Mouse adds no Wine logging: it turns on the window
+driver's mouse report (`WINEMAC_INPUT_STATS`), one JSON line a second for each Wine process that is
+frontmost or has input, `input-<pid>.jsonl` in the session's folder; Save Logs keeps its mouse data
+and drops its key-press counts (`MouseReport`). Battle.net carries the setting from when it opens
+(worker: `launch --logging`, `scripts/portable_logs.h`), as it does the HUD.
 The worker keeps each Battle.net start's output and record in `logs/sessions/<UTC start>/` and
 removes the oldest only while the logs would take more room than the disk has left. Turning
 logging on warns about FPS first, and the Play, opening and running screens say it's on, or that
@@ -307,7 +352,8 @@ sessions' logs from Recall, Battle.net and Overwatch in one zip, newest first wh
 GitHub's 25 MB attachment limit, after `LogCleaner` removes personal details (its rules come from
 a check of real logs). `Summary.txt` is the timeline in the player's language; `index.json` and
 `README.md` (`app/Resources/LogsReadme.md`) point engineers and AI assistants at the moments that
-matter, by file and line. Crash dumps never go in. The support report names the setting.
+matter, by file and line. Crash dumps never go in. The support report names the setting, and
+from schema 5 whether Game Mode is on.
 `tests/LogBundleTests.swift` and `tests/test_session_logs.py` cover them.
 
 The running screen learns the session's processes from `ow2-setup session` (when the window

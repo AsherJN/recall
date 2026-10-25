@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 @MainActor @Observable
 final class AppModel {
     enum Screen: String, CaseIterable { case welcome, moveApp, checking, battleNet, readyToInstall, preparing, launching, installer, ready, running, driveMissing, failure }
-    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate, china, korea, changeRegion; var id: String { rawValue } }
+    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate, china, korea, changeRegion, otherInstallation; var id: String { rawValue } }
     enum UninstallState: Equatable { case idle, working, done(appRemoved: Bool), failed(String) }
     enum UpdateState: Equatable { case idle, checking, upToDate, available(AvailableUpdate), downloading(Double), installing, failed(String) }
     var uninstall: UninstallState = .idle
@@ -27,6 +27,30 @@ final class AppModel {
     var metalHUD=UserDefaults.standard.bool(forKey:"metalHUD") {
         didSet { UserDefaults.standard.set(metalHUD,forKey:"metalHUD") }
     }
+    /// macOS Game Mode for Overwatch (Settings › Graphics; worker: launch --game-mode). On, Overwatch
+    /// runs as the engine's game app, which macOS treats as a game and gives priority while it fills
+    /// the screen; off, as Wine's own loader, as before 1.1. On unless the player turns it off, as in
+    /// every release since 1.1. Test builds of 1.6 had it off (owner, October 22) on the suspicion that
+    /// it made Apple's mouse input for games lose movement, which a tester's run of October 23 showed with
+    /// it off too (REC-51); it came back on once Cmd-Tab no longer brought the game back (REC-55,
+    /// owner). Battle.net carries it from when it opens, like the HUD. Support's switch from 1.1 is the
+    /// same default: defaults write org.overwatch2mac.launcher gameMode -bool false. bool(forKey:)
+    /// reads a string value too (as? Bool would not).
+    var gameMode=UserDefaults.standard.object(forKey:"gameMode") == nil || UserDefaults.standard.bool(forKey:"gameMode") {
+        didSet { UserDefaults.standard.set(gameMode,forKey:"gameMode") }
+    }
+    /// How Overwatch gets the mouse (Settings › General › Mouse; worker: launch --mouse). Standard is
+    /// 1.5's: clicks from Apple's mouse input for games, in order with its movement (the contract's
+    /// "precise"). Classic is 1.4's clicks and timing, keeping 1.5's stand-in when that input goes
+    /// quiet, for players who feel 1.5 changed their mouse (REC-57). High-precision, experimental,
+    /// reads the mouse's own reports instead, which that input drops some of in game; it needs Input
+    /// Monitoring (InputMonitoring), and without it Standard's input stays (REC-52). Standard unless
+    /// the player chooses (owner, October 24; setup doesn't ask). Battle.net carries it from when it
+    /// opens, like the HUD.
+    enum MouseInput:String, CaseIterable { case standard, classic, highPrecision="high-precision" }
+    var mouseInput=MouseInput(rawValue:UserDefaults.standard.string(forKey:"mouseInput") ?? "") ?? .standard {
+        didSet { UserDefaults.standard.set(mouseInput.rawValue,forKey:"mouseInput") }
+    }
     /// MetalFX upscaling (worker: launch --metalfx, portable_metalfx.h): Overwatch offers NVIDIA
     /// DLSS in its Video settings, and Recall runs it on Apple's MetalFX. Off by default. Like the
     /// HUD, Battle.net carries it from when it opens.
@@ -40,13 +64,14 @@ final class AppModel {
         didSet { UserDefaults.standard.set(metalFXSharpening.rawValue,forKey:"metalFXSharpening") }
     }
     /// Settings › Advanced › Logging (LoggingSetting; worker: launch --logging). Off unless the player
-    /// turns it on; Battle.net carries it from when it opens, like the HUD. While it's on the home
-    /// screen says so (LoggingReminder), and the support report and saved logs say since when.
-    var logging=LoggingSetting(rawValue:UserDefaults.standard.string(forKey:"logging") ?? "") ?? .off {
+    /// turns it on, any mix of presets (REC-51); Battle.net carries it from when it opens, like the HUD.
+    /// While it's on the home screen says so (LoggingReminder), and the support report and saved logs
+    /// say since when.
+    var logging=LoggingSetting(rawValue:UserDefaults.standard.string(forKey:"logging") ?? "") {
         didSet {
             UserDefaults.standard.set(logging.rawValue,forKey:"logging")
-            if logging == .off { UserDefaults.standard.removeObject(forKey:"loggingSince") }
-            else if oldValue == .off { UserDefaults.standard.set(Date(),forKey:"loggingSince") }
+            if logging.isOff { UserDefaults.standard.removeObject(forKey:"loggingSince") }
+            else if oldValue.isOff { UserDefaults.standard.set(Date(),forKey:"loggingSince") }
         }
     }
     /// Custom's WINEDEBUG text, as Wine reads it (LoggingSetting.normalized); kept while another setting is chosen.
@@ -61,7 +86,7 @@ final class AppModel {
         guard let name=state["log_session"] as? String,!name.contains("/"),
               let data=try? Data(contentsOf:root.appendingPathComponent("logs/sessions/\(name)/session.json")),
               let record=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],record["ended"] == nil else { sessionLogging=nil;return }
-        sessionLogging=LoggingSetting(rawValue:record["logging"] as? String ?? "") ?? .off
+        sessionLogging=LoggingSetting(rawValue:record["logging"] as? String ?? "")
     }
     /// Save Logs (LogBundle): working, then the file just saved, for its "Saved" line.
     var savingLogs=false
@@ -116,8 +141,11 @@ final class AppModel {
     /// Kept by the worker (state.json): automatic proxy detection (Settings › Advanced), off unless
     /// turned on, and Korean account support, which is the Korea region (Settings › General).
     enum AdvancedSetting: String { case proxyAutoDetect="proxy_auto_detect", koreanSupport="korean_support" }
-    @ObservationIgnored private var advancedSettingsTask:Task<Void,Never>?
+    /// setAdvanced's saves, one at a time: true once every queued choice was saved.
+    @ObservationIgnored private var advancedSettingsTask:Task<Bool,Never>?
     @ObservationIgnored private var pendingAdvancedSettings=[(AdvancedSetting,Bool)]()
+    /// What the worker last saved for each setting with a choice in flight, to snap back to.
+    @ObservationIgnored private var savedAdvancedSettings=[AdvancedSetting:Bool]()
     var proxyAutoDetect:Bool { state[AdvancedSetting.proxyAutoDetect.rawValue] as? Bool == true }
     var koreanSupport:Bool { state[AdvancedSetting.koreanSupport.rawValue] as? Bool == true }
     /// The worker keeps these once setup has installed the game components.
@@ -252,8 +280,7 @@ final class AppModel {
             busy=true
             defer { busy=false }
             do {
-                let gameMode=UserDefaults.standard.object(forKey:"gameMode") as? Bool ?? true
-                _ = try await service.run("prepare-shaders",gameMode ? [] : ["--game-mode","0"])
+                _ = try await service.run("prepare-shaders",["--game-mode",gameMode ? "1" : "0"])
             } catch {
                 shaderUpdateRequested=nil;checkAfterMatch()
                 notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
@@ -326,14 +353,18 @@ final class AppModel {
     private var updateCheck: Task<AvailableUpdate?,Error>?
     private var lastUpdateCheck: Date?
     private var launchDeferredForUpdate=false
+    /// The version offerUpdate already showed this launch.
+    private var offeredUpdate: String?
     var screen: Screen = .welcome
     var sheet: Sheet?
-    var busy=false
+    var busy=false { didSet { if oldValue && !busy { offerUpdate() } } }
     var stage=""
     var failure=SetupFailure(code:"")
     var resolution=DisplayResolution.standard
     var report=""
-    var notice=""
+    var notice="" { didSet { if notice != oldValue { noticeTopic=nil } } }
+    /// The Help topic the setup screen's notice offers, set after the notice it belongs to.
+    var noticeTopic:String?
     /// Settings › Remember a resolution for each display (the worker's display_memory).
     var rememberEachDisplay=true
     /// Settings shows "Saved" once the chosen resolution is recorded.
@@ -384,6 +415,22 @@ final class AppModel {
     var lowMemory: Bool { memoryBytes < Self.recommendedMemoryBytes }
     // The location can change only while nothing is installed there yet.
     var canChangeLocation: Bool { state["active_runtime"] == nil && !clientInstalled }
+    /// REC-44: the installation the player moved away from, remembered across launches.
+    var otherRoot: URL?=UserDefaults.standard.string(forKey:InstallLocation.otherKey).map { URL(fileURLWithPath:$0) } {
+        didSet {
+            if let otherRoot { UserDefaults.standard.set(otherRoot.path,forKey:InstallLocation.otherKey) }
+            else { UserDefaults.standard.removeObject(forKey:InstallLocation.otherKey) }
+        }
+    }
+    /// That installation while it's still there and not the one in use: the setup screens, the
+    /// Install location menu and Settings › General offer it.
+    var otherInstallation: URL? {
+        guard let otherRoot,otherRoot.standardizedFileURL.path != root.standardizedFileURL.path,
+              InstallLocation.holdsInstallation(otherRoot) else { return nil }
+        return otherRoot
+    }
+    /// Its note shows where setup waits for the player, not while a step runs.
+    var offersOtherInstallation: Bool { otherInstallation != nil && [.welcome,.battleNet,.readyToInstall,.failure].contains(screen) }
     var driveName: String { InstallLocation.driveName(root) }
     private var mountObserver: NSObjectProtocol?
     private var quitObserver: NSObjectProtocol?
@@ -409,6 +456,7 @@ final class AppModel {
             case "setup_already_running", "app_worker_busy", "pipeline_cache_busy": return L("Another operation is finishing")
             case "download_hash_mismatch", "client_installer_hash_mismatch", "cached_download_hash_mismatch": return L("Download verification failed")
             case "run_from_installed_app", "app_move_failed", "app_name_taken": return L("Move {0} to Applications",Brand.name)
+            case _ where failure.isFolderAccess: return L("{0} can’t use its folder",Brand.name)
             default: return L("Setup needs attention")
             }
         }
@@ -473,7 +521,10 @@ final class AppModel {
     }
     func perform(_ action: @escaping @MainActor () async throws -> Void) {
         guard !isPreview else { return }
-        guard !busy && advancedSettingsTask == nil else { return }; busy=true; notice=""; paused=false
+        // Play and setup wait for a setting that's still saving, then go on with it; after a
+        // failed save they don't start, so the error stays on screen.
+        if let saving=advancedSettingsTask { Task { if await saving.value { perform(action) } };return }
+        guard !busy else { return }; busy=true; notice=""; paused=false
         Task {
             defer { busy=false;canCancel=false;downloadedBytes=0 }
             do { try await action() }
@@ -586,7 +637,7 @@ final class AppModel {
             if updated { markVersionSeen();sheet = .whatsNew;return }
             guard autoLaunch && autoOpenBattleNet && state["onboarding_complete"] as? Bool == true else { return }
             if let found=await pendingUpdate() {
-                update = .available(found);launchDeferredForUpdate=true;sheet = .update;return
+                update = .available(found);offeredUpdate=found.version;launchDeferredForUpdate=true;sheet = .update;return
             }
             try await openClient()
         } else if state["active_runtime"] != nil { screen = needsBattleNetChoice ? .battleNet : .readyToInstall }
@@ -628,7 +679,19 @@ final class AppModel {
         Task {
             do { update=try await task.value.map { UpdateState.available($0) } ?? .upToDate }
             catch { update = manual ? .failed(L("The update check couldn’t reach GitHub. Check your internet connection, then try again.")) : .idle }
+            if !manual { offerUpdate() }
+            else if present,case .available(let item)=update { offeredUpdate=item.version }
         }
+    }
+    /// REC-48: an update shows itself before Battle.net opens (route), which players still
+    /// setting up never reach. One stuck on a setup error that 1.5.0 fixed missed the small
+    /// "Update to" button above the footer until Discord pointed to it. So during setup and on
+    /// an error screen, the update sheet opens too: once a launch, when nothing is running.
+    private static let offersUpdate:[Screen]=[.welcome,.battleNet,.readyToInstall,.driveMissing,.failure]
+    private func offerUpdate() {
+        guard !isPreview,sheet == nil,!busy,Self.offersUpdate.contains(screen),
+              case .available(let item)=update,offeredUpdate != item.version else { return }
+        offeredUpdate=item.version;sheet = .update
     }
     func checkIfDue() {
         guard automaticUpdates,!isPreview,screen != .moveApp,lastUpdateCheck.map({ Date().timeIntervalSince($0)>12*3600 }) ?? true else { return }
@@ -688,6 +751,7 @@ final class AppModel {
     }
     private func setRoot(_ value:URL) {
         root=value;service.root=value
+        if otherRoot?.standardizedFileURL.path == value.standardizedFileURL.path { otherRoot=nil }
         UserDefaults.standard.removeObject(forKey:"privatePreviewDataRoot")
         if InstallLocation.isStandard(value) { UserDefaults.standard.removeObject(forKey:InstallLocation.savedKey) }
         else { UserDefaults.standard.set(value.path,forKey:InstallLocation.savedKey) }
@@ -696,7 +760,7 @@ final class AppModel {
     /// folder is removed only if it holds nothing but empty setup scaffolding.
     func useLocation(_ value:URL) {
         guard !isPreview,canChangeLocation,value.standardizedFileURL.path != root.standardizedFileURL.path else { return }
-        if let problem=InstallLocation.problem(for:value) { notice=problem;return }
+        if let issue=InstallLocation.issue(for:value) { notice=issue.message;noticeTopic=issue.helpTopic;return }
         perform {
             let previous=self.root
             if InstallLocation.isAvailable(previous) { _ = try? await self.service.run("discard-unused") }
@@ -706,7 +770,9 @@ final class AppModel {
                 // The helper enforces the same drive rules; keep the old choice.
                 self.setRoot(previous)
                 try await self.refresh()
-                self.notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
+                let failure=error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")
+                self.notice=failure.message
+                if failure.code == "case_sensitive_volume" { self.noticeTopic=InstallLocation.caseSensitiveTopic }
                 return
             }
             // A reconnected installation continues from where it was.
@@ -721,10 +787,43 @@ final class AppModel {
         panel.directoryURL=URL(fileURLWithPath:"/Volumes")
         if panel.runModal() == .OK,let folder=panel.url { useLocation(InstallLocation.root(forChosen:folder)) }
     }
-    /// Stop waiting for a disconnected drive. Nothing on it is changed; choosing
-    /// its Overwatch2Mac folder later reconnects that installation.
+    /// Stop waiting for a disconnected drive. Nothing on it is changed, and it stays one choice
+    /// away (otherInstallation): a player who pressed this by mistake goes back without
+    /// setting up again (REC-44).
     func useThisMac() {
+        otherRoot=root
         setRoot(InstallLocation.standard);notice="";recheck()
+    }
+    /// Back to the other installation. With nothing installed here yet, straight away; once setup
+    /// has installed something here, OtherInstallationSheet first asks whether it moves to the Trash.
+    func chooseOtherInstallation() {
+        guard !isPreview,!busy,otherInstallation != nil else { return }
+        if canChangeLocation { useOtherInstallation(removing:false) } else { sheet = .otherInstallation }
+    }
+    /// Removing runs the helper's uninstall here (Battle.net closed first, the folder to the Trash);
+    /// a setup kept here becomes the one offered back. The other drive picks up where it was, or
+    /// asks to be connected.
+    func useOtherInstallation(removing:Bool) {
+        guard !isPreview,!busy,let other=otherInstallation else { return }
+        sheet=nil
+        perform {
+            let previous=self.root,hadSetup = !self.canChangeLocation,was=self.screen
+            self.screen = .checking
+            // Battle.net closes first either way (the uninstall does it itself). With Overwatch
+            // still open nothing changes, and the player stays where they were.
+            do {
+                if removing { _ = try await self.service.run("uninstall",event:self.receive) }
+                else if self.clientInstalled { _ = try await self.service.run("close-client",event:self.receive) }
+            } catch {
+                let failure=error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")
+                self.screen=was;self.notice=(failure.code == "close_game_before_update" ? SetupFailure(code:"close_game_before_setup") : failure).message
+                return
+            }
+            if !hadSetup,InstallLocation.isAvailable(previous) { _ = try? await self.service.run("discard-unused") }
+            self.setRoot(other)
+            if hadSetup && !removing { self.otherRoot=previous }
+            try await self.route(autoLaunch:false)
+        }
     }
     func previewScreen(_ value:Screen) {
         guard isPreview else { return }
@@ -740,6 +839,8 @@ final class AppModel {
         let args=CommandLine.arguments
         if let i=args.firstIndex(of:"--preview-macos"),args.indices.contains(i+1) { macOS=args[i+1] }
         if args.contains("--preview-korean") { nexonBuild=true;state["korean_support"]=false }
+        // The failure screen for another code, e.g. directory_creation_failed (REC-54).
+        if let i=args.firstIndex(of:"--preview-failure"),args.indices.contains(i+1) { failure=SetupFailure(code:args[i+1]) }
         // The first-matches tip at a number of learned shaders (FirstMatchTip).
         if let i=args.firstIndex(of:"--preview-learned"),args.indices.contains(i+1),let learned=Int(args[i+1]) { learnedShaders=learned > 0 ? learned : nil }
         if let i=args.firstIndex(of:"--preview-tip"),args.indices.contains(i+1),let hidden=FirstMatchTip.Hidden(rawValue:args[i+1]) { stutterTipHidden=hidden }
@@ -972,11 +1073,9 @@ final class AppModel {
         // Battle.net opens (the preparation keeps its finished work; the next launch resumes).
         let launchEvents:[[String:Any]]
         do {
-            // macOS Game Mode is on unless support turned it off for a player:
-            // defaults write org.overwatch2mac.launcher gameMode -bool false
-            let gameMode=UserDefaults.standard.object(forKey:"gameMode") as? Bool ?? true
             launchEvents=try await service.run("launch",(play ? ["--play","1"] : [])+["--metal-hud",metalHUD ? "1" : "0",
-                "--metalfx",metalFXUpscaling ? "1" : "0","--sharpening",metalFXSharpening.rawValue]+(gameMode ? [] : ["--game-mode","0"]) +
+                "--metalfx",metalFXUpscaling ? "1" : "0","--sharpening",metalFXSharpening.rawValue,"--game-mode",gameMode ? "1" : "0",
+                "--mouse",mouseInput.rawValue] +
                 logging.launchArguments(custom:loggingCustom),event:receive)
         } catch {
             guard stopLaunchWait else { throw error }
@@ -1216,14 +1315,17 @@ final class AppModel {
     /// only while it and Overwatch are closed (see running); the worker refuses otherwise. Before setup has made the Windows environment the worker only keeps the
     /// choice, and setup applies it.
     func setAdvanced(_ setting:AdvancedSetting, _ on:Bool) {
-        let requested=pendingAdvancedSettings.last(where:{ $0.0 == setting })?.1 ?? (state[setting.rawValue] as? Bool == true)
-        guard requested != on else { return }
-        guard !isPreview else { state[setting.rawValue]=on;return }
+        let shown=state[setting.rawValue] as? Bool == true
+        guard shown != on else { return }
+        // The menu or switch changes at once, as in 1.5, and snaps back if the save fails.
+        state[setting.rawValue]=on
+        guard !isPreview else { return }
+        if savedAdvancedSettings[setting] == nil { savedAdvancedSettings[setting]=shown }
         pendingAdvancedSettings.append((setting,on))
         guard advancedSettingsTask == nil else { return }
         // Reserve an idle worker before returning to the UI: Play must not open Battle.net
         // with the old setting while this Task is still waiting to run. Choices made during
-        // another operation stay queued; perform blocks new work until this queue finishes.
+        // another operation stay queued; perform waits until this queue finishes.
         let waitForOperation=busy
         if !waitForOperation { busy=true }
         advancedSettingsTask=Task {
@@ -1232,20 +1334,27 @@ final class AppModel {
                 busy=true
             }
             notice=""
-            defer { busy=false;advancedSettingsTask=nil }
+            var allSaved=true
+            defer { busy=false;advancedSettingsTask=nil;savedAdvancedSettings=[:] }
             while let (setting,on)=pendingAdvancedSettings.first {
                 do {
                     _ = try await service.run(setting == .proxyAutoDetect ? "network" : "korean-support",
                                               [setting == .proxyAutoDetect ? "--proxy-detect" : "--enabled",on ? "1" : "0"])
-                    // Only show a saved choice after the worker succeeds. If the following
-                    // status read fails, the successful write is still the known state.
-                    state[setting.rawValue]=on
+                    // If the following status read fails, the successful write is still the known state.
+                    savedAdvancedSettings[setting]=on
                     try await refresh()
                 } catch {
+                    if savedAdvancedSettings[setting] != on { allSaved=false }
                     notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
                 }
                 pendingAdvancedSettings.removeFirst()
+                // refresh reads back only what's saved: keep showing each setting's newest
+                // choice while it's still queued, and what's saved once it isn't.
+                for (setting,saved) in savedAdvancedSettings {
+                    state[setting.rawValue]=pendingAdvancedSettings.last(where:{ $0.0 == setting })?.1 ?? saved
+                }
             }
+            return allSaved
         }
     }
     /// Help, on the tab that fits: Troubleshooting after a failed step, otherwise the
@@ -1257,11 +1366,15 @@ final class AppModel {
         helpQuery=""
         sheet = .help
     }
+    /// REC-54: the folder whose permissions stop setup, and Show in Finder's way to it, selected so
+    /// File › Get Info opens on it (Help › Troubleshooting › folder-access).
+    var folderToFix:URL { InstallLocation.folderToFix(root) }
+    func showFolder() { NSWorkspace.shared.activateFileViewerSelecting([folderToFix]) }
     /// The Korean card's Open Settings: Settings on its General tab, where the region is.
     func openRegionSettings() { settingsTab = .general;sheet = .settings }
     /// Troubleshooting's way back from a resolution that shows a black or wrong-sized
-    /// picture: a new installation's resolution, with every other display setting
-    /// written again. Graphics quality and FPS are kept. Overwatch must be closed.
+    /// picture: a new installation's resolution in Fullscreen, with every other display
+    /// setting written again. Graphics quality and FPS are kept. Overwatch must be closed.
     func resetDisplay() {
         let initial=DisplayResolution.initial(for:MainDisplay.current)
         guard !isPreview else { resolution=initial;notice=L("Display settings reset.");return }
@@ -1271,7 +1384,7 @@ final class AppModel {
             busy=true
             defer { busy=false }
             do {
-                _ = try await service.run("display",["--width",String(initial.width),"--height",String(initial.height)])
+                _ = try await service.run("display",["--width",String(initial.width),"--height",String(initial.height),"--reset","1"])
                 resolution=initial;displaySaved=false
                 notice=L("Display settings reset. Overwatch opens at {0} next time.",initial.label)
             } catch {
@@ -1311,17 +1424,22 @@ final class AppModel {
         let battleNet:[String:Any]=["region":installedRegion.rawValue,"language":state["battlenet_language"] as? String ?? (clientInstalled ? "enUS" : "not_chosen"),
                                     "installed":clientInstalled,"path":battleNetPath.replacingOccurrences(of:"environment/drive_c/",with:""),"neac_build":neacBuild,"nexon_build":nexonBuild,"korean_support":koreanSupport,
                                     "recent_starts":BattleNetRecord.read(root:root)]
-        // Logging (REC-40): the setting, what Custom holds exactly as typed, and since when.
+        // Logging (REC-40): the setting (its presets joined with commas, REC-51), what Custom holds
+        // exactly as typed, and since when.
         var logs:[String:Any]=["setting":logging.rawValue]
-        if logging == .custom { logs["custom"]=loggingCustom }
-        if let since=loggingSince,logging != .off { logs["since"]=ISO8601DateFormatter().string(from:since) }
+        if logging.contains(.custom) { logs["custom"]=loggingCustom }
+        if let since=loggingSince,!logging.isOff { logs["since"]=ISO8601DateFormatter().string(from:since) }
         if let sessionLogging { logs["open_session"]=sessionLogging.rawValue }
         // Schema 3 (1.5.0): MetalFX upscaling and its sharpening apart (schema 2 gave the sharpening
         // when on, so "off" was ambiguous); shaders.waiting_for_game_to_close; battlenet.recent_starts; logging (REC-40).
         // Schema 4 (1.5.0): other_apps, what the busy note saw at the last launch and now (REC-5).
+        // Schema 5 (1.6.0): game_mode; logging.setting may name several presets (REC-51); mouse_input
+        // and input_monitoring (REC-52, REC-57).
         let fresh=loadChecked.map { Date().timeIntervalSince($0) < 15 } ?? false
         let otherApps:[String:Any]=["at_last_launch":launchLoad ?? "none","now":fresh ? macLoad.report as Any : "not_checked"]
-        let data:[String:Any]=["schema":4,"other_apps":otherApps,"logging":logs,"battlenet":battleNet,"app_language":AppLanguage.current,"default_browser":browser,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? "on" : "off","metalfx_sharpening":metalFXSharpening.rawValue,"install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode,"shaders":ShaderRecord.read(root:root),"shader_memory":shaderMemory]
+        let data:[String:Any]=["schema":5,"game_mode":gameMode ? "on" : "off",
+                                "mouse_input":mouseInput.rawValue,"input_monitoring":InputMonitoring.access.rawValue,
+                                "other_apps":otherApps,"logging":logs,"battlenet":battleNet,"app_language":AppLanguage.current,"default_browser":browser,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? "on" : "off","metalfx_sharpening":metalFXSharpening.rawValue,"install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode,"shaders":ShaderRecord.read(root:root),"shader_memory":shaderMemory]
         report=String(data:(try? JSONSerialization.data(withJSONObject:data,options:[.prettyPrinted,.sortedKeys])) ?? Data(),encoding:.utf8) ?? ""
     }
     /// Save Logs (Settings › Advanced, Help › Support): the zip LogBundle makes, saved where the

@@ -29,8 +29,9 @@ Extract the Wine source and apply, once each and in this order,
 `patches/wine-v1-canvas.patch`, `patches/wine-mouselook.patch`,
 `patches/wine-portable-directory-boolean.patch`, Soju's
 `ncrypt-persisted-keys.patch`, `patches/wine-server-registry-save.patch`,
-`patches/wine-ntdll-syscall-log.patch`, `patches/wine-win32u-display-log.patch`
-and `patches/wine-winemac-activation.patch`. `build_portable_dxmt.py` and
+`patches/wine-ntdll-syscall-log.patch`, `patches/wine-win32u-display-log.patch`,
+`patches/wine-winemac-activation.patch`, `patches/wine-audio-devices.patch` and
+`patches/wine-service-security.patch`. `build_portable_dxmt.py` and
 `build_portable_runtime.py` apply them for you and check each one's SHA-256.
 The two `v1` filenames identify the complete integration patches; do not layer
 older candidate patches on them.
@@ -150,6 +151,37 @@ Runtime `phase2-20261019.1` is `phase2-20261014.3` with only the Mac driver repl
 The driver is built with the updated `patches/wine-winemac-activation.patch`, which adds the
 input variants. The app chooses `precise` with `WINEMAC_INPUT_VARIANT` from 1.5: mouse buttons
 in order with the motion, and a fallback to pointer events. `patches/README.md` describes them.
+
+Runtime `phase2-20261022.1` is `phase2-20261019.1` with only the Mac driver replaced the
+same way. The updated `patches/wine-winemac-activation.patch` lays the game's picture out
+as Wine has its window when the game leaves fullscreen, and hides the menu bar and Dock while
+a window covers a screen (a borderless game).
+
+Runtime `phase2-20261024.1` is `phase2-20261022.1` with only the Mac driver replaced the
+same way. The updated `patches/wine-winemac-activation.patch` adds the `classic` input variant
+(1.4's clicks and timing, with the fallback to pointer events), reads the mouse's own reports
+through IOHID with `WINEMAC_RAW_SOURCE=hid` (the app's High-precision mouse), and gives an input
+method's key to the window's input context after making it the current one.
+
+Runtime `phase2-20261024.5` is `phase2-20261024.1` with Wine's `mmdevapi.dll` and Mac sound
+driver `winecoreaudio.so` replaced, both built with `patches/wine-audio-devices.patch`
+(`scripts/build_wine_native.py mmdevapi` and `winecoreaudio`, then `scripts/derive_runtime.py
+--audio`): sound devices connected or removed while a program runs, and changes of the Mac's
+default devices, reach it as on Windows. `tests/audio_devices/run.py` checks them against an
+engine with a program that plays silence the way a game does.
+
+Runtime `phase2-20261024.6` is `phase2-20261024.5` with Wine's service manager (`services.exe`) and
+its client (`sechost.dll`, 64-bit and 32-bit) replaced, all three built with
+`patches/wine-service-security.patch` (`scripts/build_wine_native.py services`, `sechost` and
+`sechost32`, then `scripts/derive_runtime.py --services`): services keep their security descriptors
+and program paths read back in Windows' form, so Battle.net's update agent no longer downloads itself
+again on every other start.
+
+Runtime `phase2-20261024.10` is `phase2-20261024.6` with only the Mac driver `winemac.so` replaced,
+built with `patches/wine-winemac-activation.patch` (`scripts/build_wine_native.py winemac`, then
+`scripts/derive_runtime.py --native winemac`): after a switch away from the game in fullscreen, the
+game's window stays fullscreen until the player comes back, and on the way back the game is restored
+and made the active window.
 
 Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
 replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py

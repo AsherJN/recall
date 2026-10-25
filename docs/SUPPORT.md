@@ -80,6 +80,12 @@ app shows a reminder on its home screen while it's on; turn it off when you're d
   takes much longer, depending on Blizzard's download servers. If it's still
   waiting after half an hour, report it with your support report
   (Help › Report a Problem), which shows how long each update took.
+- <a id="id-battlenet-play"></a>**Battle.net shows Play instead of Install, Play does nothing, or Overwatch is missing.**
+  In Battle.net, choose Home, then + beside Favorites, and add Overwatch. Select
+  it there, then choose Install or Play. If it's still missing, close Battle.net
+  and open it again from the app, then report it with your support report
+  (Help › Report a Problem). Uninstalling Recall won't fix it: it removes
+  Overwatch too, so the whole game downloads again.
 - **Battle.net looks too big or too small.** This can follow connecting,
   unplugging or rearranging displays while Battle.net was open. Close
   Battle.net, then open it again from the app.
@@ -89,14 +95,23 @@ app shows a reminder on its home screen while it's on; turn it off when you're d
 - **Recall asks to install Rosetta after a macOS upgrade.** An upgrade to
   macOS 27 can remove Rosetta, which Battle.net and Overwatch need. Choose
   Install Rosetta, follow Apple's steps, then choose Check Again.
+- <a id="id-folder-access"></a>**Recall says it can't use its folder.** macOS isn't letting Recall
+  create or change its `Overwatch2Mac` folder, which is inside Application Support
+  in your Library unless you chose another location. Reinstalling Recall doesn't
+  change that. Choose Show in Finder, then File › Get Info on the folder Finder
+  selects. Under Sharing & Permissions, click the lock, set your account to
+  Read & Write (add it with + if it isn't listed), then choose Try Again in
+  Recall. If the `Overwatch2Mac` folder itself belongs to another account, Finder
+  can't change that; run
+  `sudo chown -R "$(whoami)" ~/Library/"Application Support"/Overwatch2Mac`
+  in Terminal, then choose Try Again.
 - **Battle.net can't connect on a work or school network.** Some of these
   networks set up their proxy automatically. Close Battle.net, turn on
   Settings › Advanced › Detect network proxy automatically, then open
   Battle.net again from the app.
 - <a id="id-korean-accounts"></a>**Overwatch closes as it starts on a Korean account (linked to Nexon).**
   Close Battle.net, choose Korea in Settings › General › Battle.net region, then
-  play from the app. Recall prepares the certificate chain the game checks when it
-  starts, including DigiCert Assured ID Root CA on Macs that no longer provide it, and
+  play from the app. Recall adds the certificates the game checks when it starts and
   hands Nexon's anti-cheat a blank image when it takes a screenshot. It doesn't
   turn off Nexon's anti-cheat, but Nexon doesn't support playing on a Mac, so
   playing this way could affect your account.

@@ -77,14 +77,28 @@ drives and iCloud folders are refused before anything downloads. The location
 can only be chosen before setup starts; moving an existing installation is not
 supported yet.
 
+If the app says your drive is case-sensitive, you don't need to erase it. In
+Disk Utility, select a volume on the drive, choose **Edit › Add APFS Volume**
+and add a volume formatted as APFS. It shares the drive's free space and leaves
+your files alone; choose that volume in the **Install location** menu. A drive
+formatted as Mac OS Extended (Case-sensitive) needs an APFS partition instead:
+back it up first, then use **Partition** in Disk Utility.
+
 Keep the drive connected while you play. If it isn't connected when you open
 the app, the app asks you to connect it and continues once you do. A fast USB-C
 or Thunderbolt SSD is recommended; slower drives mean longer loading.
 
+If you choose **Set Up on This Mac Instead** on that screen, nothing on the
+drive changes, and you can go back to it: choose **Use** with the drive's name
+on the setup screens, in the **Install location** menu or in **Settings ›
+General**. If setup has already installed something on your Mac, the app asks
+whether to move that to the Trash or keep it.
+
 ## Updating
 
 The app checks GitHub for a newer version when it opens. If there
-is one, it shows what's new before Battle.net opens; choose **Update Now** and
+is one, it shows what's new before Battle.net opens, or right away while you're
+still setting up or when setup stops with an error; choose **Update Now** and
 it downloads the new version, checks that it is the signed and notarized
 release, replaces itself and reopens. When the update brings new game
 components, they install right after, then the app shows what's new. Your game,

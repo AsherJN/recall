@@ -1,10 +1,13 @@
-/* Settings › Advanced › Logging (REC-40). Launches start Wine with its logging off (WINEDEBUG=-all)
- * and the graphics layer's at errors only, which keeps Overwatch fast. A player chasing a problem
- * picks a preset named for it, or Custom: Wine's own WINEDEBUG text, as they would type it in
- * Terminal, starting from Wine's defaults the same way (launch --logging <setting>
- * [--logging-custom <text>]). Every line then carries Wine's clock and process (+timestamp,+pid),
- * so the saved logs line up. Battle.net carries the setting from when it opens, as it does the HUD,
- * and Overwatch gets it from Battle.net.
+/* Settings › Advanced › Logging (REC-40; combined presets and Mouse, REC-51). Launches start Wine with
+ * its logging off (WINEDEBUG=-all) and the graphics layer's at errors only, which keeps Overwatch fast.
+ * A player chasing a problem turns on the presets named for it, any mix of them (launch --logging
+ * crashes,mouse), or Custom: Wine's own WINEDEBUG text, as they would type it in Terminal, starting
+ * from Wine's defaults the same way ([--logging-custom <text>]); with presets on too, its items come
+ * after theirs, so it has the last word. Every line then carries Wine's clock and process
+ * (+timestamp,+pid), so the saved logs line up. Mouse adds no Wine logging: it turns on the window
+ * driver's mouse report (WINEMAC_INPUT_STATS), one JSON line a second for each Wine process that is
+ * frontmost or has input, in the session's folder as input-<pid>.jsonl (launchClient). Battle.net
+ * carries the setting from when it opens, as it does the HUD, and Overwatch gets it from Battle.net.
  * Each Battle.net start has its own folder, logs/sessions/<UTC start>: session.json, what it
  * started with (account-free; the monitor adds when Overwatch ran and when the session ended), and
  * battlenet.log, what Battle.net, Wine and the game print (logs/battlenet.log before 1.5, replaced
@@ -15,11 +18,13 @@
 #ifndef LOG_ROOM
 #define LOG_ROOM freeBytes()
 #endif
-static NSDictionary *loggingPresets(void) {
-    // What each preset records (measured in play for REC-40); the app names them for the problem.
-    return @{@"crashes":@{@"WINEDEBUG":@"-all,err+all,+seh,+loaddll,+timestamp,+pid"},
-             @"graphics":@{@"WINEDEBUG":@"-all,err+all,+timestamp,+pid",@"DXMT_LOG_LEVEL":@"info"},
-             @"battlenet":@{@"WINEDEBUG":@"-all,err+all,warn+winhttp,warn+wininet,warn+secur32,+loaddll,+timestamp,+pid"}};
+// The presets, in the order the app lists them.
+static NSArray *loggingPresetNames(void) { return @[@"crashes",@"graphics",@"battlenet",@"mouse",@"custom"]; }
+// The Wine channels each preset adds to "-all,err+all" (measured in play for REC-40); the app names
+// them for the problem. Graphics adds the graphics layer's messages instead, Mouse the mouse report.
+static NSDictionary *loggingChannels(void) {
+    return @{@"crashes":@[@"+seh",@"+loaddll"],@"graphics":@[],
+             @"battlenet":@[@"warn+winhttp",@"warn+wininet",@"warn+secur32",@"+loaddll"]};
 }
 /* Wine's own grammar (dlls/ntdll/unix/debug.c, parse_options): comma-separated
  * [process:][class]+channel or -channel, where a bare name turns a channel on. Classes are fixme,
@@ -31,21 +36,43 @@ static BOOL validCustomLogging(NSString *text) {
         if(!matches(item,@"^([A-Za-z0-9 ._()-]{1,64}:)?((fixme|err|warn|trace)?[+-])?(all|[a-z0-9_]{1,15})$"))return NO;
     return YES;
 }
+// The presets a --logging value names, in the app's order: "off", one preset (as 1.5 sent), or several
+// joined with commas. Anything else stops the launch before anything starts.
+static NSArray *loggingChoice(NSString *setting) {
+    if(!setting || [setting isEqual:@"off"])return @[];
+    NSArray *items=[setting componentsSeparatedByString:@","];
+    if([NSSet setWithArray:items].count!=items.count)fail(@"invalid_logging_settings");
+    for(NSString *item in items)if(![loggingPresetNames() containsObject:item])fail(@"invalid_logging_settings");
+    return [loggingPresetNames() filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *name, NSDictionary *bindings) {
+        (void)bindings;return [items containsObject:name];
+    }]];
+}
+// What session records, the support report and Save Logs call it.
+static NSString *loggingName(NSArray *chosen) { return chosen.count ? [chosen componentsJoinedByString:@","] : @"off"; }
+static BOOL loggingMouse(NSString *setting) { return [loggingChoice(setting) containsObject:@"mouse"]; }
 static NSDictionary *loggingEnvironment(NSString *setting, NSString *custom) {
-    if(!setting || [setting isEqual:@"off"])return @{};
-    if([setting isEqual:@"custom"]) {
-        if(!validCustomLogging(custom))fail(@"invalid_logging_settings");
-        NSMutableArray *items=[[custom componentsSeparatedByString:@","] mutableCopy];
-        for(NSString *flag in @[@"timestamp",@"pid"]) {
-            BOOL named=NO;
-            for(NSString *item in items)named|=matches(item,[NSString stringWithFormat:@"^([^:]*:)?(trace)?[+-]?%@$",flag]);
-            if(!named)[items addObject:[@"+" stringByAppendingString:flag]];
-        }
-        return @{@"WINEDEBUG":[items componentsJoinedByString:@","]};
+    NSArray *chosen=loggingChoice(setting);
+    NSMutableDictionary *env=[NSMutableDictionary dictionary];
+    NSMutableArray *items=[NSMutableArray array];
+    for(NSString *name in chosen) {
+        NSArray *channels=loggingChannels()[name];
+        if(!channels)continue;
+        if(!items.count)[items addObjectsFromArray:@[@"-all",@"err+all"]];
+        for(NSString *channel in channels)if(![items containsObject:channel])[items addObject:channel];
     }
-    NSDictionary *preset=loggingPresets()[setting];
-    if(!preset)fail(@"invalid_logging_settings");
-    return preset;
+    if([chosen containsObject:@"graphics"])env[@"DXMT_LOG_LEVEL"]=@"info";
+    if([chosen containsObject:@"custom"]) {
+        if(!validCustomLogging(custom))fail(@"invalid_logging_settings");
+        [items addObjectsFromArray:[custom componentsSeparatedByString:@","]];
+    }
+    if(!items.count)return env;
+    for(NSString *flag in @[@"timestamp",@"pid"]) {
+        BOOL named=NO;
+        for(NSString *item in items)named|=matches(item,[NSString stringWithFormat:@"^([^:]*:)?(trace)?[+-]?%@$",flag]);
+        if(!named)[items addObject:[@"+" stringByAppendingString:flag]];
+    }
+    env[@"WINEDEBUG"]=[items componentsJoinedByString:@","];
+    return env;
 }
 static NSString *sessionsFolder(void) { return join(join(root,@"logs"),@"sessions"); }
 static BOOL validSessionName(id name) { return [name isKindOfClass:NSString.class] && matches(name,@"^[0-9]{8}T[0-9]{6}Z(-[0-9]{1,2})?$"); }

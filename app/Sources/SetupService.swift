@@ -14,7 +14,13 @@ struct Release: Decodable {
 }
 struct SetupFailure: Error {
     let code: String
+    /// REC-54: the worker couldn't create, own or write in its data folder (ownRoot). A Mac whose
+    /// Application Support folder was locked showed the generic message, and Retry or a reinstall
+    /// never helped: only the folder's permissions do.
+    static let folderAccessCodes: Set<String>=["directory_creation_failed","directory_not_owned_by_user","private_directory_permissions_failed","ownership_write_failed","setup_lock_failed"]
+    var isFolderAccess: Bool { Self.folderAccessCodes.contains(code) }
     var message: String {
+        if isFolderAccess { return L("macOS isn’t letting {0} create or change the folder that holds its files. Reinstalling won’t help: the folder’s permissions need fixing first.",Brand.name) }
         switch code {
         case "cancelled": return L("Setup is paused. Continue when you’re ready; completed steps are saved.")
         case "apple_silicon_required": return L("This version requires a Mac with Apple Silicon (M1 or later).")
@@ -22,7 +28,7 @@ struct SetupFailure: Error {
         case "rosetta_required": return L("Rosetta is needed to run the game. Choose Install Rosetta and follow Apple’s instructions.")
         case "install_location_unavailable": return L("The drive with your installation isn’t connected. Connect it, then try again.")
         case "unsupported_volume_format": return L("This drive’s format isn’t supported. Choose a drive formatted as APFS or Mac OS Extended.")
-        case "case_sensitive_volume": return L("This drive is case-sensitive, which Windows games don’t support. Choose another drive.")
+        case "case_sensitive_volume": return L("This drive is case-sensitive, which Windows games don’t support. Choose another drive, or add a volume that isn’t case-sensitive in Disk Utility.")
         case "read_only_volume": return L("This location is read-only. Choose another location.")
         case "insufficient_disk_space": return L("There isn’t enough free storage to finish this step. Free at least 6 GB, then retry.")
         case "close_game_before_maintenance", "close_game_before_setup", "environment_busy_retry", "environment_initialization_busy": return L("Close Overwatch and Battle.net, then retry. Your current session has been left running.")
@@ -42,7 +48,7 @@ struct SetupFailure: Error {
         case "run_from_installed_app", "app_move_failed": return L("{0} couldn’t move itself. Drag {0} to Applications, eject the disk image, then open it from Applications.",Brand.name)
         case "app_name_taken": return L("Another app named {0} is in your Applications folders. Rename or remove that app, then try again.",Brand.name)
         case "release_unavailable": return L("This app is missing its verified setup components. Download a complete copy from the release page.")
-        case "korean_support_failed": return L("The Korean account certificates could not be prepared. Close Overwatch and Battle.net, then retry. If it happens again, save the logs in Help & FAQ.")
+        case "korean_support_failed": return L("The certificates Korean accounts need couldn’t be added. Close Overwatch and Battle.net, then try again.")
         case "setting_change_failed": return L("This setting couldn’t be changed. Close Overwatch and Battle.net, then try again.")
         case "shader_preparation_running": return L("{0} is preparing shaders from your last match. Wait for it to finish, then try again.",Brand.name)
         case "shader_delete_failed": return L("The shader cache couldn’t be cleared. Close Overwatch and Battle.net, then try again.")

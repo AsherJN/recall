@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the native Wine components that v1.0 changes in the Phase 2 runtime.
 
-  build_wine_native.py wineserver|ntdll|win32u|winemac [--base]
+  build_wine_native.py wineserver|ntdll|win32u|winemac|winebus|mmdevapi|winecoreaudio [--base]
 
 Developer tool only. Compiles a component from its experiment tree with the exact
 compiler and linker commands recorded in the Phase 2 Wine Makefile, applies the
@@ -49,7 +49,32 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               launch settings choose "precise" from 1.5.0: mouse buttons come from GCMouse
               in order with its motion, pointer events stand in at GCMouse's scale while it
               is silent, and its handlers are set again when macOS replaces or drops them.
-              Without the variable the driver keeps Recall 1.4's behaviour.
+              Without the variable the driver keeps Recall 1.4's behaviour; "classic"
+              (1.6, Settings › General › Mouse, Classic) keeps it with the stand-in and
+              re-arming. WINEMAC_RAW_SOURCE=hid (1.6, Mouse, High-precision) has raw input
+              read the mouse's own reports through IOHID instead of GCMouse, with the app's
+              Input Monitoring permission, while macOS still gives the process mouse input;
+              GCMouse's input is then only counted. Korean and other input methods get the
+              key after the window's input context is made current (PR #41, @sookcha).
+              While the player is away from the game in fullscreen its window stays
+              fullscreen: the game's request to leave it and its minimize are held, and a
+              return restores the game and makes it the foreground window, without the
+              fullscreen and Dock animations; the exit is applied 3 s after the return if
+              the game has not asked for fullscreen again. A minimize asked for while the
+              window does leave fullscreen in the background waits for the animation to
+              end (macOS brought the window back when it ended), at most 3 s, and a window
+              minimized for Wine but still on screen is restored when it becomes key
+              (REC-55, 1.6).
+  mmdevapi    runtime/source/wine-audio (the Phase 2 tree's dlls/mmdevapi and
+  winecoreaudio dlls/winecoreaudio.drv; one patch for both, 1.6). Wine listed the Mac's sound
+              devices once, when a program started, so headphones connected later never
+              reached the game. The Mac driver now watches Core Audio's device list and
+              defaults; mmdevapi lists the devices again and tells programs what changed, as
+              Windows does (device added, state changed, default changed). The default
+              microphone stays the Mac's own while a Bluetooth headset is the default one
+              (portable_voice.h's launch rule, kept during play). mmdevapi.dll is a PE file:
+              built with the Makefile's LLVM-MinGW commands and stripped of debug information
+              as the assembler strips it, not signed.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -61,7 +86,7 @@ import struct
 import subprocess
 
 from build_mouselook_driver import (BASE, ENV, LDFLAGS, PHASE2, PRISTINE, ROOT, TREE, expand, links, recipe,
-                                    rpaths, run, sha, unsigned_copy, without_linkedit_vmsize)
+                                    rpaths, run, sha, unsigned_copy, variable, without_linkedit_vmsize)
 
 ARTIFACT = PHASE2 / 'artifacts/phase2-20260927.1'
 COMPONENTS = {
@@ -88,7 +113,34 @@ COMPONENTS = {
     'winebus': dict(rule='dlls/winebus.sys/winebus.so', directory='dlls/winebus.sys', pristine=BASE,
                     source=BASE, archived='lib/wine/x86_64-unix/winebus.so',
                     rpaths=['@loader_path', '@loader_path/../..'], patch=None, sdl2=True),
+    # One experiment, two files: mmdevapi.dll talks to the driver through mmdevapi/unixlib.h.
+    'mmdevapi': dict(rule='dlls/mmdevapi/x86_64-windows/mmdevapi.dll', directory='dlls/mmdevapi', pristine=BASE,
+                     source=ROOT / 'runtime/source/wine-audio', archived='lib/wine/x86_64-windows/mmdevapi.dll',
+                     pe=True, patch=ROOT / 'patches/wine-audio-devices.patch',
+                     patch_directories=['dlls/mmdevapi', 'dlls/winecoreaudio.drv']),
+    'winecoreaudio': dict(rule='dlls/winecoreaudio.drv/winecoreaudio.so', directory='dlls/winecoreaudio.drv',
+                          pristine=BASE, source=ROOT / 'runtime/source/wine-audio',
+                          archived='lib/wine/x86_64-unix/winecoreaudio.so',
+                          rpaths=['@loader_path', '@loader_path/../..'],
+                          patch=ROOT / 'patches/wine-audio-devices.patch',
+                          patch_directories=['dlls/mmdevapi', 'dlls/winecoreaudio.drv']),
+    # One experiment, three files: the service manager (services.exe) and its client, sechost.dll,
+    # in both architectures (Battle.net's update agent is a 32-bit program).
+    'services': dict(rule='programs/services/x86_64-windows/services.exe', directory='programs/services',
+                     pristine=BASE, source=ROOT / 'runtime/source/wine-services',
+                     archived='lib/wine/x86_64-windows/services.exe', pe=True,
+                     patch=ROOT / 'patches/wine-service-security.patch',
+                     patch_directories=['dlls/sechost', 'programs/services']),
+    'sechost': dict(rule='dlls/sechost/x86_64-windows/sechost.dll', directory='dlls/sechost', pristine=BASE,
+                    source=ROOT / 'runtime/source/wine-services', archived='lib/wine/x86_64-windows/sechost.dll',
+                    pe=True, patch=ROOT / 'patches/wine-service-security.patch',
+                    patch_directories=['dlls/sechost', 'programs/services']),
+    'sechost32': dict(rule='dlls/sechost/i386-windows/sechost.dll', directory='dlls/sechost', pristine=BASE,
+                      source=ROOT / 'runtime/source/wine-services', archived='lib/wine/i386-windows/sechost.dll',
+                      pe=True, patch=ROOT / 'patches/wine-service-security.patch',
+                      patch_directories=['dlls/sechost', 'programs/services']),
 }
+LLVM_STRIP = ROOT / 'runtime/toolchains/llvm-mingw-20251216-ucrt-macos-universal/bin/llvm-strip'
 OUT = ROOT / 'runtime/build/wine-native'
 SDL2 = {'version': '2.32.10', 'library': PHASE2 / 'clean-deps/lib/libSDL2-2.0.0.dylib',
         'headers': PHASE2 / 'clean-deps/include/SDL2',
@@ -118,6 +170,17 @@ def expand_braces(command, makefile):
     raise RuntimeError('Make variables nest too deeply in: ' + command)
 
 
+def expand_cross(command, makefile):
+    """Expand the cross compilers' $(x86_64_...) and $(i386_...) variables, which PE rules use and
+    expand() doesn't. build_portable_runtime.py passed both CFLAGS on make's command line (it records
+    them in .portable-cross-paths): the Makefile's own value would leave build paths in the DLL."""
+    def value(match):
+        if match.group(1) in ('x86_64_CFLAGS', 'i386_CFLAGS'):
+            return (TREE / '.portable-cross-paths').read_text().strip()
+        return variable(makefile, match.group(1))
+    return re.sub(r'\$\(((?:x86_64|i386)_\w+)\)', value, command)
+
+
 def without_uuid(data):
     """Mach-O bytes with LC_UUID zeroed."""
     data = bytearray(data)
@@ -130,6 +193,26 @@ def without_uuid(data):
         if cmd == 0x1b:
             data[offset + 8:offset + 24] = bytes(16)
         offset += size
+    return bytes(data)
+
+
+def without_pe_timestamps(data):
+    """PE bytes with the link time zeroed: lld stamps the COFF header and each debug directory entry."""
+    data = bytearray(data)
+    pe = struct.unpack_from('<I', data, 0x3c)[0]
+    if data[pe:pe + 4] != b'PE\0\0':
+        raise ValueError('Not a PE file')
+    data[pe + 8:pe + 12] = bytes(4)
+    sections, optional = struct.unpack_from('<H', data, pe + 6)[0], struct.unpack_from('<H', data, pe + 20)[0]
+    directories = 112 if struct.unpack_from('<H', data, pe + 24)[0] == 0x20b else 96  # PE32+ or PE32
+    rva, size = struct.unpack_from('<II', data, pe + 24 + directories + 6 * 8)  # data directory 6: debug
+    table = pe + 24 + optional
+    for i in range(sections):
+        _, vsize, vaddr, rawsize, rawptr = struct.unpack_from('<8sIIII', data, table + 40 * i)
+        if vaddr <= rva < vaddr + max(vsize, rawsize):
+            offset = rawptr + rva - vaddr
+            for entry in range(offset, offset + size, 28):
+                data[entry + 4:entry + 8] = bytes(4)
     return bytes(data)
 
 
@@ -150,7 +233,7 @@ def compile_component(component, source, out, sdl2=False):
     def build(name):
         target = objdir / (name + '.o')
         target.parent.mkdir(parents=True, exist_ok=True)
-        command = expand_braces(expand(recipe(makefile, name + '.o'), target, makefile), makefile)
+        command = expand_braces(expand(expand_cross(recipe(makefile, name + '.o'), makefile), target, makefile), makefile)
         command = command.replace(str(BASE / directory) + '/', str(source / directory) + '/')
         command = command.replace('-I' + str(BASE / directory) + ' ', '-I' + str(source / directory) + ' ')
         if sdl2 and name == directory + '/bus_sdl':
@@ -167,7 +250,7 @@ def compile_component(component, source, out, sdl2=False):
     with ThreadPoolExecutor(max_workers=6) as pool:
         list(pool.map(build, names))
     raw = out / (Path(component['rule']).name + '.raw')
-    link = expand(recipe(makefile, component['rule']), raw, makefile)
+    link = expand(expand_cross(recipe(makefile, component['rule']), makefile), raw, makefile)
     for name in names:
         link = re.sub(re.escape(name) + r'\.o\b', str(objdir / (name + '.o')), link)
     subprocess.run(link, shell=True, cwd=TREE, env=ENV, check=True)
@@ -177,6 +260,13 @@ def compile_component(component, source, out, sdl2=False):
 def package(component, raw, final):
     """The assemble_portable_runtime.py treatment, minus Developer ID signing."""
     shutil.copy2(raw, final)
+    if component.get('pe'):
+        run(LLVM_STRIP, '--strip-debug', final, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for value in (str(ROOT), '/Users/'):
+            for encoding in ('utf-8', 'utf-16-le'):
+                if value.encode(encoding) in final.read_bytes():
+                    raise ValueError('Development path remains in ' + final.name)
+        return final
     run('/usr/bin/strip', '-S', '-x', final, stderr=subprocess.DEVNULL)
     for dep in links(final):
         if dep.startswith(('/usr/lib/', '/System/Library/', '@loader_path/', '@rpath/', '@executable_path/')):
@@ -202,7 +292,8 @@ def write_patch(component):
     source = component['source']
     first = subprocess.check_output(['git', '-C', str(source), 'rev-list', '--max-parents=0', 'HEAD'], text=True).strip()
     diff = subprocess.run(['git', '-C', str(source), 'diff', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', first,
-                           '--', component['directory']], capture_output=True, text=True, check=True).stdout
+                           '--', *component.get('patch_directories', [component['directory']])],
+                          capture_output=True, text=True, check=True).stdout
     component['patch'].write_text(diff)
 
 
@@ -226,6 +317,14 @@ def main():
         out.mkdir(parents=True)
         raw = compile_component(component, component['pristine'], out)
         final = package(component, raw, out / name)
+        if component.get('pe'):
+            # PE files aren't signed; lld stamps them with the link time, which differs.
+            if without_pe_timestamps(raw.read_bytes()) != without_pe_timestamps(shipped_raw.read_bytes()):
+                raise SystemExit(f'Base {name} link output differs from the Phase 2 build (beyond the link time)')
+            if without_pe_timestamps(final.read_bytes()) != without_pe_timestamps(archived.read_bytes()):
+                raise SystemExit(f'Base {name} differs from the shipped file after packaging (beyond the link time)')
+            print(json.dumps({args.component: str(final), 'reproduced': True, 'raw_sha256': sha(raw)}, indent=2))
+            return
         if component.get('raw_check', True) and without_uuid(raw.read_bytes()) != without_uuid(shipped_raw.read_bytes()):
             raise SystemExit(f'Base {name} link output differs from the Phase 2 build (beyond LC_UUID)')
         if (without_uuid(without_linkedit_vmsize(final)) !=
@@ -244,7 +343,8 @@ def main():
         sdl2 = sdl2_identity()
 
     def snapshot():
-        return {str(p): sha(p) for p in (source / component['directory']).rglob('*') if p.is_file()}
+        return {str(p): sha(p) for directory in component.get('patch_directories', [component['directory']])
+                for p in (source / directory).rglob('*') if p.is_file()}
     before = snapshot()
     out = OUT / args.component / 'current'
     if out.exists():
@@ -252,8 +352,9 @@ def main():
     out.mkdir(parents=True)
     raw = compile_component(component, source, out, sdl2=component.get('sdl2', False))
     final = package(component, raw, out / name)
-    run('/usr/bin/codesign', '--force', '--sign', '-', final, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    run('/usr/bin/codesign', '--verify', '--strict', final)
+    if not component.get('pe'):
+        run('/usr/bin/codesign', '--force', '--sign', '-', final, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run('/usr/bin/codesign', '--verify', '--strict', final)
     if before != snapshot():
         raise SystemExit('Sources changed during the build')
     manifest = {'schema': 1, 'component': args.component, 'sha256': sha(final), 'base_sha256': sha(archived)}

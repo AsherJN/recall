@@ -3,8 +3,9 @@ import SwiftUI
 /// "Preparing graphics" before Battle.net opens, as the worker reports it (graphics
 /// events from the pipeline helper, scripts/portable_pipeline.swift). Before each
 /// session Recall keeps the shaders Overwatch used on this Mac in earlier ones; it
-/// builds them after each session. After a macOS update it first warms the game's own
-/// shader cache with them, once.
+/// builds them after each session. After a macOS update, or once Game Mode's setting changes
+/// which program Overwatch runs as (REC-51), it first warms that program's shader cache with
+/// them, once.
 struct GraphicsProgress {
     enum Phase { case kept, learned, warming, checking, preparing, verifying, done, skipped }
     struct Item: Identifiable { let id: Int; let key: String; let ms: Double; let new: Bool }
@@ -63,7 +64,7 @@ struct GraphicsProgress {
     }
     /// Why the warm-up runs, under its list.
     var warmingNote:String? {
-        phase == .warming || warmed > 0 ? L("After a macOS update, {0} builds the shaders you’ve already used again. This can take a few minutes.",Brand.name) : nil
+        phase == .warming || warmed > 0 ? L("After a macOS update or a change to Game Mode, {0} builds the shaders you’ve already used again. This can take a few minutes.",Brand.name) : nil
     }
     /// Shown in place of the numbers before anything was learned.
     var explanation:String {

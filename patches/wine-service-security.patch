@@ -1,0 +1,334 @@
+diff --git a/dlls/sechost/service.c b/dlls/sechost/service.c
+index 474d977..e7e615b 100644
+--- a/dlls/sechost/service.c
++++ b/dlls/sechost/service.c
+@@ -1250,35 +1250,70 @@ BOOL WINAPI EnumDependentServicesW( SC_HANDLE hService, DWORD dwServiceState,
+ BOOL WINAPI DECLSPEC_HOTPATCH QueryServiceObjectSecurity( SC_HANDLE service, SECURITY_INFORMATION type,
+                                                           PSECURITY_DESCRIPTOR ret_descriptor, DWORD size, DWORD *ret_size )
+ {
+-    SECURITY_DESCRIPTOR descriptor;
+-    NTSTATUS status;
+-    ACL acl;
+-
+-    FIXME( "%p %ld %p %lu %p - semi-stub\n", service, type, ret_descriptor, size, ret_size );
+-
+-    if (type != DACL_SECURITY_INFORMATION)
+-        FIXME("information %ld not supported\n", type);
++    BYTE dummy;
++    DWORD err;
+ 
+-    InitializeSecurityDescriptor( &descriptor, SECURITY_DESCRIPTOR_REVISION );
++    TRACE( "%p %ld %p %lu %p\n", service, type, ret_descriptor, size, ret_size );
+ 
+-    InitializeAcl( &acl, sizeof(ACL), ACL_REVISION );
+-    SetSecurityDescriptorDacl( &descriptor, TRUE, &acl, TRUE );
++    /* Callers ask for the size with a NULL buffer; the RPC buffer must not be NULL. */
++    if (!ret_descriptor) size = 0;
+ 
+-    status = RtlMakeSelfRelativeSD( &descriptor, ret_descriptor, &size );
+-    *ret_size = size;
++    __TRY
++    {
++        err = svcctl_QueryServiceObjectSecurity( service, type, ret_descriptor ? ret_descriptor : (void *)&dummy,
++                                                 size, ret_size );
++    }
++    __EXCEPT(rpc_filter)
++    {
++        err = map_exception_code( GetExceptionCode() );
++    }
++    __ENDTRY
+ 
+-    return set_error( RtlNtStatusToDosError( status ) );
++    return set_error( err );
+ }
+ 
+ /******************************************************************************
+  *     SetServiceObjectSecurity   (sechost.@)
+  */
+-BOOL WINAPI SetServiceObjectSecurity(SC_HANDLE hService,
+-       SECURITY_INFORMATION dwSecurityInformation,
+-       PSECURITY_DESCRIPTOR lpSecurityDescriptor)
++BOOL WINAPI SetServiceObjectSecurity( SC_HANDLE service, SECURITY_INFORMATION type,
++                                      PSECURITY_DESCRIPTOR descriptor )
+ {
+-    FIXME("%p %ld %p\n", hService, dwSecurityInformation, lpSecurityDescriptor);
+-    return TRUE;
++    PSECURITY_DESCRIPTOR relative = descriptor;
++    SECURITY_DESCRIPTOR_CONTROL control;
++    DWORD revision, len, err;
++
++    TRACE( "%p %ld %p\n", service, type, descriptor );
++
++    if (!descriptor || !GetSecurityDescriptorControl( descriptor, &control, &revision ))
++        return set_error( ERROR_INVALID_PARAMETER );
++
++    /* The service manager keeps the self-relative form. */
++    if (control & SE_SELF_RELATIVE)
++        len = GetSecurityDescriptorLength( descriptor );
++    else
++    {
++        len = 0;
++        MakeSelfRelativeSD( descriptor, NULL, &len );
++        if (!(relative = malloc( len ))) return set_error( ERROR_NOT_ENOUGH_MEMORY );
++        if (!MakeSelfRelativeSD( descriptor, relative, &len ))
++        {
++            free( relative );
++            return FALSE;
++        }
++    }
++
++    __TRY
++    {
++        err = svcctl_SetServiceObjectSecurity( service, type, relative, len );
++    }
++    __EXCEPT(rpc_filter)
++    {
++        err = map_exception_code( GetExceptionCode() );
++    }
++    __ENDTRY
++
++    if (relative != descriptor) free( relative );
++    return set_error( err );
+ }
+ 
+ static DWORD WINAPI notify_thread(void *user)
+diff --git a/programs/services/rpc.c b/programs/services/rpc.c
+index b2f541e..e986825 100644
+--- a/programs/services/rpc.c
++++ b/programs/services/rpc.c
+@@ -28,6 +28,7 @@
+ #include <winsvc.h>
+ #include <ddk/ntddk.h>
+ #include <ntsecapi.h>
++#include <sddl.h>
+ #include <rpc.h>
+ 
+ #include "wine/list.h"
+@@ -543,6 +544,25 @@ static DWORD parse_dependencies(const WCHAR *dependencies, struct service_entry
+     return ERROR_SUCCESS;
+ }
+ 
++/* A copy of a service's command line with the program's path in Windows' form: a program
++ * named with forward slashes ("C:/dir/app.exe") is stored as C:\dir\app.exe, as programs read
++ * it back on Windows. Battle.net's update agent names its helper service's program with forward
++ * slashes and, on the next start, finds its helper broken unless the path reads back with
++ * backslashes, so it reinstalls itself on every other start. Arguments are left alone. */
++static WCHAR *image_path_dup(const WCHAR *path)
++{
++    WCHAR *copy = wcsdup(path), *p, *end;
++
++    if (!copy) return NULL;
++    p = copy[0] == '"' ? copy + 1 : copy;
++    if (!((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) || p[1] != ':' || (p[2] != '/' && p[2] != '\\'))
++        return copy;
++    end = p == copy ? wcschr(p, ' ') : wcschr(p, '"');
++    if (!end) end = p + wcslen(p);
++    for (; p < end; p++) if (*p == '/') *p = '\\';
++    return copy;
++}
++
+ static DWORD create_serviceW(
+     SC_RPC_HANDLE hSCManager,
+     LPCWSTR lpServiceName,
+@@ -593,7 +613,7 @@ static DWORD create_serviceW(
+     entry->config.dwServiceType = entry->status.dwServiceType = dwServiceType;
+     entry->config.dwStartType = dwStartType;
+     entry->config.dwErrorControl = dwErrorControl;
+-    entry->config.lpBinaryPathName = wcsdup(lpBinaryPathName);
++    entry->config.lpBinaryPathName = image_path_dup(lpBinaryPathName);
+     entry->config.lpLoadOrderGroup = wcsdup(lpLoadOrderGroup);
+     entry->config.lpServiceStartName = wcsdup(lpServiceStartName);
+     entry->config.lpDisplayName = wcsdup(lpDisplayName);
+@@ -804,7 +824,7 @@ DWORD __cdecl svcctl_ChangeServiceConfigW(
+ 
+     /* configuration OK. The strings needs to be duplicated */
+     if (lpBinaryPathName != NULL)
+-        new_entry.config.lpBinaryPathName = wcsdup(lpBinaryPathName);
++        new_entry.config.lpBinaryPathName = image_path_dup(lpBinaryPathName);
+ 
+     if (lpLoadOrderGroup != NULL)
+         new_entry.config.lpLoadOrderGroup = wcsdup(lpLoadOrderGroup);
+@@ -1895,6 +1915,112 @@ DWORD __cdecl svcctl_QueryServiceConfigEx(
+     return ERROR_CALL_NOT_IMPLEMENTED;
+ }
+ 
++/* A service's security descriptor is kept where Windows keeps it: the Security value of the
++ * service key's Security subkey, self-relative. A service without one has Windows' default.
++ * Handles are still granted without checking it, but programs read back what they set
++ * (Battle.net's update agent checks the descriptor it gave its helper service). */
++static const WCHAR default_service_sd[] = L"O:SYG:SYD:(A;;CCLCSWRPWPDTLOCRRC;;;SY)"
++        L"(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)";
++
++static PSECURITY_DESCRIPTOR load_service_sd(struct service_entry *service)
++{
++    PSECURITY_DESCRIPTOR sd = NULL;
++    SECURITY_DESCRIPTOR_CONTROL control;
++    DWORD size = 0, revision;
++    HKEY key;
++
++    if (!RegOpenKeyExW(service->db->root_key, service->name, 0, KEY_READ, &key))
++    {
++        if (!RegGetValueW(key, L"Security", L"Security", RRF_RT_REG_BINARY, NULL, NULL, &size) &&
++            (sd = LocalAlloc(LMEM_FIXED, size)) &&
++            (RegGetValueW(key, L"Security", L"Security", RRF_RT_REG_BINARY, NULL, sd, &size) ||
++             !IsValidSecurityDescriptor(sd) || !GetSecurityDescriptorControl(sd, &control, &revision) ||
++             !(control & SE_SELF_RELATIVE) || GetSecurityDescriptorLength(sd) > size))
++        {
++            LocalFree(sd);
++            sd = NULL;
++        }
++        RegCloseKey(key);
++    }
++    if (!sd) ConvertStringSecurityDescriptorToSecurityDescriptorW(default_service_sd, SDDL_REVISION_1, &sd, NULL);
++    return sd;
++}
++
++static DWORD save_service_sd(struct service_entry *service, PSECURITY_DESCRIPTOR sd, DWORD len)
++{
++    DWORD err;
++    HKEY key;
++
++    if ((err = RegCreateKeyExW(service->db->root_key, service->name, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL)))
++        return err;
++    err = RegSetKeyValueW(key, L"Security", L"Security", REG_BINARY, sd, len);
++    RegCloseKey(key);
++    return err;
++}
++
++/* A self-relative descriptor with the parts named in info taken from new_sd and the
++ * others from old_sd, if given. */
++static PSECURITY_DESCRIPTOR combine_sd(PSECURITY_DESCRIPTOR old_sd, PSECURITY_DESCRIPTOR new_sd,
++                                       SECURITY_INFORMATION info, DWORD *len)
++{
++    PSECURITY_DESCRIPTOR source, result;
++    SECURITY_DESCRIPTOR sd;
++    BOOL present, defaulted;
++    PSID sid;
++    PACL acl;
++
++    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
++    source = (info & OWNER_SECURITY_INFORMATION) ? new_sd : old_sd;
++    if (source && GetSecurityDescriptorOwner(source, &sid, &defaulted))
++        SetSecurityDescriptorOwner(&sd, sid, defaulted);
++    source = (info & GROUP_SECURITY_INFORMATION) ? new_sd : old_sd;
++    if (source && GetSecurityDescriptorGroup(source, &sid, &defaulted))
++        SetSecurityDescriptorGroup(&sd, sid, defaulted);
++    source = (info & DACL_SECURITY_INFORMATION) ? new_sd : old_sd;
++    if (source && GetSecurityDescriptorDacl(source, &present, &acl, &defaulted))
++        SetSecurityDescriptorDacl(&sd, present, acl, defaulted);
++    source = (info & SACL_SECURITY_INFORMATION) ? new_sd : old_sd;
++    if (source && GetSecurityDescriptorSacl(source, &present, &acl, &defaulted))
++        SetSecurityDescriptorSacl(&sd, present, acl, defaulted);
++
++    *len = 0;
++    MakeSelfRelativeSD(&sd, NULL, len);
++    if (!(result = LocalAlloc(LMEM_FIXED, *len))) return NULL;
++    if (!MakeSelfRelativeSD(&sd, result, len))
++    {
++        LocalFree(result);
++        return NULL;
++    }
++    return result;
++}
++
++static void trace_sd(const char *what, const struct service_entry *service, PSECURITY_DESCRIPTOR sd)
++{
++    WCHAR *text = NULL;
++
++    if (!WINE_TRACE_ON(service)) return;
++    if (sd && ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1,
++            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &text, NULL))
++    {
++        WINE_TRACE("%s %s: %s\n", what, wine_dbgstr_w(service->name), wine_dbgstr_w(text));
++        LocalFree(text);
++    }
++}
++
++/* The rights a handle needs to read, or change, these parts of a descriptor. */
++static DWORD sd_access(SECURITY_INFORMATION info, BOOL change)
++{
++    DWORD access = 0;
++
++    if (info & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION))
++        access |= change ? WRITE_OWNER : READ_CONTROL;
++    if (info & DACL_SECURITY_INFORMATION)
++        access |= change ? WRITE_DAC : READ_CONTROL;
++    if (info & SACL_SECURITY_INFORMATION)
++        access |= ACCESS_SYSTEM_SECURITY;
++    return access;
++}
++
+ DWORD __cdecl svcctl_QueryServiceObjectSecurity(
+     SC_RPC_HANDLE service,
+     SECURITY_INFORMATION info,
+@@ -1902,8 +2028,30 @@ DWORD __cdecl svcctl_QueryServiceObjectSecurity(
+     DWORD buf_size,
+     DWORD *needed_size)
+ {
+-    WINE_FIXME("\n");
+-    return ERROR_CALL_NOT_IMPLEMENTED;
++    PSECURITY_DESCRIPTOR stored, result;
++    struct sc_service_handle *handle;
++    DWORD err, len;
++
++    WINE_TRACE("(%p, %#lx, %p, %lu, %p)\n", service, info, descriptor, buf_size, needed_size);
++
++    if ((err = validate_service_handle(service, sd_access(info, FALSE), &handle)) != 0)
++        return err;
++
++    service_lock(handle->service_entry);
++    stored = load_service_sd(handle->service_entry);
++    service_unlock(handle->service_entry);
++    if (!stored) return ERROR_NOT_ENOUGH_MEMORY;
++
++    trace_sd("stored", handle->service_entry, stored);
++    result = combine_sd(NULL, stored, info, &len);
++    LocalFree(stored);
++    if (!result) return ERROR_NOT_ENOUGH_MEMORY;
++
++    *needed_size = len;
++    if (len <= buf_size) memcpy(descriptor, result, len);
++    else err = ERROR_INSUFFICIENT_BUFFER;
++    LocalFree(result);
++    return err;
+ }
+ 
+ DWORD __cdecl svcctl_SetServiceObjectSecurity(
+@@ -1912,8 +2060,35 @@ DWORD __cdecl svcctl_SetServiceObjectSecurity(
+     BYTE *descriptor,
+     DWORD buf_size)
+ {
+-    WINE_FIXME("\n");
+-    return ERROR_CALL_NOT_IMPLEMENTED;
++    PSECURITY_DESCRIPTOR stored = NULL, result = NULL;
++    struct sc_service_handle *handle;
++    DWORD err, len;
++
++    WINE_TRACE("(%p, %#lx, %p, %lu)\n", service, info, descriptor, buf_size);
++
++    if ((err = validate_service_handle(service, sd_access(info, TRUE), &handle)) != 0)
++        return err;
++    if (buf_size < sizeof(SECURITY_DESCRIPTOR_RELATIVE) || !IsValidSecurityDescriptor(descriptor) ||
++        GetSecurityDescriptorLength(descriptor) > buf_size)
++        return ERROR_INVALID_PARAMETER;
++
++    service_lock(handle->service_entry);
++    if (is_marked_for_delete(handle->service_entry))
++        err = ERROR_SERVICE_MARKED_FOR_DELETE;
++    else if (!(stored = load_service_sd(handle->service_entry)) ||
++             !(result = combine_sd(stored, descriptor, info, &len)))
++        err = ERROR_NOT_ENOUGH_MEMORY;
++    else
++    {
++        trace_sd("given", handle->service_entry, descriptor);
++        trace_sd("saved", handle->service_entry, result);
++        err = save_service_sd(handle->service_entry, result, len);
++    }
++    service_unlock(handle->service_entry);
++
++    LocalFree(stored);
++    LocalFree(result);
++    return err;
+ }
+ 
+ DWORD __cdecl svcctl_QueryServiceStatus(

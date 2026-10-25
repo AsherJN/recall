@@ -66,6 +66,8 @@ enum LogBundle {
             for file in session.files {
                 guard let data=try? Data(contentsOf:file.url) else { continue }
                 var text=cleaner.clean(String(decoding:data,as:UTF8.self))
+                // The mouse report keeps its mouse data only (MouseReport).
+                if file.source == .recallSession && MouseReport.isReport(file.url) { text=MouseReport.withoutKeys(text) }
                 var repeats=0
                 if file.source == .recallSession && file.url.pathExtension == "log" { (text,repeats)=collapse(text) }
                 let bytes=Data(text.utf8)
@@ -228,7 +230,7 @@ enum LogBundle {
         let iso=ISO8601DateFormatter()
         let info=ProcessInfo.processInfo
         var logging:[String:Any]=["setting":input.logging.rawValue]
-        if input.logging == .custom { logging["custom"]=input.custom }
+        if input.logging.contains(.custom) { logging["custom"]=input.custom }
         if let since=input.since { logging["since"]=iso.string(from:since) }
         let paths=Set(written.map(\.file.path))
         let sessions:[[String:Any]]=kept.reversed().map { session in
@@ -412,8 +414,8 @@ enum Summary {
         var lines=[L("{0} logs",Brand.name),
                    L("Saved {0}",input.now.formatted(date:.long,time:.shortened)),
                    L("{0} {1} · engine {2} · macOS {3} · {4} · {5} GB memory",Brand.name,input.appVersion,input.runtime,macOS,chip,String(info.physicalMemory>>30)),
-                   input.logging == .off ? L("Logging: off") : L("Logging: {0}",input.logging == .custom ? input.custom : input.logging.title)]
-        if let since=input.since,input.logging != .off { lines.append(L("Logging has been on since {0}.",since.formatted(date:.abbreviated,time:.shortened))) }
+                   input.logging.isOff ? L("Logging: off") : L("Logging: {0}",input.logging.title(custom:input.custom))]
+        if let since=input.since,!input.logging.isOff { lines.append(L("Logging has been on since {0}.",since.formatted(date:.abbreviated,time:.shortened))) }
         // What Recall recorded is told from its record; Battle.net's and Overwatch's own logs of the
         // same moment are left out (and an Overwatch log that ends in a crash isn't a close).
         let recorded=Recorded(moments)
@@ -448,8 +450,8 @@ enum Summary {
     private static func sentence(_ moment:Moments.Moment, recorded:Recorded)->[String]? {
         switch moment.kind {
         case "session_started":
-            let setting=LoggingSetting(rawValue:moment.extra["logging"] as? String ?? "") ?? .off
-            return [setting == .off ? L("Battle.net opened.") : L("Battle.net opened. Logging: {0}.",setting == .custom ? (moment.extra["logging_custom"] as? String ?? setting.title) : setting.title)]
+            let setting=LoggingSetting(rawValue:moment.extra["logging"] as? String ?? "")
+            return [setting.isOff ? L("Battle.net opened.") : L("Battle.net opened. Logging: {0}.",setting.title(custom:moment.extra["logging_custom"] as? String))]
         case "battlenet_started":
             guard let time=moment.time,!Recorded.near(recorded.starts,time) else { return nil }
             return [L("Battle.net opened.")]

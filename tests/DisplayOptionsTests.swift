@@ -32,10 +32,13 @@ import Foundation
         // 13-inch MacBook Air: 1470 x 956 points.
         let air=MainDisplay(name:"Built-in",builtIn:true,points:CGSize(width:1470,height:956),pixels:CGSize(width:2940,height:1838))
         precondition(air.shape == .macBook && air.fits(r(2560,1600)) && !air.fits(r(3840,2400)))
-        // A 1440p monitor at 1x (the owner's LG): Wine doubles it, so every size fits.
+        // A 1440p monitor at 1x (the owner's LG): Wine sees it at its own size without Retina
+        // mode (REC-45; until 1.6 Wine doubled it and every size fit).
         let monitor=MainDisplay(name:"LG ULTRAGEAR",builtIn:false,points:CGSize(width:2560,height:1440),pixels:CGSize(width:2560,height:1440))
-        precondition(monitor.shape == .monitor && monitor.aspect == "16:9" && monitor.size == "2560 × 1440")
-        precondition(DisplayResolution.all.allSatisfy(monitor.fits))
+        precondition(monitor.shape == .monitor && monitor.aspect == "16:9" && monitor.size == "2560 × 1440" && monitor.wineScale == 1)
+        precondition(DisplayResolution.all.filter(monitor.fits).map { "\($0.width)x\($0.height)" }.sorted() == ["1920x1080","1920x1200","2560x1440"])
+        precondition(monitor.fitted(r(3840,2160)) == r(2560,1440) && monitor.fitted(r(2560,1600)) == r(1920,1200))
+        precondition(macBook.wineScale == 2 && air.wineScale == 2)
         // A 4K monitor at its default 2x ("looks like 1920 x 1080").
         let uhd=MainDisplay(name:"4K",builtIn:false,points:CGSize(width:1920,height:1080),pixels:CGSize(width:3840,height:2160))
         precondition(uhd.fits(r(3840,2160)) && !uhd.fits(r(3840,2400)) && uhd.fitted(r(3840,2400)) == r(2560,1600))
@@ -66,7 +69,7 @@ import Foundation
         precondition(macBook.caption(for:r(3840,2400)).hasPrefix("Too large for this main display: Overwatch uses 2560 × 1600"))
         precondition(macBook.caption(for:r(1920,1200)).hasPrefix("Scaled up to fill your main display."))
         precondition(monitor.caption(for:r(2560,1440)).hasPrefix("Matches your main display exactly"))
-        precondition(monitor.caption(for:r(3840,2160)).hasPrefix("Larger than your main display"))
+        precondition(monitor.caption(for:r(3840,2160)).hasPrefix("Too large for this main display: Overwatch uses 2560 × 1440"))
         // A 5K display at its default 2x: Overwatch lists 5120 x 2880.
         let fiveK=MainDisplay(name:"Studio Display",builtIn:false,points:CGSize(width:2560,height:1440),pixels:CGSize(width:5120,height:2880))
         precondition(fiveK.fits(r(5120,2880)) && fiveK.caption(for:r(5120,2880)).hasPrefix("Matches your main display exactly"))

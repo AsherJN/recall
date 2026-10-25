@@ -46,6 +46,9 @@ struct SettingsSheet:View {
     @State private var main=MainDisplay.current
     /// Also follows System Settings, where the player turns the microphone on or off.
     @State private var microphoneAccess=Microphone.access
+    /// And Input Monitoring, for the high-precision mouse, which explains itself before it's chosen.
+    @State private var inputMonitoring=InputMonitoring.access
+    @State private var explainHighPrecision=false
     var body:some View {
         VStack(spacing:16) {
             LauncherHeading(title:L("Settings"),subtitle:"",compact:true)
@@ -79,7 +82,7 @@ struct SettingsSheet:View {
             // and the microphone been turned on or off in System Settings.
             .onAppear { model.checkRunning() }
             .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in
-                model.checkRunning();microphoneAccess=Microphone.access
+                model.checkRunning();microphoneAccess=Microphone.access;inputMonitoring=InputMonitoring.access
             }
             .alert(L("Force quit Overwatch and Battle.net?"),isPresented:$confirmForceQuit) {
                 Button(L("Cancel"),role:.cancel) {}
@@ -90,6 +93,12 @@ struct SettingsSheet:View {
                 Button(L("Repair"),action:model.repair)
             } message: { Text(L("Overwatch and Battle.net must be closed. This reinstalls the files this app adds and refreshes the Windows environment. Overwatch, its settings and your Battle.net sign-in are kept.")) }
             .sheet(isPresented:$confirmKorean) { KoreanSupportSheet { model.chooseRegion(.korea) } }
+            .sheet(isPresented:$explainHighPrecision) {
+                HighPrecisionMouseSheet(discord:model.showsDiscord) {
+                    model.mouseInput = .highPrecision
+                    if inputMonitoring == .undecided { InputMonitoring.ask() }
+                }
+            }
             .alert(L("Reset display settings?"),isPresented:$confirmResetDisplay) {
                 Button(L("Cancel"),role:.cancel) {}
                 Button(L("Reset"),action:model.resetDisplay)
@@ -109,12 +118,15 @@ struct SettingsSheet:View {
         case .general:
             updates
             battleNet
+            mouse
+            if model.otherInstallation != nil { otherInstallation }
         case .display:
             display
             resetDisplay
         case .graphics:
             upscaling
             metalHUD
+            gameModeSetting
             shaderMemory
             clearShaderCache
         case .audio:
@@ -185,6 +197,69 @@ struct SettingsSheet:View {
                     }
                     if let running=model.running { closeFirst(running,several:false) }
                 }
+            }
+        }
+    }
+    /// How Overwatch gets the mouse (AppModel.MouseInput; REC-52, REC-57): one of three. Overwatch's
+    /// window driver reads it as Battle.net opens, so like the HUD it changes while Battle.net is
+    /// closed. High-precision is experimental: choosing it first explains it and why macOS will ask
+    /// for Input Monitoring (HighPrecisionMouseSheet), whose Continue chooses it and shows macOS's
+    /// prompt the first time. Until the player allows it in System Settings, the mouse works as
+    /// Standard does and the panel says what to do; while it's chosen, the panel asks for feedback.
+    private var mouse:some View {
+        LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:6) {
+                VStack(alignment:.leading,spacing:2) {
+                    Text(L("Mouse")).font(LauncherStyle.font(14,.semibold))
+                    Text(L("How Overwatch gets your mouse’s movement and clicks.")).font(LauncherStyle.font(12))
+                        .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                }
+                VStack(alignment:.leading,spacing:10) {
+                    MouseChoice(title:L("Standard"),detail:L("Clicks and movement reach Overwatch together, for precise aim."),
+                                selected:model.mouseInput == .standard,disabled:model.running != nil) { model.mouseInput = .standard }
+                    MouseChoice(title:L("Classic"),detail:L("The mouse as it worked in {0} 1.4. Try it if your mouse feels different since 1.5.",Brand.name),
+                                selected:model.mouseInput == .classic,disabled:model.running != nil) { model.mouseInput = .classic }
+                    MouseChoice(title:L("High-precision"),detail:L("Overwatch reads every movement straight from your mouse. Needs Input Monitoring."),
+                                experimental:true,selected:model.mouseInput == .highPrecision,disabled:model.running != nil) {
+                        if model.mouseInput != .highPrecision { explainHighPrecision=true }
+                    }
+                }.padding(.top,8)
+                if model.mouseInput == .highPrecision {
+                    if inputMonitoring != .allowed {
+                        HStack(spacing:12) {
+                            Text(L("Needs Input Monitoring: turn on {0} in System Settings › Privacy & Security › Input Monitoring. Until then, the mouse works as Standard does.",Brand.name))
+                                .font(LauncherStyle.font(12,.medium)).fixedSize(horizontal:false,vertical:true)
+                            Spacer(minLength:8)
+                            Button(L("Open System Settings")) { NSWorkspace.shared.open(InputMonitoring.privacySettings) }
+                                .buttonStyle(.bordered).buttonBorderShape(.capsule)
+                        }.padding(.top,6)
+                    }
+                    HStack(spacing:16) {
+                        Text(L("How does it feel?")).font(LauncherStyle.font(12)).foregroundStyle(.secondary)
+                        MouseFeedbackLinks(discord:model.showsDiscord)
+                    }.padding(.top,6)
+                }
+                if let running=model.running { closeFirst(running,several:false) }
+            }
+        }
+    }
+    /// REC-44: the installation the player moved away from, after setup here has gone past the
+    /// setup screens that offer it.
+    private var otherInstallation:some View {
+        let name=model.otherInstallation.map(InstallLocation.driveName) ?? ""
+        return LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:6) {
+                HStack(alignment:.center,spacing:12) {
+                    VStack(alignment:.leading,spacing:2) {
+                        Text(L("Install location")).font(LauncherStyle.font(14,.semibold))
+                        Text(L("Your installation on “{0}” is still there.",name)).font(LauncherStyle.font(12))
+                            .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Spacer(minLength:12)
+                    Button(L("Use “{0}”…",name),action:model.chooseOtherInstallation).buttonStyle(.bordered).buttonBorderShape(.capsule)
+                        .disabled(model.busy || model.uninstall == .working || model.running != nil)
+                }
+                if let running=model.running { closeFirst(running,several:false) }
             }
         }
     }
@@ -341,6 +416,18 @@ struct SettingsSheet:View {
             }
         }
     }
+    /// macOS Game Mode (AppModel.gameMode; on by default). Overwatch gets it from Battle.net,
+    /// which starts it, so like the HUD it changes only while Battle.net is closed.
+    private var gameModeSetting:some View {
+        LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:6) {
+                SettingSwitch(title:L("Game Mode"),
+                              detail:L("macOS gives Overwatch priority on your Mac’s processor and graphics while it fills the screen, and holds back other apps."),
+                              isOn:$model.gameMode,disabled:model.running != nil)
+                if let running=model.running { closeFirst(running,several:false) }
+            }
+        }
+    }
     /// How much of the shader cache Overwatch loads when it starts (ShaderMemory): its parts
     /// load in order, slowest shaders first, and the slider picks how many. Overwatch reads the
     /// choice as it starts, so it can change while Battle.net or the game is open.
@@ -455,10 +542,10 @@ struct SettingsSheet:View {
         case .undecided: return L("Lets your team hear you in voice chat.")
         }
     }
-    /// Wine picks the sound output once, as Overwatch starts, and keeps it.
+    /// Wine follows the Mac's sound output while Overwatch runs (wine-audio-devices.patch, 1.6).
     private var sound:some View {
         LauncherPanel(inset:16) {
-            note(L("Speakers and headphones"),L("Overwatch keeps the sound output that was selected when it started. Connect your headphones and select them on your Mac before you press Play; to switch later, quit Overwatch and play again."))
+            note(L("Speakers and headphones"),L("Overwatch plays through the sound output selected on your Mac. You can connect headphones or switch outputs at any time, even during a match."))
         }
     }
     private func note(_ title:String,_ text:String) -> some View {
@@ -477,24 +564,29 @@ struct SettingsSheet:View {
         }
     }
     /// Logging (LoggingSetting) and Save Logs (LogBundle). Battle.net carries the setting from when it
-    /// opens, so it changes while Battle.net is closed; turning it on warns about FPS first. Custom
-    /// takes Wine's own text, checked as it's typed. Save Logs works any time, logging on or off.
+    /// opens, so it changes while Battle.net is closed; turning it on warns about FPS first. Any mix of
+    /// presets can be on (REC-51). Custom takes Wine's own text, checked as it's typed, and joins the
+    /// setting once its text is turned on. Save Logs works any time, logging on or off.
     private var logs:some View {
-        let shown=customDraft != nil ? LoggingSetting.custom : model.logging
+        let locked=model.running != nil || !model.canChangeAdvanced
         return LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
-                HStack(alignment:.center,spacing:12) {
-                    VStack(alignment:.leading,spacing:2) {
-                        Text(L("Logging")).font(LauncherStyle.font(14,.semibold))
-                        Text(sentences(shown.detail,shown == .off ? L("Can lower your FPS while it’s on.") : ""))
-                            .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                VStack(alignment:.leading,spacing:2) {
+                    Text(L("Logging")).font(LauncherStyle.font(14,.semibold))
+                    Text(sentences(L("Records more of what Battle.net and Overwatch do, for a bug report. Turn on any of these."),L("Can lower your FPS while it’s on.")))
+                        .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                }.accessibilityElement(children:.combine)
+                VStack(alignment:.leading,spacing:8) {
+                    ForEach(LoggingPreset.allCases) { preset in
+                        Toggle(isOn:Binding(get:{ shows(preset) },set:{ choose(preset,on:$0) })) {
+                            VStack(alignment:.leading,spacing:1) {
+                                Text(preset.title).font(LauncherStyle.font(13,.medium))
+                                Text(preset.detail).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                            }
+                        }.toggleStyle(.checkbox).disabled(locked)
+                        if preset == .custom && shows(.custom) { customLogging.padding(.leading,20) }
                     }
-                    Spacer(minLength:12)
-                    Picker(L("Logging"),selection:Binding(get:{ shown },set:{ chooseLogging($0) })) {
-                        ForEach(LoggingSetting.allCases) { Text($0.title).tag($0) }
-                    }.labelsHidden().pickerStyle(.menu).fixedSize().disabled(model.running != nil || !model.canChangeAdvanced)
-                }
-                if shown == .custom { customLogging }
+                }.padding(.top,8)
                 if let running=model.running { closeFirst(running,several:false) }
                 Divider().padding(.vertical,6)
                 HStack(alignment:.center,spacing:12) {
@@ -519,7 +611,8 @@ struct SettingsSheet:View {
         let draft=customDraft ?? model.loggingCustom
         let text=LoggingSetting.normalized(draft)
         let valid=LoggingSetting.valid(text)
-        let changed=model.logging != .custom || text != model.loggingCustom
+        let on=model.logging.contains(.custom)
+        let changed=text != model.loggingCustom || !on
         return VStack(alignment:.leading,spacing:8) {
             TextField(L("Logging settings"),text:Binding(get:{ customDraft ?? model.loggingCustom },set:{ customDraft=$0 }),prompt:Text(verbatim:"fixme-all,+seh,+loaddll"))
                 .font(.system(size:12,design:.monospaced)).textFieldStyle(.roundedBorder).disabled(model.running != nil)
@@ -529,28 +622,33 @@ struct SettingsSheet:View {
                 .font(LauncherStyle.font(12)).foregroundStyle(text.isEmpty || valid ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red)).fixedSize(horizontal:false,vertical:true)
             if changed {
                 HStack(spacing:8) {
-                    Button(model.logging == .custom ? L("Update") : L("Turn On")) { applyCustom(text) }
+                    Button(on ? L("Update") : L("Turn On")) { applyCustom(text) }
                         .buttonStyle(.bordered).buttonBorderShape(.capsule).disabled(!valid || model.running != nil)
                     if customDraft != nil { Button(L("Cancel")) { customDraft=nil }.buttonStyle(.borderless) }
                 }
             }
-        }.padding(.top,4)
+        }.padding(.top,2)
     }
-    private func chooseLogging(_ next:LoggingSetting) {
-        if next == .custom { if model.logging != .custom { customDraft=model.loggingCustom };return }
-        customDraft=nil
-        if next == .off { model.logging = .off }
-        else if model.logging == .off { confirmLogging=next }
-        else { model.logging=next }
+    /// Custom shows ticked while its text is being typed, before it's turned on.
+    private func shows(_ preset:LoggingPreset)->Bool { model.logging.contains(preset) || (preset == .custom && customDraft != nil) }
+    private func choose(_ preset:LoggingPreset, on:Bool) {
+        if preset == .custom {
+            if !on { customDraft=nil;model.logging=model.logging.with(.custom,on:false) }
+            else if !model.logging.contains(.custom) { customDraft=model.loggingCustom }
+            return
+        }
+        let next=model.logging.with(preset,on:on)
+        if on && model.logging.isOff { confirmLogging=next } else { model.logging=next }
     }
     private func applyCustom(_ text:String) {
         guard LoggingSetting.valid(text) else { return }
         model.loggingCustom=text
-        if model.logging == .off { confirmLogging = .custom } else { model.logging = .custom;customDraft=nil }
+        let next=model.logging.with(.custom,on:true)
+        if model.logging.isOff { confirmLogging=next } else { model.logging=next;customDraft=nil }
     }
     private func turnOnLogging(_ next:LoggingSetting) {
         model.logging=next
-        if next == .custom { customDraft=nil }
+        if next.contains(.custom) { customDraft=nil }
     }
     private func action(_ title:String, detail:String, button:String, disabled:Bool=false, _ perform:@escaping ()->Void) -> some View {
         HStack(alignment:.center,spacing:12) {
@@ -605,6 +703,97 @@ private struct SettingSwitch<Accessory:View>:View {
 extension SettingSwitch where Accessory == EmptyView {
     init(title:String, detail:String?=nil, isOn:Binding<Bool>, disabled:Bool=false) {
         self.init(title:title,detail:detail,isOn:isOn,disabled:disabled) { EmptyView() }
+    }
+}
+/// One of Settings › General › Mouse's choices: a radio button, its name (and Experimental) over
+/// what it does. The whole row chooses.
+private struct MouseChoice:View {
+    let title:String
+    let detail:String
+    var experimental=false
+    let selected:Bool
+    let disabled:Bool
+    let choose:()->Void
+    var body:some View {
+        Button(action:choose) {
+            HStack(alignment:.firstTextBaseline,spacing:10) {
+                Image(systemName:selected ? "largecircle.fill.circle" : "circle").font(.system(size:14))
+                    .foregroundStyle(selected ? LauncherStyle.accent : .secondary).accessibilityHidden(true)
+                VStack(alignment:.leading,spacing:2) {
+                    HStack(spacing:8) {
+                        Text(title).font(LauncherStyle.font(13,.semibold))
+                        if experimental { ExperimentalLabel() }
+                    }
+                    Text(detail).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                }
+                Spacer(minLength:0)
+            }.contentShape(Rectangle())
+        }.buttonStyle(.plain).disabled(disabled).opacity(disabled ? 0.6 : 1)
+            .accessibilityElement(children:.combine).accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+/// Marks High-precision as experimental, beside its name: a small grey label.
+private struct ExperimentalLabel:View {
+    var body:some View {
+        Text(L("Experimental")).font(LauncherStyle.font(11,.semibold)).foregroundStyle(.secondary)
+            .padding(.horizontal,7).padding(.vertical,2).background(Color.primary.opacity(0.08),in:Capsule())
+    }
+}
+/// High-precision's feedback, in its explanation and in Settings while it's chosen: the Discord post
+/// for it, and the invite for players not yet in the server. On China's Battle.net, where Discord is
+/// blocked, GitHub instead (AppModel.showsDiscord).
+private struct MouseFeedbackLinks:View {
+    let discord:Bool
+    @Environment(\.openURL) private var openURL
+    var body:some View {
+        HStack(spacing:14) {
+            Button { openURL(discord ? Brand.mouseFeedback : Brand.issues) } label: {
+                Label(discord ? L("Share Feedback") : L("Share Feedback on GitHub"),systemImage:"bubble.left")
+            }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                .help(discord ? L("Open the High-precision mouse feedback post in Discord") : L("Open a new issue on GitHub in your browser"))
+            if discord {
+                Link(L("Join the Discord"),destination:Brand.discord).buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help(L("Open the {0} Discord invite in your browser",Brand.name))
+            }
+        }.font(LauncherStyle.font(12,.medium))
+    }
+}
+/// Shown when High-precision is chosen in Settings › General › Mouse (REC-52): what it does, how it
+/// might help, why macOS will ask for Input Monitoring and how to undo it, before macOS's prompt
+/// (owner, October 24), and where to say how it feels. Continue chooses it; Return doesn't.
+struct HighPrecisionMouseSheet:View {
+    let discord:Bool
+    let confirm:()->Void
+    @Environment(\.dismiss) private var dismiss
+    var body:some View {
+        VStack(spacing:24) {
+            SheetHero(symbol:"cursorarrow.motionlines",title:L("High-precision mouse"),subtitle:L("Experimental"))
+            LauncherPanel(inset:20) {
+                VStack(alignment:.leading,spacing:12) {
+                    paragraph(L("What it does."),L("Overwatch reads your mouse’s movement and buttons straight from the mouse, instead of through macOS’s input for games, which can drop some of your movement while you play."))
+                    paragraph(L("How it might help."),L("If your aim sometimes feels slower or inconsistent, especially after clicking, this can make every movement count. It’s new, so it may not help on every Mac."))
+                    paragraph(L("Why macOS asks for permission."),L("Reading a mouse directly needs Input Monitoring. macOS calls it “receiving keystrokes” because the same permission covers keyboards. {0} reads only your mouse, never your keyboard, and its code is public on GitHub.",Brand.name))
+                    paragraph(L("How to undo it."),L("Switch back to Standard at any time, and turn {0} off in System Settings › Privacy & Security › Input Monitoring.",Brand.name))
+                    VStack(alignment:.leading,spacing:6) {
+                        paragraph(L("Tell us how it feels."),discord ? L("Share your feedback in {0}’s Discord.",Brand.name) : L("Share your feedback on GitHub."))
+                        MouseFeedbackLinks(discord:discord)
+                    }
+                }
+            }
+            HStack(spacing:16) {
+                Button(L("Cancel")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                    .controlSize(.large).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button { confirm();dismiss() } label: { Text(L("Continue")).font(LauncherStyle.font(15,.semibold)).padding(.horizontal,8) }
+                    .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large)
+                    .tint(LauncherStyle.accent).foregroundStyle(LauncherStyle.ink)
+            }
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
+            .tint(.primary).background { LauncherBackground() }
+    }
+    private func paragraph(_ lead:String,_ text:String) -> some View {
+        Text("\(Text(lead).fontWeight(.semibold).foregroundStyle(.primary))\(AppLanguage.gap)\(Text(text).foregroundStyle(.secondary))")
+            .font(LauncherStyle.font(13)).lineSpacing(3).frame(maxWidth:.infinity,alignment:.leading).fixedSize(horizontal:false,vertical:true)
     }
 }
 /// Settings › Graphics' info button: what MetalFX upscaling is, how Recall provides it, and
@@ -734,6 +923,65 @@ struct ChangeRegionSheet:View {
             }
         }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
             .tint(.primary).background { LauncherBackground() }
+    }
+}
+/// REC-44: back to the installation on another drive once setup has installed something here.
+/// Whether this setup moves to the Trash is the player's call, with what it takes; kept, it's
+/// the one offered back.
+struct OtherInstallationSheet:View {
+    @Bindable var model:AppModel
+    @Environment(\.dismiss) private var dismiss
+    /// A setup that stopped part way suggests the Trash; one with Overwatch installed, keeping it.
+    @State private var removing:Bool
+    @State private var size:Int64?
+    init(model:AppModel) { self.model=model;_removing=State(initialValue:!model.gameInstalled) }
+    var body:some View {
+        let name=model.otherInstallation.map(InstallLocation.driveName) ?? ""
+        let here=InstallLocation.isStandard(model.root)
+        VStack(spacing:24) {
+            SheetHero(symbol:"externaldrive",title:L("Go back to “{0}”?",name),
+                      subtitle:L("Your installation on “{0}” is still there. {1} picks up where it left off.",name,Brand.name))
+            LauncherPanel {
+                VStack(alignment:.leading,spacing:10) {
+                    Text(here ? L("What about the setup on this Mac?") : L("What about the setup on “{0}”?",InstallLocation.driveName(model.root)))
+                        .font(LauncherStyle.font(14,.semibold))
+                    option(true,title:L("Move it to the Trash"),
+                           detail:size.map { L("Frees {0} once you empty the Trash.",ByteCountFormatter.string(fromByteCount:$0,countStyle:.file)) } ?? L("Working out its size…"))
+                    option(false,title:L("Keep it"),detail:L("You can go back to it later in Settings › General."))
+                }
+            }
+            if model.clientInstalled { LauncherNotice(text:L("Battle.net is closed for you if it’s open. Overwatch itself must be quit first.")) }
+            HStack(spacing:16) {
+                Button(L("Cancel")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+                    .controlSize(.large).keyboardShortcut(.cancelAction)
+                Spacer()
+                LauncherPrimaryAction(title:L("Go Back")) { model.useOtherInstallation(removing:removing) }
+                    .keyboardShortcut(.defaultAction).disabled(model.busy || model.running == .game)
+            }
+        }.font(LauncherStyle.font(14)).padding(32).frame(width:LauncherStyle.sheetWidth)
+            .tint(.primary).background { LauncherBackground() }
+            .task {
+                let root=model.root
+                size=await Task.detached { InstallLocation.size(root) }.value
+            }
+    }
+    private func option(_ value:Bool,title:String,detail:String)->some View {
+        let selected=removing == value
+        let shape=RoundedRectangle(cornerRadius:14,style:.continuous)
+        return Button { removing=value } label: {
+            HStack(alignment:.top,spacing:12) {
+                Image(systemName:selected ? "checkmark.circle.fill" : "circle").font(.system(size:18))
+                    .foregroundStyle(selected ? AnyShapeStyle(LauncherStyle.accent) : AnyShapeStyle(.secondary)).accessibilityHidden(true)
+                VStack(alignment:.leading,spacing:2) {
+                    Text(title).font(LauncherStyle.font(14,.semibold))
+                    Text(detail).font(LauncherStyle.font(12)).foregroundStyle(.secondary).monospacedDigit().fixedSize(horizontal:false,vertical:true)
+                }
+                Spacer(minLength:0)
+            }.padding(12).frame(maxWidth:.infinity,alignment:.leading)
+                .background(selected ? AnyShapeStyle(LauncherStyle.accent.opacity(0.10)) : AnyShapeStyle(.primary.opacity(0.04)),in:shape)
+                .overlay { shape.strokeBorder(selected ? LauncherStyle.accent.opacity(0.6) : .clear,lineWidth:1.5) }
+                .contentShape(shape)
+        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 struct AboutSheet:View {

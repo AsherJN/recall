@@ -1,28 +1,21 @@
 // Shown once after an update and from the Help menu, offline. Edit for each
-// release alongside the public release notes; short, plain sentences.
+// release with the public release notes: the same items, in the same order
+// (most important first); short, plain sentences.
 enum WhatsNew {
-    static let version="1.5.0"
+    static let version="1.6.0"
     static var items:[(symbol:String, title:String, detail:String)] { [
-        ("globe.asia.australia",L("China’s Battle.net"),
-         L("Recall can install China’s Battle.net for NetEase accounts. Choose your Battle.net region and language when you set up, or later in Settings › General.")),
-        ("character.bubble",L("Simplified Chinese and Korean"),
-         L("Recall’s interface is available in Simplified Chinese and Korean, and follows your Mac’s language.")),
-        ("cursorarrow.motionlines",L("High-precision mouse input"),
-         L("Clicks and movement are delivered to Overwatch together, for more precise aim.")),
-        ("hand.point.up.left",L("Trackpad support"),
-         L("Aim with a MacBook trackpad or Magic Trackpad in matches.")),
-        ("magnifyingglass",L("Help & FAQ search"),
-         L("Search all of Help’s answers from one field.")),
-        ("gauge.with.dots.needle.33percent",L("Shader cache"),
-         L("Updated the shader cache UI.")),
-        ("app.badge",L("Performance check"),
-         L("Before you play, Recall shows apps using enough of your Mac to lower FPS, each with a Quit button, and notes Low Power Mode, overheating and low memory.")),
-        ("doc.zipper",L("Save and share logs"),
-         L("Save Recall’s, Battle.net’s and Overwatch’s logs as one file to share when you report a problem, from Help & FAQ › Support. Detailed logging is in Settings › Advanced.")),
-        ("eraser",L("Clear Shader Cache"),
-         L("If Overwatch crashes or shows graphics glitches, clear its shaders in Settings › Graphics. Recall rebuilds them as you play.")),
+        ("computermouse",L("Mouse options"),
+         L("Choose how Overwatch reads your mouse in Settings › General › Mouse: Standard, Classic (the mouse as it worked in Recall 1.4) or High-precision. High-precision is experimental: it reads every movement straight from your mouse and needs Input Monitoring.")),
         ("wrench.and.screwdriver",L("Fixes"),
-         L("Fixed the Battle.net update issue and camera control after switching apps. Left Option now works as Alt in Overwatch, and the support report shows MetalFX upscaling correctly.")),
+         L("Fixed Overwatch freezing or the camera ignoring your mouse after Cmd-Tab in fullscreen, and Cmd-Tab bouncing back to Overwatch with Game Mode on. Improved display and monitor support. Fixed Battle.net reinstalling its update agent, Korean typing in Overwatch’s chat, and Overwatch closing at start on Korean accounts on macOS 27. You can go back to your external drive after choosing Set Up on This Mac Instead, and updates now show during setup and on error screens.")),
+        ("headphones",L("Switch sound output any time"),
+         L("Connect headphones or change your Mac’s sound output during a match, and Overwatch follows.")),
+        ("gamecontroller",L("Game Mode setting"),
+         L("Turn macOS Game Mode off for Overwatch in Settings › Graphics.")),
+        ("questionmark.circle",L("Help & FAQ"),
+         L("New answers for a locked Recall folder, case-sensitive drives, and Battle.net showing Play instead of Install.")),
+        ("list.bullet.rectangle",L("Logging presets"),
+         L("Turn on several logging presets at once in Settings › Advanced. A new Mouse preset records how your mouse reaches Overwatch.")),
     ] }
 }
 

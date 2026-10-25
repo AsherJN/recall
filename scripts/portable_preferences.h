@@ -149,10 +149,77 @@ static void nextResolution(NSInteger *width, NSInteger *height, NSString **sourc
         writeJSON(s,join(root,@"state.json"));
     }
 }
+/* The display mode is the player's: Fullscreen, Borderless or Windowed, chosen in Overwatch's
+ * Video settings, with a window's size and place. Overwatch keeps it in these keys of its
+ * settings: WindowMode 0 Fullscreen, 1 Borderless (with WindowedFullscreen 1), 2 Windowed
+ * (with the window's size and place); seen in the game's own saves on 2026-09-11 and 10-22.
+ * Until 1.6 every launch wrote Fullscreen back, so a player's Borderless or Windowed lasted
+ * one session (REC-45).
+ *   kept        what the game's settings hold (a launch, setup)
+ *   resized     the same, but a window takes the resolution just chosen in Settings
+ *   remembered  what Recall last wrote (state.json display_mode): Overwatch reset its display
+ *               settings for a graphics card it took to be new (gameChoice "game_reset")
+ *   reset       Recall's own, Fullscreen (Reset Display Settings, restore-candidate)
+ * A key with no usable value gets Recall's own; a window larger than the main display as
+ * Wine sees it gets the game's resolution instead. */
+typedef NS_ENUM(NSInteger, DisplayModeSource) { DisplayModeKept, DisplayModeResized, DisplayModeRemembered, DisplayModeReset };
+static NSArray *displayModeKeys(void) {
+    return @[@"WindowMode",@"FullscreenWindow",@"FullscreenWindowEnabled",@"WindowedFullscreen",
+             @"WindowedWidth",@"WindowedHeight",@"WindowedPosX",@"WindowedPosY"];
+}
+static BOOL displayModeValue(NSString *key, id value) {
+    if(![value isKindOfClass:NSString.class])return NO;
+    if([key hasPrefix:@"WindowedPos"])return matches(value,@"^-?[0-9]{1,5}$");
+    if([key isEqual:@"WindowedWidth"] || [key isEqual:@"WindowedHeight"])
+        return matches(value,@"^[0-9]{3,5}$") && [value integerValue]>=320;
+    if([key hasSuffix:@"Refresh"])return matches(value,@"^[0-9]{2,3}$") && [value integerValue]>=24;
+    return matches(value,@"^[0-9]$");
+}
+/* For logs and events: what Overwatch opens in with these keys. */
+static NSString *displayModeName(NSDictionary *values) {
+    return [values[@"WindowMode"] isEqual:@"1"] ? @"borderless" : [values[@"WindowMode"] isEqual:@"2"] ? @"windowed" : @"fullscreen";
+}
+static void wineDisplaySize(NSInteger *width, NSInteger *height);
+/* The main display's current refresh rate in whole hertz, as the game's settings keep it;
+ * nil when macOS doesn't say. OW2_SETUP_TEST_DISPLAY_REFRESH (tests only) stands in for it. */
+static NSString *displayRefresh(void) {
+    NSString *test=NSProcessInfo.processInfo.environment[@"OW2_SETUP_TEST_DISPLAY_REFRESH"];
+    if(test)return displayModeValue(@"FullScreenRefresh",test) ? test : nil;
+    CGDisplayModeRef mode=CGDisplayCopyDisplayMode(CGMainDisplayID());
+    if(!mode)return nil;
+    double rate=CGDisplayModeGetRefreshRate(mode);CGDisplayModeRelease(mode);
+    NSString *value=[NSString stringWithFormat:@"%ld",lround(rate)];
+    return displayModeValue(@"FullScreenRefresh",value) ? value : nil;
+}
+/* The fullscreen refresh rate (FullScreenRefresh) is the player's, for each display, like the
+ * resolution: 144 Hz on a monitor and 120 on a MacBook's screen, with no trip to Overwatch's
+ * Video settings on switching. Until 1.6 every launch wrote 120 Hz, so a 144 Hz monitor went
+ * back to 120 each session (REC-56). state.json display_refresh keeps each display's choice
+ * (by mainScreen) and game_refresh the rate Recall last wrote: a different one in the game's
+ * settings now was chosen in the game, on the display it last opened on (game_display_screen),
+ * unless the game's record of the card changed too (Overwatch's own reset, gameChoice).
+ * Before 1.6 Recall wrote 120 without a record, so that 120 is not the player's. A display
+ * with no choice, and Reset Display Settings, get the display's current rate, the contract's
+ * 120 when macOS gives none. Saves the choices in s; returns the rate to write. */
+static NSString *nextRefresh(NSMutableDictionary *s, NSArray *current, DisplayModeSource modeSource) {
+    NSString *key=@"FullScreenRefresh",*screen=mainScreen(),*game=gameSetting(current,@"[Render.13]",key);
+    NSString *wrote=s[@"game_refresh"],*where=s[@"game_display_screen"],*seenGPU=s[@"game_gpu"];
+    NSMutableDictionary *rates=[s[@"display_refresh"] isKindOfClass:NSDictionary.class] ? [s[@"display_refresh"] mutableCopy] : [NSMutableDictionary dictionary];
+    BOOL chosen=displayModeValue(key,game) && (modeSource==DisplayModeKept || modeSource==DisplayModeResized) &&
+                (![seenGPU isKindOfClass:NSString.class] || [gameGPU(current) isEqual:seenGPU]) &&
+                ![game isEqual:[wrote isKindOfClass:NSString.class] ? wrote : candidateLaunchPreferences()[key]];
+    if(![where isKindOfClass:NSString.class])where=screen;
+    if(chosen && where)rates[where]=game;
+    if(modeSource==DisplayModeReset && screen)[rates removeObjectForKey:screen];
+    s[@"display_refresh"]=rates;
+    NSString *rate=screen ? rates[screen] : chosen ? game : nil;
+    return displayModeValue(key,rate) ? rate : displayRefresh() ?: candidateLaunchPreferences()[key];
+}
 /* Saves the chosen resolution and writes the game's display settings. The game gets
  * gameWidth x gameHeight: the chosen size, or at launch the largest of the same shape
- * that fits the main display (fittedResolution). */
-static void configurePreferences(NSInteger width, NSInteger height, NSInteger gameWidth, NSInteger gameHeight, BOOL restore) {
+ * that fits the main display (fittedResolution). The display mode comes from modeSource. */
+static void configurePreferences(NSInteger width, NSInteger height, NSInteger gameWidth, NSInteger gameHeight, BOOL restore,
+                                 DisplayModeSource modeSource) {
     if(!gameResolution(width,height) || !gameResolution(gameWidth,gameHeight))fail(@"unsupported_resolution");
     if(sessionProcesses().count)fail(@"close_game_before_maintenance");
     NSString *path=settingsPath();
@@ -172,6 +239,7 @@ static void configurePreferences(NSInteger width, NSInteger height, NSInteger ga
             if(![@"[Render.13]\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil])fail(@"settings_write_failed");
         }
     }
+    NSDictionary *modeWritten=nil;NSString *refreshWritten=nil;NSMutableDictionary *refreshState=state();
     if(path) {
         if([[fm attributesOfItemAtPath:path error:nil][NSFileSize] unsignedLongLongValue]>(1ULL<<20))fail(@"invalid_game_settings");
         NSString *original=[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
@@ -189,6 +257,20 @@ static void configurePreferences(NSInteger width, NSInteger height, NSInteger ga
         NSString *gameW=[NSString stringWithFormat:@"%ld",(long)gameWidth],*gameH=[NSString stringWithFormat:@"%ld",(long)gameHeight];
         values[@"FullScreenWidth"]=gameW;values[@"WindowedWidth"]=gameW;
         values[@"FullScreenHeight"]=gameH;values[@"WindowedHeight"]=gameH;
+        NSDictionary *remembered=[state()[@"display_mode"] isKindOfClass:NSDictionary.class] ? state()[@"display_mode"] : @{};
+        NSArray *current=[original componentsSeparatedByString:@"\n"];
+        refreshWritten=values[@"FullScreenRefresh"]=nextRefresh(refreshState,current,modeSource);
+        for(NSString *key in displayModeKeys()) {
+            if(modeSource==DisplayModeResized && ([key isEqual:@"WindowedWidth"] || [key isEqual:@"WindowedHeight"]))continue;
+            id value=modeSource==DisplayModeKept || modeSource==DisplayModeResized ? gameSetting(current,@"[Render.13]",key) :
+                     modeSource==DisplayModeRemembered ? remembered[key] : nil;
+            if(displayModeValue(key,value))values[key]=value;
+        }
+        NSInteger maxWidth,maxHeight;wineDisplaySize(&maxWidth,&maxHeight);
+        if([values[@"WindowedWidth"] integerValue]>maxWidth || [values[@"WindowedHeight"] integerValue]>maxHeight) {
+            values[@"WindowedWidth"]=gameW;values[@"WindowedHeight"]=gameH;
+        }
+        modeWritten=[values dictionaryWithValuesForKeys:displayModeKeys()];
         BOOL seed=restore || ![state()[@"candidate_baseline_profile"] isEqual:CANDIDATE_PROFILE];
         if(seed)for(NSString *key in candidateBaselinePreferences()) {
             BOOL present=NO;
@@ -196,7 +278,7 @@ static void configurePreferences(NSInteger width, NSInteger height, NSInteger ga
                 NSString *left=[[lines[i] componentsSeparatedByString:@"="][0] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
                 if([left isEqual:key]) {if(present)fail(@"invalid_game_settings");present=YES;}
             }
-            if(restore || !present)values[key]=candidateBaselinePreferences()[key];
+            if(restore || !present)values[key]=[key isEqual:@"WindowedRefresh"] ? refreshWritten : candidateBaselinePreferences()[key];
         }
         for(NSString *key in [[values allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
             NSInteger index=-1;
@@ -218,6 +300,8 @@ static void configurePreferences(NSInteger width, NSInteger height, NSInteger ga
         }
     }
     NSMutableDictionary *s=state();s[@"display_width"]=@(width);s[@"display_height"]=@(height);s[@"display_pending"]=@(!path);
+    if(modeWritten)s[@"display_mode"]=modeWritten;
+    if(refreshState[@"display_refresh"])s[@"display_refresh"]=refreshState[@"display_refresh"];
     // The choice for the main display too, unless display memory is off.
     NSString *screen=mainScreen();
     if(screen && displayMemory(s)) {
@@ -226,22 +310,26 @@ static void configurePreferences(NSInteger width, NSInteger height, NSInteger ga
     }
     // What the game's settings now hold, the card the game had recorded and the display
     // it opens on, for nextResolution: a later difference there was chosen in the game.
-    [s removeObjectsForKeys:@[@"game_display_width",@"game_display_height",@"game_gpu",@"game_display_screen"]];
+    [s removeObjectsForKeys:@[@"game_display_width",@"game_display_height",@"game_gpu",@"game_display_screen",@"game_refresh"]];
     if(screen)s[@"game_display_screen"]=screen;
     if(path) {
         s[@"candidate_baseline_profile"]=CANDIDATE_PROFILE;
         NSString *written=[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
         if(written) {
-            s[@"game_display_width"]=@(gameWidth);s[@"game_display_height"]=@(gameHeight);
+            s[@"game_display_width"]=@(gameWidth);s[@"game_display_height"]=@(gameHeight);s[@"game_refresh"]=refreshWritten;
             s[@"game_gpu"]=gameGPU([written componentsSeparatedByString:@"\n"]);
         }
     }
     writeJSON(s,join(root,@"state.json"));
-    event(@"display_saved",@{@"width":@(width),@"height":@(height),@"pending_first_game":@(!path)});
+    event(@"display_saved",@{@"width":@(width),@"height":@(height),@"pending_first_game":@(!path),
+                             @"mode":displayModeName(modeWritten ?: candidateLaunchPreferences())});
 }
-static void configureDisplay(NSInteger width, NSInteger height) {configurePreferences(width,height,width,height,NO);}
+static void configureDisplay(NSInteger width, NSInteger height, DisplayModeSource modeSource) {
+    configurePreferences(width,height,width,height,NO,modeSource);
+}
 /* The game's window must fit inside the main display as Wine sees it (twice its size in
- * points, in Retina mode), or Wine keeps the pointer out of part of it. A larger choice
+ * points in Retina mode, its size in points without, portable_retina.h), or Wine keeps the
+ * pointer out of part of it. A larger choice
  * (4K on a MacBook screen, say, after playing on a 4K monitor, or 5120x2160 chosen in
  * the game on an ultrawide one) is lowered for this launch to the largest of Settings'
  * resolutions of the same shape that fits, or the largest that fits at all; the choice
@@ -257,11 +345,17 @@ static void fitResolution(NSInteger *width, NSInteger *height, NSInteger maxWidt
         }
     if(bestWidth){*width=bestWidth;*height=bestHeight;}
 }
-static void fittedResolution(NSInteger *width, NSInteger *height) {
+/* The main display as Wine sees it; 16384 square without one. */
+static void wineDisplaySize(NSInteger *width, NSInteger *height) {
+    *width=*height=16384;
     CGDisplayModeRef mode=CGDisplayCopyDisplayMode(CGMainDisplayID());
     if(!mode)return;
-    NSInteger maxWidth=(NSInteger)CGDisplayModeGetWidth(mode)*2,maxHeight=(NSInteger)CGDisplayModeGetHeight(mode)*2;
+    NSInteger scale=wineScale();
+    *width=(NSInteger)CGDisplayModeGetWidth(mode)*scale;*height=(NSInteger)CGDisplayModeGetHeight(mode)*scale;
     CGDisplayModeRelease(mode);
+}
+static void fittedResolution(NSInteger *width, NSInteger *height) {
+    NSInteger maxWidth,maxHeight;wineDisplaySize(&maxWidth,&maxHeight);
     fitResolution(width,height,maxWidth,maxHeight);
 }
 /* The renderer profile with its canvas size set to this launch's resolution. DXMT matches

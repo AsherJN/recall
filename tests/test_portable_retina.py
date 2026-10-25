@@ -76,6 +76,30 @@ p.write_text(text)
         self.call('repair-retina')
         self.assertEqual((self.root/'settings-backup/before-retina-user.reg').read_text(),original)
 
+    def test_setting_follows_the_main_display(self):
+        # Retina mode suits a Retina main display; on one macOS draws at a pixel a point
+        # (most external monitors) it made Wine see the screen at twice its size (REC-45).
+        original='WINE REGISTRY Version 2\n\n[Software\\\\Wine\\\\Mac Driver] 1\n"RetinaMode"="Y"\n"Other"="keep"\n'
+        self.fixture(original)
+        wine=self.root/'runtimes/v1/bin/wine'
+        wine.write_text(f'#!{sys.executable}\n' + '''import os, re, sys
+from pathlib import Path
+p=Path(os.environ['WINEPREFIX'])/'user.reg'
+value=Path(__file__).with_name('expected').read_text()
+assert sys.argv[1:]==['reg.exe','add',r'HKCU\\Software\\Wine\\Mac Driver','/v','RetinaMode','/t','REG_SZ','/d',value,'/f'], sys.argv
+p.write_text(re.sub(r'"RetinaMode"="[YN]"','"RetinaMode"="'+value+'"',p.read_text()))
+''')
+        self.addCleanup(setup.os.environ.__setitem__,'OW2_SETUP_TEST_DISPLAY_SCALE','2')
+        for scale,value in (('1','N'),('1',None),('2','Y'),('2',None)):
+            setup.os.environ['OW2_SETUP_TEST_DISPLAY_SCALE']=scale
+            (wine.parent/'expected').write_text(value or 'unused')
+            events=self.call('repair-retina')
+            if value:
+                self.assertEqual(events[-1],{'stage':'retina_configured','retina':value=='Y'})
+                self.assertEqual(self.registry.read_text(),original.replace('"Y"',f'"{value}"'))
+            else:  # already as the display wants: nothing to do
+                self.assertEqual(events,[])
+
     def test_registry_symlink_is_rejected(self):
         self.fixture('WINE REGISTRY Version 2\n')
         external=self.base/'personal.reg'

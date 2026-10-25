@@ -62,8 +62,12 @@ struct DisplayMode:Equatable {
 struct MainDisplay:Equatable {
     let name:String
     let builtIn:Bool
-    /// The whole screen in points, as Wine sees it at twice the size (Retina mode).
+    /// The whole screen in points.
     let points:CGSize
+    /// Windows pixels a point as Wine sees this display when it is the main one: Recall
+    /// turns Wine's Retina mode on for a main display macOS draws at two pixels a point and
+    /// off for one at a pixel a point (the worker's portable_retina.h, REC-45).
+    let wineScale:CGFloat
     /// What macOS draws the whole screen at: the points times the backing scale. In a
     /// scaled mode it differs from the screen's own pixels and is resized to fit them.
     let drawn:CGSize
@@ -84,7 +88,7 @@ struct MainDisplay:Equatable {
                   cameraInset:screen.safeAreaInsets.top,refresh:CGDisplayCopyDisplayMode(id)?.refreshRate ?? 0,modes:DisplayMode.all(id))
     }
     init(name:String, builtIn:Bool, points:CGSize, scale:CGFloat, cameraInset:CGFloat=0, refresh:Double=0, modes:[DisplayMode]=[]) {
-        self.name=name;self.builtIn=builtIn;self.points=points;self.refresh=refresh
+        self.name=name;self.builtIn=builtIn;self.points=points;self.refresh=refresh;wineScale=scale>1 ? 2 : 1
         drawn=CGSize(width:(points.width*scale).rounded(),height:(points.height*scale).rounded())
         let area={ (size:CGSize) in size.width*size.height }
         let native=modes.filter(\.native).map(\.pixels).max { area($0) < area($1) }
@@ -101,7 +105,7 @@ struct MainDisplay:Equatable {
         }
     }
     init(name:String, builtIn:Bool, points:CGSize, pixels:CGSize) {
-        self.name=name;self.builtIn=builtIn;self.points=points;self.pixels=pixels
+        self.name=name;self.builtIn=builtIn;self.points=points;self.pixels=pixels;wineScale=pixels.width>points.width ? 2 : 1
         drawn=pixels;native=nil;refresh=0;sharpest=nil
     }
     var shape:DisplayResolution.Shape { pixels.width/max(pixels.height,1) < 1.69 ? .macBook : .monitor }
@@ -110,7 +114,7 @@ struct MainDisplay:Equatable {
     /// The game's window has to fit inside the display as Wine sees it, or the pointer
     /// can't reach all of it. The worker applies the same rule when Overwatch opens.
     func fits(_ resolution:DisplayResolution) -> Bool {
-        CGFloat(resolution.width) <= points.width*2 && CGFloat(resolution.height) <= points.height*2
+        CGFloat(resolution.width) <= points.width*wineScale && CGFloat(resolution.height) <= points.height*wineScale
     }
     /// What Overwatch uses on this display for a choice: the choice if it fits, else the
     /// largest that fits in the same shape, else the largest that fits at all.

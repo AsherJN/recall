@@ -8,6 +8,7 @@ import fcntl
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -19,6 +20,11 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 from build_portable_setup import build
+
+# The worker's Retina setting follows the main display (portable_retina.h); tests stand in
+# a Retina one unless they choose otherwise, whatever this Mac's main display is.
+os.environ.setdefault('OW2_SETUP_TEST_DISPLAY_SCALE','2')
+os.environ.setdefault('OW2_SETUP_TEST_DISPLAY_REFRESH','120')
 
 
 class NativeSetup(unittest.TestCase):
@@ -229,6 +235,24 @@ class NativeSetup(unittest.TestCase):
         (self.root/'setup.lock').unlink()
         (self.root/'setup.lock').mkdir()
         self.assertEqual(self.call('onboarded',success=False)[-1]['code'],'setup_lock_failed')
+
+    def test_locked_parent_folder_stops_with_a_folder_access_code(self):
+        # REC-54: a parent macOS won't let Recall write in stops at once, with a code the app shows
+        # as its folder screen, and nothing is created. The player's own locked folder is repaired.
+        self.root.parent.chmod(0o555)
+        self.addCleanup(self.root.parent.chmod,0o755)
+        self.assertEqual(self.call('status',success=False)[-1]['code'],'directory_creation_failed')
+        self.assertFalse(self.root.exists())
+        self.root.parent.chmod(0o755)
+        self.root.mkdir();self.root.chmod(0o555)
+        self.call('status')
+        self.assertEqual(self.root.stat().st_mode&0o777,0o700)
+        # Every code the app treats as a folder problem is one the worker reports.
+        app=(ROOT/'app/Sources/SetupService.swift').read_text()
+        codes=re.findall(r'"([a-z_]+)"',re.search(r'folderAccessCodes: Set<String>=\[(.*?)\]',app).group(1))
+        worker=(ROOT/'scripts/portable_setup.m').read_text()
+        self.assertIn('directory_creation_failed',codes)
+        for code in codes:self.assertIn(f'fail(@"{code}")',worker)
 
     def test_plain_http_and_embedded_url_credentials_are_rejected(self):
         for url in ['http://example.invalid/x','https://username:password@example.invalid/x']:

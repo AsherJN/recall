@@ -1,6 +1,6 @@
 import AppKit
 
-// Save Logs (LogBundle, LogCleaner, LoggingSetting; REC-40) on a made-up data folder holding each kind of
+// Save Logs (LogBundle, LogCleaner, LoggingSetting; REC-40, REC-51) on a made-up data folder holding each kind of
 // personal detail the check of real logs found, with Recall's, Battle.net's and Overwatch's logs as they
 // write them. Build with every app source but Main.swift, and run:
 //   mkdir -p runtime/phase-3/log-tests
@@ -50,8 +50,20 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
             precondition(LoggingSetting.valid(good),good)
         }
         for bad in ["","+SEH","+seh;rm -rf","debug+all","+a_channel_name_too_long","+seh,","+seh\n+loaddll"] { precondition(!LoggingSetting.valid(bad),bad) }
-        precondition(LoggingSetting.custom.launchArguments(custom:"+seh") == ["--logging","custom","--logging-custom","+seh"])
-        precondition(LoggingSetting.crashes.launchArguments(custom:"+seh") == ["--logging","crashes"])
+        precondition(LoggingSetting([.custom]).launchArguments(custom:"+seh") == ["--logging","custom","--logging-custom","+seh"])
+        precondition(LoggingSetting([.crashes]).launchArguments(custom:"+seh") == ["--logging","crashes"])
+        // Any mix of presets (REC-51), kept in Settings' order; 1.5's single names read as they were.
+        let mix=LoggingSetting([.mouse,.custom,.crashes])
+        precondition(mix.rawValue == "crashes,mouse,custom" && mix.launchArguments(custom:"+seh") == ["--logging","crashes,mouse,custom","--logging-custom","+seh"])
+        precondition(LoggingSetting(rawValue:"crashes") == LoggingSetting([.crashes]) && LoggingSetting(rawValue:"custom").contains(.custom))
+        precondition(LoggingSetting(rawValue:"off").isOff && LoggingSetting(rawValue:"").isOff && LoggingSetting.off.rawValue == "off")
+        precondition(LoggingSetting(rawValue:"battlenet,verbose,mouse") == LoggingSetting([.battlenet,.mouse]))
+        precondition(LoggingSetting([.crashes]).with(.mouse,on:true) == LoggingSetting(rawValue:"mouse,crashes") && mix.with(.custom,on:false).rawValue == "crashes,mouse")
+        precondition(LoggingSetting([.crashes,.mouse]).title() == "Crashes and freezes · Mouse" && mix.title(custom:"+seh") == "Crashes and freezes · Mouse · +seh")
+        // The mouse report keeps its mouse data only: key-press counts go, wherever they sit in a line.
+        let report=#"{"schema":1,"raw_dx":120.0,"key_checks":7,"key_check_ms":0.125,"mac_dx":80.5,"key_query_ms":0.010}"#
+        precondition(MouseReport.withoutKeys(report) == #"{"schema":1,"raw_dx":120.0,"mac_dx":80.5}"#,MouseReport.withoutKeys(report))
+        precondition(MouseReport.isReport(URL(fileURLWithPath:"/s/input-4242.jsonl")) && !MouseReport.isReport(URL(fileURLWithPath:"/s/battlenet.log")))
 
         // Runs of three or more identical Wine lines are kept once, with a count.
         let run=(0..<5).map { "102\($0).000:0024:0028:fixme:ntdll:NtQuerySystemInformation info_class SystemCodeIntegrityInformation" }
@@ -78,7 +90,12 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         ].joined(separator:"\r\n")+"\r\n")
         // The session on the 19th: Recall's record and Wine's log, with logging on.
         try write(root,"logs/sessions/20261019T190000Z/session.json",
-                  #"{"schema":1,"started":"2026-10-19T19:00:00Z","wine_clock_ms":1000000,"logging":"crashes","winedebug":"-all,err+all,+seh,+loaddll,+timestamp,+pid","dxmt_log_level":"error","games":[{"started":"2026-10-19T19:05:00Z","ended":"2026-10-19T19:20:00Z"}],"ended":"2026-10-19T19:21:00Z"}"#)
+                  #"{"schema":1,"started":"2026-10-19T19:00:00Z","wine_clock_ms":1000000,"logging":"crashes,mouse","winedebug":"-all,err+all,+seh,+loaddll,+timestamp,+pid","dxmt_log_level":"error","games":[{"started":"2026-10-19T19:05:00Z","ended":"2026-10-19T19:20:00Z"}],"ended":"2026-10-19T19:21:00Z"}"#)
+        // Its mouse report (Logging › Mouse), as the window driver writes it.
+        try write(root,"logs/sessions/20261019T190000Z/input-4242.jsonl",[
+            #"{"schema":1,"unix_ms":1792440300000,"pid":4242,"exe":"Overwatch.exe","mac_dx":80.5,"mac_dy":12.0,"raw_dx":122.0,"raw_dy":18.0,"key_checks":6,"key_checks_cached":0,"key_check_ms":0.120,"key_check_max_ms":0.040,"key_query_ms":0.010,"counts_per_point":1.5150}"#,
+            #"{"schema":1,"unix_ms":1792440301000,"pid":4242,"exe":"Overwatch.exe","mac_dx":0.0,"mac_dy":0.0,"raw_dx":0.0,"raw_dy":0.0,"key_checks":0,"key_checks_cached":0,"key_check_ms":0.000,"key_check_max_ms":0.000,"key_query_ms":0.000,"counts_per_point":1.5150}"#,
+        ].joined(separator:"\n")+"\n")
         try write(root,"logs/sessions/20261019T190000Z/battlenet.log",([
             "msync: up and running.",
             "1010.000:0024:0028:trace:winsock:gethostname <- \"Testers-MacBook-Pro.local\"",
@@ -141,7 +158,7 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         precondition(LogCleaner.forThisMac(accountIDs:[]).broken.isEmpty)
         let zip=root.deletingLastPathComponent().appendingPathComponent("Recall-logs-test.zip")
         var input=LogBundle.Input(root:root,report:#"{"app_version":"1.5.0","note":"from tester"}"#,appVersion:"1.5.0",runtime:"phase2-20261019.1",
-                                  logging:.crashes,custom:"",since:ISO8601DateFormatter().date(from:"2026-10-19T18:00:00Z"),
+                                  logging:LoggingSetting([.crashes,.mouse]),custom:"",since:ISO8601DateFormatter().date(from:"2026-10-19T18:00:00Z"),
                                   readme:URL(fileURLWithPath:"app/Resources/LogsReadme.md"),identity:identity)
         let saved=try LogBundle.save(input,to:zip)
         precondition(saved.sessions == 3 && saved.olderLeftOut == 0 && saved.bytes > 0,"\(saved)")
@@ -165,6 +182,10 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
             precondition(all.contains(kept),"lost: \(kept)")
         }
         precondition(files["recall/sessions/20261019T190000Z/battlenet.log"]!.contains("[recall:repeated count=4 last=\"1024.000:0024:0028:\"]"))
+        // The mouse report is saved with its session, every line still JSON, its key-press counts gone.
+        let mouse=files["recall/sessions/20261019T190000Z/input-4242.jsonl"]!
+        precondition(!mouse.contains("key_") && mouse.contains(#""raw_dx":122.0"#) && mouse.contains(#""counts_per_point":1.5150"#),mouse)
+        for line in logLines(mouse) where !line.isEmpty { precondition((try? JSONSerialization.jsonObject(with:Data(line.utf8))) is [String:Any],String(line)) }
 
         let index=try JSONSerialization.jsonObject(with:Data(files["index.json"]!.utf8)) as! [String:Any]
         let moments=index["moments"] as! [[String:Any]]
@@ -192,10 +213,10 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         precondition((index["errors"] as! [[String:Any]]).contains { ($0["text"] as? String)?.contains("err:seh:dispatch_exception") == true })
         precondition((index["left_out"] as! [String:Any])["crash_dumps"] as? Int == 1)
         precondition((index["removed"] as! [String:Int]).keys.contains("account_id"))
-        precondition((index["logging"] as! [String:Any])["setting"] as? String == "crashes")
+        precondition((index["logging"] as! [String:Any])["setting"] as? String == "crashes,mouse")
 
         let summary=files["Summary.txt"]!
-        for line in ["Logging: Crashes and freezes","Battle.net opened. Logging: Crashes and freezes.","Battle.net updated Overwatch (1 min).",
+        for line in ["Logging: Crashes and freezes · Mouse","Battle.net opened. Logging: Crashes and freezes · Mouse.","Battle.net updated Overwatch (1 min).",
                      "Battle.net marked Overwatch not playable (code 2123).","Overwatch started.","Overwatch closed.","Battle.net closed.",
                      "Overwatch crashed: Overwatch - 2.25.0.0: EXCEPTION_ACCESS_VIOLATION reading from 0x0000000000000040",
                      "Just before, it couldn’t read one of its game files.","Battle.net stopped updating Overwatch after 40 sec.",
@@ -216,6 +237,6 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         let smaller=contents(unzip(zip))
         precondition(smaller["battlenet/client/battle.net-20261018T100000.000001.log"] == nil)
         precondition(smaller["Summary.txt"]!.contains("Older sessions left out: 2.") && smaller["Summary.txt"]!.contains("larger than GitHub’s 25 MB limit"))
-        print("PASS: Custom text as Wine reads it; repeats collapsed; every personal detail found in real logs removed, helpful details kept; crash dumps and process lists left out; moments with files, lines and Wine's clock; the summary; the GitHub limit")
+        print("PASS: Custom text as Wine reads it; presets combined; the mouse report without key counts; repeats collapsed; every personal detail found in real logs removed, helpful details kept; crash dumps and process lists left out; moments with files, lines and Wine's clock; the summary; the GitHub limit")
     }
 }

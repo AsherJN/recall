@@ -75,10 +75,10 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         // MetalFX upscaling is on or off whatever the sharpening (schema 2 said "off" for on with
         // sharpening Off). The settings come from the copy's arguments (UserDefaults' argument
         // domain), so the test writes no defaults.
-        func report(_ upscaling:String,_ sharpening:String) throws -> [String:Any] {
+        func report(_ upscaling:String,_ sharpening:String,_ more:[String]=[]) throws -> [String:Any] {
             let copy=Process(),out=Pipe()
             copy.executableURL=Bundle.main.executableURL
-            copy.arguments=["--report","-metalFXUpscaling",upscaling,"-metalFXSharpening",sharpening]
+            copy.arguments=["--report","-metalFXUpscaling",upscaling,"-metalFXSharpening",sharpening]+more
             copy.standardOutput=out;try copy.run()
             let data=out.fileHandleForReading.readDataToEndOfFile();copy.waitUntilExit()
             precondition(copy.terminationStatus == 0)
@@ -86,7 +86,13 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         }
         for (upscaling,sharpening,expected) in [("YES","off","on"),("YES","high","on"),("NO","off","off"),("NO","low","off")] {
             let fields=try report(upscaling,sharpening)
-            precondition(fields["schema"] as? Int == 4)
+            precondition(fields["schema"] as? Int == 5)
+            // Game Mode (REC-51, REC-55): on unless the player turned it off.
+            precondition(fields["game_mode"] as? String == "on","\(fields)")
+            // The mouse (REC-52, REC-57): Standard unless the player chose another, with Input
+            // Monitoring as macOS has it for this process.
+            precondition(fields["mouse_input"] as? String == "standard","\(fields)")
+            precondition(["allowed","denied","undecided"].contains(fields["input_monitoring"] as? String ?? ""),"\(fields)")
             // Other apps (REC-5): nothing launched from this copy, and its busy note never looked.
             let other=fields["other_apps"] as? [String:Any]
             precondition(other?["at_last_launch"] as? String == "none" && other?["now"] as? String == "not_checked","\(String(describing:other))")
@@ -96,6 +102,21 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
             precondition(fields["metalfx_upscaling"] as? String == expected && fields["metalfx_sharpening"] as? String == sharpening,"\(upscaling) \(sharpening): \(fields)")
             precondition((fields["shaders"] as? [String:Any])?["waiting_for_game_to_close"] is Bool)
         }
+        // Game Mode's switch and support's Terminal default from 1.1 are one setting (REC-51).
+        let gameModeOff=try report("NO","off",["-gameMode","NO"])
+        precondition(gameModeOff["game_mode"] as? String == "off","\(gameModeOff)")
+        let gameModeOn=try report("NO","off",["-gameMode","YES"])
+        precondition(gameModeOn["game_mode"] as? String == "on","\(gameModeOn)")
+        for choice in ["classic","high-precision"] {
+            let chosen=try report("NO","off",["-mouseInput",choice])
+            precondition(chosen["mouse_input"] as? String == choice,"\(chosen)")
+        }
+        // Build 76's switch is gone: its default no longer chooses anything.
+        let old=try report("NO","off",["-highPrecisionMouse","YES"])
+        precondition(old["mouse_input"] as? String == "standard" && old["high_precision_mouse"] == nil,"\(old)")
+        // Logging presets combine (REC-51); the report names each one that's on.
+        let mixed=try report("NO","off",["-logging","crashes,mouse"])["logging"] as? [String:Any]
+        precondition(mixed?["setting"] as? String == "crashes,mouse" && mixed?["custom"] == nil,"\(String(describing:mixed))")
         // Battle.net's last starts (BattleNetRecord, REC-6/31), from its agent's CRLF logs: updates with
         // how long they waited and ran, the codes for not playable, the servers' names only.
         precondition(BattleNetRecord.read(root:root).isEmpty)

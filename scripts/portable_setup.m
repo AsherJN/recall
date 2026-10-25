@@ -26,7 +26,8 @@ static NSFileManager *fm;
 static NSString *root;
 static int lockFD = -1;
 static BOOL monitorMode;
-// The game app a session's monitor passes on to preparation after the match (watch --game-app).
+// The program Overwatch runs as (gameProgram), which a session's monitor passes on to preparation
+// after the match (watch --game-app): the engine's game app, or Wine's own loader without Game Mode.
 static NSString *monitorGameApp;
 // A monitor started by prepare-shaders (watch --prepare-now 1) prepares before it watches.
 static BOOL monitorPrepareNow;
@@ -216,8 +217,8 @@ static BOOL busy(NSString *engine) {
 }
 #include "portable_logs.h"
 #include "portable_session.h"
-#include "portable_preferences.h"
 #include "portable_retina.h"
+#include "portable_preferences.h"
 #include "portable_voice.h"
 #include "portable_network.h"
 #include "portable_region.h"
@@ -413,7 +414,8 @@ static void prepare(void) {
     if(cjkFontsChosen())configureFonts(engine,YES);
     if(!registrySaved(engine,60))fail(@"environment_initialization_busy");
     // An update keeps a resolution chosen in the game since the last launch.
-    NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,YES);configureDisplay(width,height);
+    NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,YES);
+    configureDisplay(width,height,[source isEqual:@"game_reset"] ? DisplayModeRemembered : DisplayModeKept);
     NSMutableDictionary *s=state();s[@"prepared_runtime"]=s[@"active_runtime"];writeJSON(s,join(root,@"state.json"));
     saveStage(@"environment_ready");ownedPreparation=NO;
 }
@@ -474,13 +476,20 @@ static BOOL stopMonitor(void) {
     for(int i=0;i<600 && pid>0 && flock(fd,LOCK_EX|LOCK_NB);i++)[NSThread sleepForTimeInterval:0.05];
     close(fd);return YES;
 }
-// The session's monitor, told which app Overwatch runs as: with Game Mode, preparation
-// after the match also warms that app's own shader cache with every learned pipeline. A
-// launch's monitor also gets the Battle.net start whose record it keeps (portable_logs.h).
-static NSArray *watchArguments(NSString *engine, BOOL gameMode, NSString *session) {
+// The program Overwatch runs as: the engine's game app with Game Mode, Wine's own loader
+// without (Settings › Graphics, REC-51). macOS keeps compiled shaders for each separately.
+static NSString *gameProgram(NSString *engine, BOOL gameMode) {
     NSString *gameApp=join(engine,@"lib/wine/game-mode/Overwatch.app");
-    BOOL app=gameMode && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")];
-    NSArray *arguments=app ? @[@"watch",@"--root",root,@"--game-app",gameApp] : @[@"watch",@"--root",root];
+    if(gameMode && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")])return gameApp;
+    NSString *loader=join(engine,@"lib/wine/x86_64-unix/wine");
+    return [fm isExecutableFileAtPath:loader] ? loader : nil;
+}
+// The session's monitor, told which program Overwatch runs as (gameProgram): preparation after
+// the match also warms that program's own shader cache with every learned pipeline. A launch's
+// monitor also gets the Battle.net start whose record it keeps (portable_logs.h).
+static NSArray *watchArguments(NSString *engine, BOOL gameMode, NSString *session) {
+    NSString *program=gameProgram(engine,gameMode);
+    NSArray *arguments=program ? @[@"watch",@"--root",root,@"--game-app",program] : @[@"watch",@"--root",root];
     return validSessionName(session) ? [arguments arrayByAddingObjectsFromArray:@[@"--session",session]] : arguments;
 }
 static void prepareAfterSession(void) {
@@ -536,8 +545,10 @@ static void endSession(NSString *engine) {
  * points. Overwatch, which Battle.net starts with this environment, is not named and sees
  * 96 as before; Wine's shared record of the displays keeps 96 (tests/run_dpi_probe.py).
  * Setup names the installer too, by its file name. launch --battlenet-scale 1 keeps
- * Windows' size. */
+ * Windows' size. A session without Retina mode (a main display that isn't Retina,
+ * portable_retina.h) has a Windows pixel a point already: Battle.net keeps Windows' 96. */
 static NSMutableDictionary *battleNetSize(NSMutableDictionary *env, NSString *installer) {
+    if(wineScale()==1)return env;
     NSMutableArray *names=[@[@"Battle.net.exe",@"Battle.net Launcher.exe",@"BlizzardError.exe"] mutableCopy];
     if(installer)[names addObject:installer.lastPathComponent];
     env[@"WINE_APP_DPI"]=[@"192:" stringByAppendingString:[names componentsJoinedByString:@";"]];
@@ -550,15 +561,24 @@ static NSMutableDictionary *battleNetSize(NSMutableDictionary *env, NSString *in
  * draws on the CPU (SwiftShader), so it has no Metal layer for the HUD.
  * macOS Game Mode: the contract's WINE_GAME_MODE makes Wine start Overwatch from the
  * engine's game app (lib/wine/game-mode/Overwatch.app). launch --game-mode 0 leaves it out,
- * so the game starts as before; the app passes it only for a hidden "gameMode" default.
+ * so the game starts from Wine's own loader, as before 1.1; the app passes it when its Game Mode
+ * switch is off (Settings › Graphics, off by default from 1.6; REC-51).
  * Korean account support (Settings › Advanced, portable_korea.h) reaches the game the same
  * way: WINEMAC_SCREEN_READBACK=1 has Wine's Mac driver answer screen reads with a black
  * image, so the anti-cheat's screenshots no longer crash the game.
  * So does MetalFX upscaling (Settings, launch --metalfx 1; portable_metalfx.h): the contract's
- * MetalFX environment. */
+ * MetalFX environment.
+ * And the mouse (Settings › General › Mouse, launch --mouse; REC-52, REC-57). Standard keeps the
+ * contract's input variant ("precise", 1.5's). Classic sets the window driver's "classic", 1.4's
+ * clicks and timing with 1.5's stand-in. High-precision sets WINEMAC_RAW_SOURCE=hid: the driver
+ * reads the mouse's own reports through IOHID instead of GCMouse, with Recall's Input Monitoring
+ * permission; without it the driver keeps GCMouse. */
+static NSString *mouseInput=@"standard";
 static NSMutableDictionary *clientEnvironment(NSMutableDictionary *env, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx) {
     if(sized)battleNetSize(env,nil);
     if(metalfx)[env addEntriesFromDictionary:candidateMetalFXEnvironment()];
+    if([mouseInput isEqual:@"classic"])env[@"WINEMAC_INPUT_VARIANT"]=@"classic";
+    else if([mouseInput isEqual:@"high-precision"])env[@"WINEMAC_RAW_SOURCE"]=@"hid";
     if(koreanSupportChosen())env[@"WINEMAC_SCREEN_READBACK"]=@"1";
     if(!gameMode)[env removeObjectForKey:@"WINE_GAME_MODE"];
     if(hud)[env addEntriesFromDictionary:@{@"MTL_HUD_ENABLED":@"1",@"MTL_HUD_DISABLE_MENU_BAR":@"1",
@@ -696,15 +716,18 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     }
     // The update Agent can legitimately outlive the client. It must not
     // block relaunch; game/client membership above is the launch boundary.
-    // A session it keeps alive from before a display change is ended, though.
-    if(displaysChanged)endSession(engine);
+    // A session it keeps alive from before a display change is ended, though, as is one
+    // started with the other Retina setting (configureRetina changes it between sessions).
+    if(displaysChanged || retinaChangeNeeded())endSession(engine);
     // A legacy installation needs one fully idle session to restore Retina.
     configureRetina();
     NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,YES);
     if([source isEqual:@"game"])event(@"display_from_game",@{@"width":@(width),@"height":@(height)});
     else if([source isEqual:@"game_reset"])event(@"display_restored",@{@"width":@(width),@"height":@(height)});
     NSInteger gameWidth=width,gameHeight=height;fittedResolution(&gameWidth,&gameHeight);
-    configurePreferences(width,height,gameWidth,gameHeight,NO);
+    // Overwatch resetting its display settings for a card it took to be new is not the
+    // player's choice of display mode either (configurePreferences).
+    configurePreferences(width,height,gameWidth,gameHeight,NO,[source isEqual:@"game_reset"] ? DisplayModeRemembered : DisplayModeKept);
     // After the resolution: a card switch must not read as the game resetting it (gameChoice).
     NSString *sharpness=nil;metalfx=configureMetalFX(engine,metalfx,sharpening,YES,&sharpness);
     if(gameWidth!=width || gameHeight!=height)
@@ -717,10 +740,10 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     stopAfterSession();
     if([fm isExecutableFileAtPath:pipeline]) {
         event(@"preparing_pipelines",nil);
-        // With Game Mode the game runs as the engine's game app, which keeps its own
-        // compiled-shader cache; the helper warms that cache when it is new to this Mac.
-        NSString *gameApp=join(engine,@"lib/wine/game-mode/Overwatch.app");
-        NSArray *arguments=gameMode && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")] ? @[root,gameApp] : @[root];
+        // The game runs as the engine's game app with Game Mode and as Wine's own loader without;
+        // each keeps its own compiled-shader cache, which the helper warms when it is new to this Mac.
+        NSString *program=gameProgram(engine,gameMode);
+        NSArray *arguments=program ? @[root,program] : @[root];
         int code=waitTaskTicking(task(pipeline,arguments,nil,@"pipeline-preparation.log"),600,graphicsFeed(join(join(root,@"logs"),@"pipeline-preparation.log")));
         if(code==75)fail(@"pipeline_cache_busy");
         if(code)event(@"pipeline_preparation_skipped",nil);
@@ -736,11 +759,15 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     if(displays) {NSMutableDictionary *s=state();s[@"session_displays"]=displays;writeJSON(s,join(root,@"state.json"));}
     NSMutableDictionary *env=clientEnvironment(diagnostic?diagnosticEnvironment(engine):wineEnv(engine),sized,hud,gameMode,metalfx);
     [env addEntriesFromDictionary:logs];
-    NSMutableDictionary *record=[@{@"logging":logs.count ? logging : @"off",@"winedebug":env[@"WINEDEBUG"],@"dxmt_log_level":env[@"DXMT_LOG_LEVEL"],
+    NSArray *chosen=loggingChoice(logging);
+    NSMutableDictionary *record=[@{@"logging":loggingName(chosen),@"winedebug":env[@"WINEDEBUG"],@"dxmt_log_level":env[@"DXMT_LOG_LEVEL"],
         @"runtime":state()[@"active_runtime"],@"region":state()[@"battlenet_region"] ?: @"global",@"korean_support":@(koreanSupportChosen()),
-        @"game_mode":@(gameMode),@"metalfx":@(metalfx),@"metal_hud":@(hud)} mutableCopy];
-    if([logging isEqual:@"custom"])record[@"logging_custom"]=loggingCustom;
+        @"game_mode":@(gameMode),@"metalfx":@(metalfx),@"metal_hud":@(hud),@"mouse_input":mouseInput} mutableCopy];
+    if([chosen containsObject:@"custom"])record[@"logging_custom"]=loggingCustom;
     NSString *session=startSessionLog(record);
+    // Mouse (REC-51): the window driver writes its report beside the session's record, one file per
+    // process (input-<pid>.jsonl).
+    if([chosen containsObject:@"mouse"])env[@"WINEMAC_INPUT_STATS"]=join(join(sessionsFolder(),session),@"input");
     NSTask *p=task(join(engine,@"bin/wine"),client,env,[NSString stringWithFormat:@"sessions/%@/battlenet.log",session]);
     saveStage(@"battlenet_started");event(@"battlenet_open",@{@"pid":@(p.processIdentifier),@"session":session});
     task(NSProcessInfo.processInfo.arguments[0],watchArguments(engine,gameMode,session),nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
@@ -819,12 +846,14 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         NSString *defaultRoot=join([fm URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject.path,@"Overwatch2Mac");
         monitorMode=[command isEqual:@"watch"];
         ownRoot(options[@"root"] ?: defaultRoot);
-        // Only a game app inside an installed engine of this data folder.
+        // Only the program Overwatch runs as (gameProgram) inside an installed engine of this data folder.
         NSString *gameApp=[options[@"game-app"] stringByStandardizingPath];
         if(monitorMode && gameApp && [gameApp hasPrefix:[join(root,@"runtimes") stringByAppendingString:@"/"]] &&
-           [gameApp hasSuffix:@"/lib/wine/game-mode/Overwatch.app"] && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")])monitorGameApp=gameApp;
+           (([gameApp hasSuffix:@"/lib/wine/game-mode/Overwatch.app"] && [fm fileExistsAtPath:join(gameApp,@"Contents/Info.plist")]) ||
+            ([gameApp hasSuffix:@"/lib/wine/x86_64-unix/wine"] && [fm isExecutableFileAtPath:gameApp])))monitorGameApp=gameApp;
         monitorPrepareNow=monitorMode && [options[@"prepare-now"] isEqual:@"1"];
         if(monitorMode && validSessionName(options[@"session"]))monitorSession=options[@"session"];
+        if([@[@"classic",@"high-precision"] containsObject:options[@"mouse"] ?: @""])mouseInput=options[@"mouse"];
         if([command isEqual:@"preflight"])preflight();
         else if([command isEqual:@"status"]) {
             // The resolution Overwatch opens at next on the main display.
@@ -851,7 +880,9 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
             NSString *width=options[@"width"] ?: @"1920",*height=options[@"height"] ?: @"";
             if(!matches(width,@"^[0-9]{3,5}$") || !matches(height,@"^[0-9]{3,5}$") ||
                !supportedResolution(width.integerValue,height.integerValue))fail(@"unsupported_resolution");
-            configureDisplay(width.integerValue,height.integerValue);
+            // A resolution chosen in Settings is a window's size too; --reset 1 (Reset Display
+            // Settings) puts Overwatch back in Fullscreen.
+            configureDisplay(width.integerValue,height.integerValue,[options[@"reset"] isEqual:@"1"] ? DisplayModeReset : DisplayModeResized);
         }
         else if([command isEqual:@"display-memory"]) {
             // Settings › Remember a resolution for each display.
@@ -903,7 +934,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
             // The qualified baseline's resolution unless the player has chosen one.
             NSInteger width,height;NSString *source;
             if(state()[@"display_height"])nextResolution(&width,&height,&source,YES);else chosenResolution(&width,&height);
-            configurePreferences(width,height,width,height,YES);
+            configurePreferences(width,height,width,height,YES,DisplayModeReset);
         }
         else if([command isEqual:@"download"])event(@"download_complete",@{@"file":[download(options[@"url"],options[@"sha256"]) lastPathComponent]});
         else if([command isEqual:@"install-runtime"])installRuntime(options[@"archive"] ?: download(options[@"url"],options[@"sha256"]),options[@"sha256"],options[@"version"],[options[@"repair"] isEqual:@"1"]);
@@ -912,13 +943,17 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         else if([command isEqual:@"install-battlenet"])installClient(options[@"installer"] ?: download(options[@"url"],options[@"sha256"]),options[@"sha256"]);
         // --battlenet-scale 1 keeps Battle.net at Windows' size; otherwise it has the main display's (battleNetSize).
         // --metal-hud 1 shows Apple's Metal Performance HUD over Overwatch (Settings); off by default.
-        // --game-mode 0 starts Overwatch without macOS Game Mode (hidden app default); on by default.
+        // --game-mode 0 starts Overwatch without macOS Game Mode (the app's switch, off by default from 1.6); on otherwise.
         // --metalfx 1 offers DLSS on MetalFX, with --sharpening off|low|high (Settings); off by default.
-        // --logging off|crashes|graphics|battlenet|custom, with --logging-custom <WINEDEBUG text> (Settings › Advanced); off by default.
+        // --logging off, or any of crashes,graphics,battlenet,mouse,custom joined with commas, with
+        // --logging-custom <WINEDEBUG text> for custom (Settings › Advanced); off by default.
+        // --mouse standard|classic|high-precision chooses how the game gets the mouse (Settings › General); standard by default.
         else if([command isEqual:@"launch"])launchClient(NO,[options[@"play"] isEqual:@"1"],![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off",options[@"logging"] ?: @"off",options[@"logging-custom"]);
         else if([command isEqual:@"diagnostic-launch"])launchClient(YES,NO,![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off",options[@"logging"] ?: @"off",options[@"logging-custom"]);
-        // Support and tests: what launch --logging (and --logging-custom) gives Wine and the graphics layer.
-        else if([command isEqual:@"logging"])event(@"logging",@{@"setting":options[@"setting"] ?: @"off",@"environment":loggingEnvironment(options[@"setting"] ?: @"off",options[@"custom"])});
+        // Support and tests: what launch --logging (and --logging-custom) gives Wine and the graphics layer,
+        // and whether it turns on the mouse report.
+        else if([command isEqual:@"logging"])event(@"logging",@{@"setting":loggingName(loggingChoice(options[@"setting"])),
+            @"environment":loggingEnvironment(options[@"setting"] ?: @"off",options[@"custom"]),@"mouse_report":@(loggingMouse(options[@"setting"]))});
         // Support and tests: each Battle.net start's logs (logs/sessions), oldest first. --prune 1 removes
         // the oldest while the logs would take more room than the disk has left, as each launch does.
         else if([command isEqual:@"session-logs"]) {

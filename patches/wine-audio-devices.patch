@@ -1,0 +1,766 @@
+diff --git a/dlls/mmdevapi/devenum.c b/dlls/mmdevapi/devenum.c
+index d147d24..bc1e9a0 100644
+--- a/dlls/mmdevapi/devenum.c
++++ b/dlls/mmdevapi/devenum.c
+@@ -71,6 +71,17 @@ static const IMMEndpointVtbl MMEndpointVtbl;
+ static MMDevEnumImpl enumerator;
+ static struct list device_list = LIST_INIT(device_list);
+ 
++/* Devices come and go while programs run (refresh_devices): this guards the device
++ * list, the cache of device names and the default devices against that thread. */
++static CRITICAL_SECTION g_devices_lock;
++static CRITICAL_SECTION_DEBUG g_devices_lock_debug =
++{
++    0, 0, &g_devices_lock,
++    { &g_devices_lock_debug.ProcessLocksList, &g_devices_lock_debug.ProcessLocksList },
++      0, 0, { (DWORD_PTR)(__FILE__ ": g_devices_lock") }
++};
++static CRITICAL_SECTION g_devices_lock = { &g_devices_lock_debug, -1, 0, 0, 0, 0 };
++
+ typedef struct MMDevColImpl
+ {
+     IMMDeviceCollection IMMDeviceCollection_iface;
+@@ -162,7 +173,19 @@ static struct device *find_device_in_cache( const GUID *guid )
+     return NULL;
+ }
+ 
++static BOOL get_device_name_from_guid_locked( const GUID *guid, char **name, EDataFlow *flow );
++
+ BOOL get_device_name_from_guid( const GUID *guid, char **name, EDataFlow *flow )
++{
++    BOOL ret;
++
++    EnterCriticalSection(&g_devices_lock);
++    ret = get_device_name_from_guid_locked( guid, name, flow );
++    LeaveCriticalSection(&g_devices_lock);
++    return ret;
++}
++
++static BOOL get_device_name_from_guid_locked( const GUID *guid, char **name, EDataFlow *flow )
+ {
+     struct device *dev;
+     WCHAR key_name[MAX_PATH];
+@@ -946,6 +969,8 @@ static HRESULT MMDevCol_Create(IMMDeviceCollection **ppv, EDataFlow flow, DWORD
+     This->devices_count = 0;
+     *ppv = &This->IMMDeviceCollection_iface;
+ 
++    EnterCriticalSection(&g_devices_lock);
++
+     LIST_FOR_EACH_ENTRY(cur, &device_list, MMDevice, entry)
+     {
+         if ((cur->flow == flow || flow == eAll) && (cur->state & state))
+@@ -956,7 +981,10 @@ static HRESULT MMDevCol_Create(IMMDeviceCollection **ppv, EDataFlow flow, DWORD
+     {
+         This->devices = malloc(This->devices_count * sizeof(IMMDevice *));
+         if (!This->devices_count)
++        {
++            LeaveCriticalSection(&g_devices_lock);
+             return E_OUTOFMEMORY;
++        }
+ 
+         LIST_FOR_EACH_ENTRY(cur, &device_list, MMDevice, entry)
+         {
+@@ -969,6 +997,8 @@ static HRESULT MMDevCol_Create(IMMDeviceCollection **ppv, EDataFlow flow, DWORD
+         }
+     }
+ 
++    LeaveCriticalSection(&g_devices_lock);
++
+     return S_OK;
+ }
+ 
+@@ -1197,15 +1227,19 @@ static HRESULT WINAPI MMDevEnum_GetDefaultAudioEndpoint(IMMDeviceEnumerator *ifa
+         RegCloseKey(key);
+     }
+ 
++    EnterCriticalSection(&g_devices_lock);
++
+     if (flow == eRender)
+         *device = &MMDevice_def_play->IMMDevice_iface;
+     else
+         *device = &MMDevice_def_rec->IMMDevice_iface;
+ 
+-    if (!*device)
+-        return E_NOTFOUND;
+-    IMMDevice_AddRef(*device);
+-    return S_OK;
++    if (*device)
++        IMMDevice_AddRef(*device);
++
++    LeaveCriticalSection(&g_devices_lock);
++
++    return *device ? S_OK : E_NOTFOUND;
+ }
+ 
+ static HRESULT WINAPI MMDevEnum_GetDevice(IMMDeviceEnumerator *iface, const WCHAR *name, IMMDevice **device)
+@@ -1219,6 +1253,8 @@ static HRESULT WINAPI MMDevEnum_GetDevice(IMMDeviceEnumerator *iface, const WCHA
+     if(!name || !device)
+         return E_POINTER;
+ 
++    EnterCriticalSection(&g_devices_lock);
++
+     LIST_FOR_EACH_ENTRY(impl, &device_list, MMDevice, entry)
+     {
+         HRESULT hr;
+@@ -1236,10 +1272,12 @@ static HRESULT WINAPI MMDevEnum_GetDevice(IMMDeviceEnumerator *iface, const WCHA
+             CoTaskMemFree(str);
+             IMMDevice_AddRef(dev);
+             *device = dev;
++            LeaveCriticalSection(&g_devices_lock);
+             return S_OK;
+         }
+         CoTaskMemFree(str);
+     }
++    LeaveCriticalSection(&g_devices_lock);
+     TRACE("Could not find device %s\n", debugstr_w(name));
+     return E_INVALIDARG;
+ }
+@@ -1457,6 +1495,256 @@ static HRESULT WINAPI MMDevEnum_UnregisterEndpointNotificationCallback(IMMDevice
+     return E_NOTFOUND;
+ }
+ 
++/* Devices connected or removed while a program runs, and changes of the default
++ * devices, reach the program as on Windows: the driver reports that something
++ * changed (wait_device_change), the devices are listed again and each registered
++ * client hears what changed. Wine used to list them once, at start. */
++struct device_event
++{
++    enum { DEVICE_ADDED, DEVICE_STATE_CHANGED, DEFAULT_DEVICE_CHANGED } type;
++    EDataFlow flow;
++    ERole role;
++    DWORD state;
++    WCHAR *id;
++};
++
++struct device_events
++{
++    struct device_event *events;
++    UINT count, size;
++};
++
++static void add_device_event(struct device_events *events, int type, EDataFlow flow, ERole role,
++                             DWORD state, WCHAR *id)
++{
++    struct device_event *event;
++
++    if (events->count == events->size)
++    {
++        UINT size = events->size ? events->size * 2 : 16;
++        if (!(event = realloc(events->events, size * sizeof(*event))))
++        {
++            CoTaskMemFree(id);
++            return;
++        }
++        events->events = event;
++        events->size = size;
++    }
++    event = &events->events[events->count++];
++    event->type = type;
++    event->flow = flow;
++    event->role = role;
++    event->state = state;
++    event->id = id;
++}
++
++static WCHAR *device_id(MMDevice *device)
++{
++    WCHAR *id = NULL;
++    if (device) IMMDevice_GetId(&device->IMMDevice_iface, &id);
++    return id;
++}
++
++static WCHAR *default_device_id(EDataFlow flow, ERole role)
++{
++    IMMDevice *device;
++    WCHAR *id = NULL;
++
++    if (SUCCEEDED(MMDevEnum_GetDefaultAudioEndpoint(&enumerator.IMMDeviceEnumerator_iface, flow, role, &device)))
++    {
++        IMMDevice_GetId(device, &id);
++        IMMDevice_Release(device);
++    }
++    return id;
++}
++
++static void set_device_state(MMDevice *device, DWORD state)
++{
++    WCHAR guidstr[39];
++    HKEY key;
++
++    device->state = state;
++    StringFromGUID2(&device->devguid, guidstr, ARRAY_SIZE(guidstr));
++    if (!RegOpenKeyExW(device->flow == eRender ? key_render : key_capture, guidstr, 0,
++                       KEY_WRITE|KEY_WOW64_64KEY, &key))
++    {
++        RegSetValueExW(key, L"DeviceState", 0, REG_DWORD, (const BYTE *)&state, sizeof(state));
++        RegCloseKey(key);
++    }
++}
++
++/* Called with g_devices_lock held. */
++static void refresh_flow(EDataFlow flow, struct device_events *events)
++{
++    static const ERole roles[] = { eConsole, eMultimedia, eCommunications };
++    struct get_endpoint_ids_params params;
++    WCHAR *before[ARRAY_SIZE(roles)];
++    MMDevice *device, *def = NULL;
++    GUID *present;
++    UINT i, j;
++
++    for (i = 0; i < ARRAY_SIZE(roles); i++)
++        before[i] = default_device_id(flow, roles[i]);
++
++    params.flow = flow;
++    params.size = 1024;
++    params.endpoints = NULL;
++    do {
++        free(params.endpoints);
++        params.endpoints = malloc(params.size);
++        __wine_unix_call(drvs.module_unixlib, get_endpoint_ids, &params);
++    } while (params.result == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
++
++    if (FAILED(params.result) || !(present = calloc(params.num ? params.num : 1, sizeof(*present))))
++    {
++        WARN("Unable to list devices: %08lx\n", params.result);
++        free(params.endpoints);
++        for (i = 0; i < ARRAY_SIZE(roles); i++)
++            CoTaskMemFree(before[i]);
++        return;
++    }
++
++    for (i = 0; i < params.num; i++)
++    {
++        const WCHAR *name = (WCHAR *)((char *)params.endpoints + params.endpoints[i].name);
++        const char *dev_name = (char *)params.endpoints + params.endpoints[i].device;
++        MMDevice *found = NULL;
++
++        get_device_guid(flow, dev_name, &present[i]);
++        LIST_FOR_EACH_ENTRY(device, &device_list, MMDevice, entry)
++        {
++            if (device->flow == flow && IsEqualGUID(&device->devguid, &present[i]))
++            {
++                found = device;
++                break;
++            }
++        }
++
++        if (!found || found->state != DEVICE_STATE_ACTIVE)
++        {
++            BOOL added = !found;
++
++            TRACE("%s device %s is now present\n", flow == eRender ? "Render" : "Capture", debugstr_w(name));
++            if (!(found = MMDevice_Create(name, &present[i], flow, DEVICE_STATE_ACTIVE, FALSE)))
++                continue;
++            set_format(found);
++            if (added)
++                add_device_event(events, DEVICE_ADDED, flow, 0, 0, device_id(found));
++            add_device_event(events, DEVICE_STATE_CHANGED, flow, 0, DEVICE_STATE_ACTIVE, device_id(found));
++        }
++        if (i == params.default_idx)
++            def = found;
++    }
++
++    LIST_FOR_EACH_ENTRY(device, &device_list, MMDevice, entry)
++    {
++        if (device->flow != flow || device->state != DEVICE_STATE_ACTIVE)
++            continue;
++        for (j = 0; j < params.num; j++)
++            if (IsEqualGUID(&device->devguid, &present[j]))
++                break;
++        if (j < params.num)
++            continue;
++        TRACE("%s device %s is no longer present\n", flow == eRender ? "Render" : "Capture",
++              debugstr_w(device->drv_id));
++        set_device_state(device, DEVICE_STATE_NOTPRESENT);
++        add_device_event(events, DEVICE_STATE_CHANGED, flow, 0, DEVICE_STATE_NOTPRESENT, device_id(device));
++    }
++
++    if (flow == eRender)
++        MMDevice_def_play = def;
++    else
++        MMDevice_def_rec = def;
++
++    for (i = 0; i < ARRAY_SIZE(roles); i++)
++    {
++        WCHAR *after = default_device_id(flow, roles[i]);
++
++        if ((!before[i] != !after) || (after && wcscmp(before[i], after)))
++        {
++            TRACE("Default %s device for role %u is now %s\n", flow == eRender ? "render" : "capture",
++                  roles[i], debugstr_w(after));
++            add_device_event(events, DEFAULT_DEVICE_CHANGED, flow, roles[i], 0, after);
++        }
++        else
++            CoTaskMemFree(after);
++        CoTaskMemFree(before[i]);
++    }
++
++    free(present);
++    free(params.endpoints);
++}
++
++static void refresh_devices(void)
++{
++    struct NotificationClientWrapper *wrapper, *next;
++    struct device_events events = { 0 };
++    UINT i;
++
++    EnterCriticalSection(&g_devices_lock);
++    refresh_flow(eRender, &events);
++    refresh_flow(eCapture, &events);
++    LeaveCriticalSection(&g_devices_lock);
++
++    EnterCriticalSection(&g_notif_lock);
++    for (i = 0; i < events.count; i++)
++    {
++        struct device_event *event = &events.events[i];
++
++        LIST_FOR_EACH_ENTRY_SAFE(wrapper, next, &g_notif_clients, struct NotificationClientWrapper, entry)
++        {
++            switch (event->type)
++            {
++            case DEVICE_ADDED:
++                IMMNotificationClient_OnDeviceAdded(wrapper->client, event->id);
++                break;
++            case DEVICE_STATE_CHANGED:
++                IMMNotificationClient_OnDeviceStateChanged(wrapper->client, event->id, event->state);
++                break;
++            case DEFAULT_DEVICE_CHANGED:
++                IMMNotificationClient_OnDefaultDeviceChanged(wrapper->client, event->flow, event->role, event->id);
++                break;
++            }
++        }
++    }
++    LeaveCriticalSection(&g_notif_lock);
++
++    for (i = 0; i < events.count; i++)
++        CoTaskMemFree(events.events[i].id);
++    free(events.events);
++}
++
++static DWORD WINAPI device_watch_proc(void *user)
++{
++    struct wait_device_change_params params = { 0 };
++
++    SetThreadDescription(GetCurrentThread(), L"wine_mmdevapi_devices");
++
++    for (;;)
++    {
++        params.result = E_NOTIMPL;
++        if (__wine_unix_call(drvs.module_unixlib, wait_device_change, &params) || FAILED(params.result))
++        {
++            WARN("The driver doesn't report device changes: %08lx\n", params.result);
++            return 0;
++        }
++        refresh_devices();
++    }
++}
++
++/* After the driver's devices are loaded. Only the Mac driver reports changes. */
++void start_device_watch(void)
++{
++    HANDLE thread;
++
++    if (wcscmp(drvs.module_name, L"winecoreaudio.drv"))
++        return;
++    if ((thread = CreateThread(NULL, 0, device_watch_proc, NULL, 0, NULL)))
++        CloseHandle(thread);
++    else
++        ERR("CreateThread failed: %lu\n", GetLastError());
++}
++
+ static const IMMDeviceEnumeratorVtbl MMDevEnumVtbl =
+ {
+     MMDevEnum_QueryInterface,
+diff --git a/dlls/mmdevapi/main.c b/dlls/mmdevapi/main.c
+index 66a6327..939a9c7 100644
+--- a/dlls/mmdevapi/main.c
++++ b/dlls/mmdevapi/main.c
+@@ -189,6 +189,7 @@ static BOOL WINAPI init_driver(INIT_ONCE *once, void *param, void **context)
+         load_devices_from_reg();
+         load_driver_devices(eRender);
+         load_driver_devices(eCapture);
++        start_device_watch();
+     }
+ 
+     if (drvs.module == 0)
+diff --git a/dlls/mmdevapi/mmdevapi_private.h b/dlls/mmdevapi/mmdevapi_private.h
+index 672d901..908d671 100644
+--- a/dlls/mmdevapi/mmdevapi_private.h
++++ b/dlls/mmdevapi/mmdevapi_private.h
+@@ -128,6 +128,7 @@ extern HRESULT SpatialAudioClient_Create(IMMDevice *device, ISpatialAudioClient
+ extern BOOL get_device_name_from_guid( const GUID *guid, char **name, EDataFlow *flow );
+ extern HRESULT load_devices_from_reg(void);
+ extern HRESULT load_driver_devices(EDataFlow flow);
++extern void start_device_watch(void);
+ 
+ extern void main_loop_stop(void);
+ 
+diff --git a/dlls/mmdevapi/unixlib.h b/dlls/mmdevapi/unixlib.h
+index 3df13e9..bf20b92 100644
+--- a/dlls/mmdevapi/unixlib.h
++++ b/dlls/mmdevapi/unixlib.h
+@@ -301,6 +301,15 @@ struct midi_notify_wait_params
+     struct notify_context *notify;
+ };
+ 
++/* Returns when the system's audio devices or default devices have changed since
++ * serial, a while after the last change of a burst; serial is updated. The first
++ * call starts watching and returns at once with S_FALSE. */
++struct wait_device_change_params
++{
++    UINT64 serial;
++    HRESULT result;
++};
++
+ struct aux_message_params
+ {
+     UINT dev_id;
+@@ -350,5 +359,6 @@ enum unix_funcs
+     midi_in_message,
+     midi_notify_wait,
+     aux_message,
++    wait_device_change,
+     funcs_count
+ };
+diff --git a/dlls/winecoreaudio.drv/coreaudio.c b/dlls/winecoreaudio.drv/coreaudio.c
+index 3199887..7acd8f2 100644
+--- a/dlls/winecoreaudio.drv/coreaudio.c
++++ b/dlls/winecoreaudio.drv/coreaudio.c
+@@ -42,11 +42,14 @@
+ #include <fcntl.h>
+ #include <fenv.h>
+ #include <unistd.h>
++#include <dlfcn.h>
++#include <pthread.h>
+ 
+ #include <CoreAudio/CoreAudio.h>
+ #include <AudioToolbox/AudioFormat.h>
+ #include <AudioToolbox/AudioConverter.h>
+ #include <AudioUnit/AudioUnit.h>
++#include <IOKit/IOKitLib.h>
+ #include <os/lock.h>
+ 
+ #undef LoadResource
+@@ -99,6 +102,8 @@ struct coreaudio_stream
+     UINT32 cap_bufsize_frames, cap_offs_frames, cap_held_frames;
+     UINT32 wrap_bufsize_frames;
+     UINT64 written_frames;
++    UINT64 device_serial;
++    BOOL device_gone;
+     INT32 getbuf_last;
+     WAVEFORMATEX *fmt;
+     BYTE *local_buffer, *cap_buffer, *wrap_buffer, *resamp_buffer, *tmp_buffer;
+@@ -202,6 +207,202 @@ static BOOL device_has_channels(AudioDeviceID device, EDataFlow flow)
+     return ret;
+ }
+ 
++/* Device changes. Core Audio calls device_change_cb on its own threads whenever the
++ * device list or a default device changes; unix_wait_device_change, on mmdevapi's
++ * device watch thread, returns once such changes settle, and mmdevapi lists the
++ * devices again. A stream whose device is gone reports AUDCLNT_E_DEVICE_INVALIDATED,
++ * as on Windows, until its device comes back; only once mmdevapi has listed the
++ * devices again (device_listed_serial), so a program that reopens the default device
++ * at once gets the new one. */
++static pthread_mutex_t device_change_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t device_change_cond = PTHREAD_COND_INITIALIZER;
++static UINT64 device_change_serial, device_listed_serial;
++static BOOL device_watch_started;
++
++static const AudioObjectPropertyAddress device_change_addresses[] =
++{
++    { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
++    { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
++    { kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
++};
++
++static OSStatus device_change_cb(AudioObjectID object, UInt32 count,
++                                 const AudioObjectPropertyAddress *addresses, void *user)
++{
++    pthread_mutex_lock(&device_change_lock);
++    __atomic_store_n(&device_change_serial, device_change_serial + 1, __ATOMIC_RELEASE);
++    pthread_cond_broadcast(&device_change_cond);
++    pthread_mutex_unlock(&device_change_lock);
++    return noErr;
++}
++
++static NTSTATUS unix_wait_device_change(void *args)
++{
++    struct wait_device_change_params *params = args;
++    const struct timespec quiet = { 0, 300000000 };
++    unsigned int i, waited;
++    UINT64 seen;
++    BOOL start;
++
++    pthread_mutex_lock(&device_change_lock);
++    start = !device_watch_started;
++    device_watch_started = TRUE;
++    pthread_mutex_unlock(&device_change_lock);
++
++    if (start)
++    {
++        for (i = 0; i < ARRAYSIZE(device_change_addresses); i++)
++            if (AudioObjectAddPropertyListener(kAudioObjectSystemObject, &device_change_addresses[i],
++                                               device_change_cb, NULL) != noErr)
++                WARN("Unable to watch audio device property %08x\n",
++                     (unsigned int)device_change_addresses[i].mSelector);
++        params->serial = __atomic_load_n(&device_change_serial, __ATOMIC_ACQUIRE);
++        params->result = S_FALSE;
++        return STATUS_SUCCESS;
++    }
++
++    /* mmdevapi has listed the devices for every change up to the serial it passes. */
++    __atomic_store_n(&device_listed_serial, params->serial, __ATOMIC_RELEASE);
++
++    pthread_mutex_lock(&device_change_lock);
++    while (device_change_serial == params->serial)
++        pthread_cond_wait(&device_change_cond, &device_change_lock);
++    /* A device that arrives changes the list first, then the defaults: wait until 0.3
++     * seconds pass without a change, for up to three seconds. */
++    for (waited = 0; waited < 10; waited++)
++    {
++        seen = device_change_serial;
++        pthread_cond_timedwait_relative_np(&device_change_cond, &device_change_lock, &quiet);
++        if (device_change_serial == seen)
++            break;
++    }
++    params->serial = device_change_serial;
++    pthread_mutex_unlock(&device_change_lock);
++
++    params->result = S_OK;
++    return STATUS_SUCCESS;
++}
++
++static BOOL device_alive(AudioDeviceID device)
++{
++    const AudioObjectPropertyAddress addr =
++        { kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
++    UInt32 alive = 0, size = sizeof(alive);
++
++    return device != kAudioObjectUnknown &&
++           AudioObjectGetPropertyData(device, &addr, 0, NULL, &size, &alive) == noErr && alive;
++}
++
++/* Called with the stream's lock held; asks Core Audio only after a device change. */
++static BOOL stream_device_gone(struct coreaudio_stream *stream)
++{
++    UINT64 serial = __atomic_load_n(&device_listed_serial, __ATOMIC_ACQUIRE);
++
++    if (serial != stream->device_serial)
++    {
++        stream->device_serial = serial;
++        stream->device_gone = !device_alive(stream->dev_id);
++        if (stream->device_gone)
++            TRACE("The device of stream %p is gone\n", stream);
++    }
++    return stream->device_gone;
++}
++
++/* Voice chat with Bluetooth headphones: while anything records from a Bluetooth
++ * headset's microphone, macOS switches the headset to its hands-free profile, with
++ * low-quality mono sound both ways. So while the Mac's default microphone is a
++ * Bluetooth headset's and the Mac's own microphone can hear (lid open), Wine's
++ * default microphone is the Mac's own, also when the headset connects during play.
++ * A microphone a program chooses by name is used as chosen.
++ * WINECOREAUDIO_TEST_BLUETOOTH_UID names a device to treat as Bluetooth, for tests. */
++static BOOL device_is_bluetooth(AudioDeviceID device)
++{
++    const AudioObjectPropertyAddress addr =
++        { kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
++    const char *test = getenv("WINECOREAUDIO_TEST_BLUETOOTH_UID");
++    UInt32 transport = 0, size = sizeof(transport);
++
++    if (test && *test)
++    {
++        const AudioObjectPropertyAddress uid_addr =
++            { kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
++        CFStringRef uid = NULL;
++        char buffer[256];
++        BOOL match = FALSE;
++
++        size = sizeof(uid);
++        if (AudioObjectGetPropertyData(device, &uid_addr, 0, NULL, &size, &uid) == noErr && uid)
++        {
++            match = CFStringGetCString(uid, buffer, sizeof(buffer), kCFStringEncodingUTF8) && !strcmp(buffer, test);
++            CFRelease(uid);
++        }
++        if (match) return TRUE;
++        size = sizeof(transport);
++    }
++
++    if (AudioObjectGetPropertyData(device, &addr, 0, NULL, &size, &transport) != noErr)
++        return FALSE;
++    return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE;
++}
++
++static BOOL lid_closed(void)
++{
++    /* IOKit is loaded on first use: the driver isn't linked with it. */
++    static io_service_t (*pIOServiceGetMatchingService)(mach_port_t, CFDictionaryRef);
++    static CFMutableDictionaryRef (*pIOServiceMatching)(const char *);
++    static CFTypeRef (*pIORegistryEntryCreateCFProperty)(io_registry_entry_t, CFStringRef, CFAllocatorRef, IOOptionBits);
++    static kern_return_t (*pIOObjectRelease)(io_object_t);
++    static void *iokit;
++    io_service_t domain;
++    CFTypeRef value;
++    BOOL closed;
++
++    if (!iokit)
++    {
++        if (!(iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY | RTLD_LOCAL)))
++            return FALSE;
++        pIOServiceGetMatchingService = dlsym(iokit, "IOServiceGetMatchingService");
++        pIOServiceMatching = dlsym(iokit, "IOServiceMatching");
++        pIORegistryEntryCreateCFProperty = dlsym(iokit, "IORegistryEntryCreateCFProperty");
++        pIOObjectRelease = dlsym(iokit, "IOObjectRelease");
++    }
++    if (!pIOServiceGetMatchingService || !pIOServiceMatching || !pIORegistryEntryCreateCFProperty || !pIOObjectRelease)
++        return FALSE;
++
++    if (!(domain = pIOServiceGetMatchingService(MACH_PORT_NULL, pIOServiceMatching("IOPMrootDomain"))))
++        return FALSE;
++    value = pIORegistryEntryCreateCFProperty(domain, CFSTR("AppleClamshellState"), kCFAllocatorDefault, 0);
++    pIOObjectRelease(domain);
++    closed = value && CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value);
++    if (value) CFRelease(value);
++    return closed;
++}
++
++static AudioDeviceID voice_microphone(AudioDeviceID default_id, const AudioDeviceID *devices, unsigned int count)
++{
++    const AudioObjectPropertyAddress addr =
++        { kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
++    unsigned int i;
++
++    if (!device_is_bluetooth(default_id) || lid_closed())
++        return default_id;
++
++    for (i = 0; i < count; i++)
++    {
++        UInt32 transport = 0, size = sizeof(transport);
++
++        if (AudioObjectGetPropertyData(devices[i], &addr, 0, NULL, &size, &transport) == noErr &&
++            transport == kAudioDeviceTransportTypeBuiltIn && device_alive(devices[i]) &&
++            device_has_channels(devices[i], eCapture))
++        {
++            TRACE("Default microphone %u is Bluetooth; using the built-in microphone %u\n",
++                  (unsigned int)default_id, (unsigned int)devices[i]);
++            return devices[i];
++        }
++    }
++    return default_id;
++}
++
+ static NTSTATUS unix_process_attach(void *args)
+ {
+ #ifdef _WIN64
+@@ -286,6 +487,9 @@ static NTSTATUS unix_get_endpoint_ids(void *args)
+         return STATUS_SUCCESS;
+     }
+ 
++    if(params->flow == eCapture && default_id != (AudioDeviceID)-1)
++        default_id = voice_microphone(default_id, devices, num_devices);
++
+     addr.mScope = get_scope(params->flow);
+     addr.mElement = 0;
+ 
+@@ -745,6 +949,7 @@ static NTSTATUS unix_create_stream(void *args)
+     stream->period = params->period;
+     stream->period_frames = muldiv(params->period, stream->fmt->nSamplesPerSec, 10000000);
+     stream->dev_id = dev_id_from_device(params->device);
++    stream->device_serial = __atomic_load_n(&device_listed_serial, __ATOMIC_ACQUIRE);
+     stream->flow = params->flow;
+     stream->flags = params->flags;
+     stream->share = params->share;
+@@ -1368,9 +1573,14 @@ static NTSTATUS unix_get_current_padding(void *args)
+     struct coreaudio_stream *stream = handle_get_stream(params->stream);
+ 
+     os_unfair_lock_lock(&stream->lock);
+-    *params->padding = get_current_padding_nolock(stream);
++    if(stream_device_gone(stream)){
++        *params->padding = 0;
++        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
++    }else{
++        *params->padding = get_current_padding_nolock(stream);
++        params->result = S_OK;
++    }
+     os_unfair_lock_unlock(&stream->lock);
+-    params->result = S_OK;
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -1381,7 +1591,9 @@ static NTSTATUS unix_start(void *args)
+ 
+     os_unfair_lock_lock(&stream->lock);
+ 
+-    if((stream->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK) && !stream->event)
++    if(stream_device_gone(stream))
++        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
++    else if((stream->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK) && !stream->event)
+         params->result = AUDCLNT_E_EVENTHANDLE_NOT_SET;
+     else if(stream->playing)
+         params->result = AUDCLNT_E_NOT_STOPPED;
+@@ -1480,6 +1692,11 @@ static NTSTATUS unix_get_render_buffer(void *args)
+ 
+     os_unfair_lock_lock(&stream->lock);
+ 
++    if(stream_device_gone(stream)){
++        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
++        goto end;
++    }
++
+     pad = get_current_padding_nolock(stream);
+ 
+     if(stream->getbuf_last){
+@@ -1582,6 +1799,13 @@ static NTSTATUS unix_get_capture_buffer(void *args)
+ 
+     os_unfair_lock_lock(&stream->lock);
+ 
++    *params->frames = 0;
++
++    if(stream_device_gone(stream)){
++        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
++        goto end;
++    }
++
+     if(stream->getbuf_last){
+         params->result = AUDCLNT_E_OUT_OF_ORDER;
+         goto end;
+@@ -1589,7 +1813,6 @@ static NTSTATUS unix_get_capture_buffer(void *args)
+ 
+     capture_resample(stream);
+ 
+-    *params->frames = 0;
+ 
+     if(stream->held_frames < stream->period_frames){
+         params->result = AUDCLNT_S_BUFFER_EMPTY;
+@@ -1663,6 +1886,13 @@ static NTSTATUS unix_get_next_packet_size(void *args)
+ 
+     os_unfair_lock_lock(&stream->lock);
+ 
++    if(stream_device_gone(stream)){
++        *params->frames = 0;
++        os_unfair_lock_unlock(&stream->lock);
++        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
++        return STATUS_SUCCESS;
++    }
++
+     capture_resample(stream);
+ 
+     if(stream->held_frames >= stream->period_frames)
+@@ -1835,6 +2065,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
+     unix_midi_in_message,
+     unix_midi_notify_wait,
+     unix_not_implemented,
++    unix_wait_device_change,
+ };
+ 
+ C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == funcs_count);
+@@ -2291,6 +2522,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
+     unix_wow64_midi_in_message,
+     unix_wow64_midi_notify_wait,
+     unix_not_implemented,
++    unix_wait_device_change,
+ };
+ 
+ C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == funcs_count);

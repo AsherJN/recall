@@ -42,6 +42,13 @@ import Foundation
         for odd in ["/private/tmp/folder","Some Error","code-with-dash","x\n","_leading",String(repeating:"a",count:65)] {
             precondition(SetupFailure(code:odd).reportCode=="other_setup_error",odd)
         }
-        print("PASS: native event stream, graphics progress, structured errors, concurrent operation exclusion, cancellation and resume, support report codes")
+        // REC-54: a folder macOS keeps locked gets its own message, never the generic one.
+        let generic=SetupFailure(code:"unexpected_setup_error").message
+        for code in SetupFailure.folderAccessCodes {
+            let failure=SetupFailure(code:code)
+            precondition(failure.isFolderAccess && failure.message != generic && failure.message.contains("permissions"),code)
+        }
+        precondition(!SetupFailure(code:"process_launch_failed").isFolderAccess && !SetupFailure(code:"").isFolderAccess)
+        print("PASS: native event stream, graphics progress, structured errors, concurrent operation exclusion, cancellation and resume, support report codes, folder access messages")
     }
 }

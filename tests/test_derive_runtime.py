@@ -277,6 +277,119 @@ class Controllers(unittest.TestCase):
             derive_runtime.package_dependency(linked)
 
 
+class Audio(unittest.TestCase):
+    """1.6: mmdevapi.dll and winecoreaudio.so, built together from wine-audio-devices.patch,
+    replace the base's; nothing else changes, and a second --audio derivation is refused."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ow2-audio-')
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name)
+        for name, value in (('ARTIFACTS', folder / 'artifacts'), ('NATIVE', folder / 'native')):
+            self.addCleanup(setattr, derive_runtime, name, getattr(derive_runtime, name))
+            setattr(derive_runtime, name, value)
+        source = folder / 'probe.c'
+        source.write_text('int probe(void) { return 1; }\n')
+
+        def library(path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-mmacosx-version-min=26.0', '-dynamiclib', source,
+                            '-install_name', '@rpath/winecoreaudio.so', '-Wl,-rpath,@loader_path',
+                            '-Wl,-rpath,@loader_path/../..', '-o', path], check=True)
+            return path
+        self.dll, self.so = derive_runtime.AUDIO_FILES['mmdevapi'], derive_runtime.AUDIO_FILES['winecoreaudio']
+        base = folder / 'artifacts/base'
+        library(base / self.so)
+        (base / self.dll).parent.mkdir(parents=True)
+        (base / self.dll).write_bytes(b'MZ base mmdevapi')
+        (base / 'bin').mkdir(parents=True)
+        (base / 'bin/wine').write_text('wine')
+        files = {name: {'sha256': derive_runtime.sha(base / name)} for name in ('bin/wine', self.dll, self.so)}
+        (base / 'runtime.json').write_text(json.dumps({'version': 'base', 'minimum_macos': '15.0', 'files': files}))
+        write_archive(base)
+        (folder / 'artifacts/base.tar.json').write_text(json.dumps({'version': 'base'}))
+        patch = 'patches/wine-audio-devices.patch'
+        so = library(folder / 'native/winecoreaudio/current/winecoreaudio.so')
+        subprocess.run(['/usr/bin/strip', '-x', so], check=True)  # differs from the base's file
+        dll = folder / 'native/mmdevapi/current/mmdevapi.dll'
+        dll.parent.mkdir(parents=True)
+        dll.write_bytes(b'MZ built mmdevapi')
+        for component, built, relative in (('winecoreaudio', so, self.so), ('mmdevapi', dll, self.dll)):
+            (built.parent / 'manifest.json').write_text(json.dumps(
+                {'component': component, 'sha256': derive_runtime.sha(built), 'base_sha256': files[relative]['sha256'],
+                 'patch': patch, 'patch_sha256': derive_runtime.sha(derive_runtime.ROOT / patch)}))
+        self.artifacts, self.dll_build = folder / 'artifacts', dll
+
+    def test_both_files_are_replaced_and_nothing_else(self):
+        derive_runtime.derive_audio('base', 'next', '-')
+        manifest = check_archive(self.artifacts / 'next.tar.gz')
+        base, next_ = self.artifacts / 'base', self.artifacts / 'next'
+        self.assertEqual(sorted(manifest['derived_from']['replaced']), sorted([self.dll, self.so]))
+        self.assertEqual((next_ / self.dll).read_bytes(), b'MZ built mmdevapi')
+        self.assertEqual((next_ / 'bin/wine').read_bytes(), (base / 'bin/wine').read_bytes())
+        self.assertNotEqual((next_ / self.so).read_bytes(), (base / self.so).read_bytes())
+        self.assertEqual(file_minimum(next_ / self.so)[1], parse_macos('15.0'))
+        # A later build of the same patch goes through --native.
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_audio('next', 'again', '-')
+        self.dll_build.write_bytes(b'MZ rebuilt mmdevapi')
+        record = json.loads((self.dll_build.parent / 'manifest.json').read_text())
+        (self.dll_build.parent / 'manifest.json').write_text(json.dumps(dict(record, sha256=derive_runtime.sha(self.dll_build))))
+        derive_runtime.derive_native('next', 'again', '-', ['mmdevapi'])
+        self.assertEqual((self.artifacts / 'again' / self.dll).read_bytes(), b'MZ rebuilt mmdevapi')
+
+    def test_a_stale_build_is_refused(self):
+        self.dll_build.write_bytes(b'MZ rebuilt without its manifest')
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_audio('base', 'next', '-')
+        self.assertFalse((self.artifacts / 'next').exists())
+
+
+class Services(unittest.TestCase):
+    """1.6 (REC-39): services.exe and both sechost.dll builds, from one patch, replace the base's."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ow2-services-')
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name)
+        for name, value in (('ARTIFACTS', folder / 'artifacts'), ('NATIVE', folder / 'native')):
+            self.addCleanup(setattr, derive_runtime, name, getattr(derive_runtime, name))
+            setattr(derive_runtime, name, value)
+        base = folder / 'artifacts/base'
+        for relative in [*derive_runtime.SERVICE_FILES.values(), 'bin/wine']:
+            (base / relative).parent.mkdir(parents=True, exist_ok=True)
+            (base / relative).write_bytes(b'MZ base ' + relative.encode())
+        files = {str(f.relative_to(base)): {'sha256': derive_runtime.sha(f)} for f in base.rglob('*') if f.is_file()}
+        (base / 'runtime.json').write_text(json.dumps({'version': 'base', 'minimum_macos': '15.0', 'files': files}))
+        write_archive(base)
+        (folder / 'artifacts/base.tar.json').write_text(json.dumps({'version': 'base'}))
+        patch = 'patches/wine-service-security.patch'
+        self.builds = {}
+        for component, relative in derive_runtime.SERVICE_FILES.items():
+            built = folder / 'native' / component / 'current' / Path(relative).name
+            built.parent.mkdir(parents=True)
+            built.write_bytes(b'MZ built ' + component.encode())
+            (built.parent / 'manifest.json').write_text(json.dumps(
+                {'component': component, 'sha256': derive_runtime.sha(built), 'base_sha256': files[relative]['sha256'],
+                 'patch': patch, 'patch_sha256': derive_runtime.sha(derive_runtime.ROOT / patch)}))
+            self.builds[component] = built
+        self.artifacts = folder / 'artifacts'
+
+    def test_the_three_files_are_replaced_and_nothing_else(self):
+        derive_runtime.derive_services('base', 'next', '-')
+        manifest = check_archive(self.artifacts / 'next.tar.gz')
+        self.assertEqual(sorted(manifest['derived_from']['replaced']), sorted(derive_runtime.SERVICE_FILES.values()))
+        self.assertEqual((self.artifacts / 'next/bin/wine').read_bytes(), b'MZ base bin/wine')
+        self.assertEqual((self.artifacts / 'next/lib/wine/i386-windows/sechost.dll').read_bytes(), b'MZ built sechost32')
+
+    def test_a_build_from_another_patch_is_refused(self):
+        record = json.loads((self.builds['sechost32'].parent / 'manifest.json').read_text())
+        record.update(patch='patches/wine-audio-devices.patch',
+                      patch_sha256=derive_runtime.sha(derive_runtime.ROOT / 'patches/wine-audio-devices.patch'))
+        (self.builds['sechost32'].parent / 'manifest.json').write_text(json.dumps(record))
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_services('base', 'next', '-')
+        self.assertFalse((self.artifacts / 'next').exists())
+
+
 class Microphone(unittest.TestCase):
     """1.3: the Wine loader and server gain the microphone entitlement, keeping their other
     entitlements and identifiers; the game app is made again from the loader and carries it too.

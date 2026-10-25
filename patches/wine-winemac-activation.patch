@@ -1,16 +1,33 @@
+diff --git a/dlls/winemac.drv/cocoa_app.h b/dlls/winemac.drv/cocoa_app.h
+index 4da4676..49a6d47 100644
+--- a/dlls/winemac.drv/cocoa_app.h
++++ b/dlls/winemac.drv/cocoa_app.h
+@@ -160,6 +160,7 @@ - (NSPoint) flippedMouseLocation:(NSPoint)point;
+     - (WineWindow*) frontWineWindow;
+     - (void) adjustWindowLevels;
+     - (void) updateFullscreenWindows;
++    - (void) updateCoveringPresentation;
+ 
+     - (BOOL) handleEvent:(NSEvent*)anEvent;
+     - (void) didSendEvent:(NSEvent*)anEvent;
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index ce6a702..4b5f308 100644
+index ce6a702..f95d5fc 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
-@@ -27,6 +27,7 @@
+@@ -25,8 +25,12 @@
+ #import "cocoa_v1.h"
+ #import "cocoa_icon_utils.h"
  #import <GameController/GameController.h>
++#import <IOKit/hid/IOHIDManager.h>
++#import <IOKit/hid/IOHIDUsageTables.h>
++#import <IOKit/hidsystem/IOHIDLib.h>
  #include <dlfcn.h>
  #include <os/lock.h>
 +#import <objc/runtime.h>
  
  #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
  
-@@ -52,14 +53,75 @@
+@@ -52,14 +56,78 @@
  static unsigned long long raw_last_motion;  /* uptime ns of the latest GCMouse motion */
  static const unsigned long long raw_silence = 250000000; /* then pointer events stand in */
  
@@ -22,7 +39,9 @@ index ce6a702..4b5f308 100644
 + * Overwatch hitch more in an October 2026 play-test (a blind test then found no
 + * difference), so test builds switch the parts one at a time
 + * (WINEMAC_INPUT_VARIANT, WINEMAC_INPUT_VARIANTS).  "precise" adds mouse
-+ * buttons from raw input to "fixed". */
++ * buttons from raw input to "fixed".  "classic" is Recall's Classic mouse
++ * setting: legacy's clicks and timing, as in Recall 1.4, with the stand-in and
++ * re-arming that end 1.4's dead camera after an app switch. */
 +enum
 +{
 +    INPUT_REAL_TIME   = 1,  /* moves carry the uptime of their delivery */
@@ -40,6 +59,7 @@ index ce6a702..4b5f308 100644
 +    { "keys", INPUT_KEYS_CACHED },
 +    { "clicks", INPUT_RAW_BUTTONS },
 +    { "precise", INPUT_REAL_TIME | INPUT_AT_ONCE | INPUT_FALLBACK | INPUT_RAW_BUTTONS },
++    { "classic", INPUT_FALLBACK },
 +};
 +enum { INPUT_LEGACY = 0, INPUT_FIXED = 3 };
 +static int input_variant;   /* index into input_variants */
@@ -86,7 +106,7 @@ index ce6a702..4b5f308 100644
      unsigned int sources;
  } raw_stats;
  
-@@ -69,9 +131,172 @@
+@@ -69,9 +137,246 @@
      unsigned long long mac_moves, mac_move_ns, posted_absolute, posted_relative, dropped_after_warp;
      unsigned long long warps, warp_ns, mouselook_moves, mouselook_posted, mouselook_enters, mouselook_exits;
      unsigned long long clicks, switches, pointer_ignored, pointer_fallback;
@@ -108,16 +128,23 @@ index ce6a702..4b5f308 100644
 + * raw_button posts the press after the motion pending before it; AppKit's copy,
 + * matched by its hardware time, is then dropped, and AppKit posts only what raw
 + * input did not.  Variants without raw buttons still note GCMouse's presses, to
-+ * measure how far ahead of AppKit they were. */
++ * measure how far ahead of AppKit they were.
++ *
++ * A HID copy may lead AppKit's hardware time by more: in the high-precision
++ * mouse's first in-game check (October 24, 2026) 3 of 106 and 7 of 78 AppKit
++ * changes found no HID copy within 2 ms and were posted too, mostly around
++ * the left clicks macOS answers with an activation.  Clicks of one button are
++ * far more than 25 ms apart, so HID's copy may lead by up to 25 ms. */
 +enum { RAW_BUTTONS = 5, BUTTON_RECENT = 32 };
 +enum { BUTTON_APPKIT, BUTTON_RAW, BUTTON_OBSERVED };
 +static const unsigned long long button_match_before = 2000000;  /* GCMouse's copy up to 2 ms before AppKit's hardware time */
++static const unsigned long long hid_match_before = 25000000;    /* HID's up to 25 ms before it */
 +static const unsigned long long button_match_after = 40000000;  /* or up to 40 ms after it */
 +struct button_change
 +{
-+    unsigned long long at;      /* uptime ns: GCMouse's arrival, or AppKit's hardware time */
++    unsigned long long at;      /* uptime ns: GCMouse's or HID's arrival, or AppKit's hardware time */
 +    long long sum_x, sum_y;     /* raw_sum_x/y at that moment */
-+    signed char button, pressed, from, matched;
++    signed char button, pressed, from, matched, hid;
 +};
 +/* Under mouselook_lock. */
 +static struct button_change button_recent[BUTTON_RECENT];
@@ -127,6 +154,10 @@ index ce6a702..4b5f308 100644
 +    unsigned long long raw_posted, raw_duplicates, appkit_posted, appkit_copies;
 +    unsigned long long gaps, gap_ns, gap_max_ns;    /* AppKit's copy arriving after GCMouse's */
 +    double gap_counts, gap_counts_max;              /* GCMouse motion in between */
++    unsigned long long appkit_copies_late_stamp;    /* HID copies AppKit stamped more than 2 ms after them */
++    unsigned long long appkit_unmatched;            /* AppKit changes posted while HID delivered */
++    long long appkit_unmatched_nearest_ns;          /* the latest one's nearest raw change of its kind, raw - AppKit */
++    BOOL appkit_unmatched_near;                     /* whether there was one */
 +} button_stats;
 +
 +/* GCMouse motion so far, Windows orientation, and its size (|dx| + |dy|) while
@@ -139,6 +170,69 @@ index ce6a702..4b5f308 100644
 +static double pointer_points_raw;
 +static NSTimeInterval raw_silent_rearm;
 +static char raw_mouse_input_key, raw_mouse_source_key;
++
++/* High-precision mouse (WINEMAC_RAW_SOURCE=hid, Recall's setting): raw input from
++ * the mouse's own HID reports through IOHIDManager instead of GCMouse.  In game,
++ * GCMouse loses reports: about a fifth of them after left clicks on macOS 27.0.1
++ * until the next app switch, all of them after an app switch on 26.6.2, and some
++ * while the main thread stalls (October 2026).  IOHID delivers every report about
++ * 0.1 ms after the mouse sends it, under Rosetta too.  Reading HID needs Input
++ * Monitoring: Recall asks for it when the player turns the setting on, and this
++ * process, which Recall started, has Recall's permission; without it, or without
++ * a mouse, GCMouse stays the source, and nothing here asks.  Devices with a mouse
++ * collection are opened, trackpads excepted (they keep pointer events, as with
++ * GCMouse), and only their X, Y and button elements are read: never keys.  IOHID
++ * also reports while another application is active, so its input counts only
++ * while raw input delivers (raw_on), and only while macOS gives this process any
++ * mouse input at all: a GCMouse report or an AppKit mouse event within the last
++ * hid_confirm_window.  With Game Mode on, macOS once sent neither for 5 s while
++ * the mouse moved and the application still counted as active (October 24,
++ * 2026), most likely routing the mouse to another application; HID input then
++ * would have turned the camera behind it.  Input after a quiet spell goes at
++ * once, and its first hid_confirm_window waits for no confirmation; then HID
++ * withholds input until macOS's arrives.  A release always follows a press HID
++ * delivered.  While it is the source, GCMouse's input is counted (hid_shadow),
++ * to compare, and not delivered.  raw_queue only, except where atomic. */
++enum { HID_DEVICES = 16, HID_SOURCE = 16 };
++static unsigned long long macos_mouse_last;     /* uptime ns of macOS's latest mouse input here; atomic */
++static const unsigned long long hid_confirm_window = 50000000;
++static unsigned long long hid_unconfirmed_since;    /* uptime ns: HID input without macOS's since then */
++static unsigned int hid_buttons_down;           /* buttons whose press HID delivered */
++static IOHIDManagerRef hid_manager;
++static int hid_access = -1;             /* IOHIDAccessType, -1 when the setting is off; atomic */
++static IOReturn hid_open_result = kIOReturnNotOpen;     /* atomic */
++static int hid_mice;                    /* mice open (not trackpads); atomic */
++static int hid_active;                  /* HID is the source: a mouse is open and has reported; atomic */
++static struct
++{
++    IOHIDDeviceRef device;              /* the manager keeps it while it is matched */
++    BOOL ignored;                       /* a trackpad */
++    uint64_t last_stamp;                /* the latest motion report's timestamp */
++} hid_devices[HID_DEVICES];
++static int hid_device_count;
++static double hid_pending_x, hid_pending_y;     /* this report's motion, HID orientation (Y down) */
++static int hid_pending_source;
++static BOOL hid_report_scheduled;
++static struct
++{
++    unsigned long long reports, buttons, withheld;
++} hid_stats;
++static struct
++{
++    unsigned long long moves, buttons;
++    double dx, dy;
++} hid_shadow;                           /* GCMouse's input while HID delivered */
++
++static const char* hid_access_name(void)
++{
++    switch (__atomic_load_n(&hid_access, __ATOMIC_RELAXED))
++    {
++        case -1: return "off";
++        case kIOHIDAccessTypeGranted: return "granted";
++        case kIOHIDAccessTypeDenied: return "denied";
++        default: return "unknown";
++    }
++}
 +
 +/* Test only.  A blind sequence of input variants (WINEMAC_INPUT_VARIANTS, a
 + * comma-separated list of input_variants names), each for
@@ -260,7 +354,7 @@ index ce6a702..4b5f308 100644
  
  /* Follows Wine's cursor, as Wine clips it, for placing the pointer when
   * mouselook ends.  Called with mouselook_lock held. */
-@@ -92,7 +317,8 @@ static void mouselook_move_position(int x, int y)
+@@ -92,7 +397,8 @@ static void mouselook_move_position(int x, int y)
  static void raw_flush(void)
  {
      int x = raw_pending_x, y = raw_pending_y;  /* truncation keeps the remainder */
@@ -270,7 +364,7 @@ index ce6a702..4b5f308 100644
  
      raw_flush_armed = FALSE;
      if (!x && !y) return;
-@@ -103,7 +329,10 @@ static void raw_flush(void)
+@@ -103,7 +409,10 @@ static void raw_flush(void)
          macdrv_event* event = macdrv_create_event(MOUSE_MOVED_RELATIVE, raw_window);
          event->mouse_moved.x = x;
          event->mouse_moved.y = y;
@@ -282,7 +376,7 @@ index ce6a702..4b5f308 100644
          [raw_window.queue postEvent:event];
          macdrv_release_event(event);
          mouselook_move_position(x, y);
-@@ -111,9 +340,14 @@ static void raw_flush(void)
+@@ -111,9 +420,14 @@ static void raw_flush(void)
          raw_pending_y -= y;
          raw_last_post = now;
          raw_stats.posted++;
@@ -297,7 +391,7 @@ index ce6a702..4b5f308 100644
      os_unfair_lock_unlock(&mouselook_lock);
  }
  
-@@ -121,31 +355,177 @@ static void raw_flush(void)
+@@ -121,31 +435,363 @@ static void raw_flush(void)
   * between accumulates and is never dropped. */
  static void raw_motion(float dx, float dy, unsigned int source)
  {
@@ -341,7 +435,7 @@ index ce6a702..4b5f308 100644
  
 +/* Notes a button change: posted to Wine by AppKit or raw input, or only seen by
 + * GCMouse.  Called with mouselook_lock held. */
-+static void button_remember(unsigned long long at, int button, int pressed, int from)
++static void button_remember(unsigned long long at, int button, int pressed, int from, BOOL hid)
 +{
 +    struct button_change* change = &button_recent[button_recent_next++ % BUTTON_RECENT];
 +
@@ -352,14 +446,16 @@ index ce6a702..4b5f308 100644
 +    change->pressed = pressed;
 +    change->from = from;
 +    change->matched = 0;
++    change->hid = hid;
 +}
 +
 +/* The other path's unmatched copy of a button change: for AppKit's change with
-+ * hardware time at, GCMouse's (posted or only seen); for GCMouse's arriving at
-+ * at, AppKit's.  GCMouse's copy arrives from button_match_before ahead of
-+ * AppKit's hardware time to button_match_after behind it.  The earliest wins,
-+ * so quick repeated clicks pair in order.  Called with mouselook_lock held. */
-+static struct button_change* button_copy(unsigned long long at, int button, int pressed, BOOL want_raw)
++ * hardware time at, raw input's (posted or only seen); for raw input's arriving
++ * at at (from HID if hid), AppKit's.  Raw input's copy arrives from
++ * button_match_before (hid_match_before for HID's) ahead of AppKit's hardware
++ * time to button_match_after behind it.  The earliest wins, so quick repeated
++ * clicks pair in order.  Called with mouselook_lock held. */
++static struct button_change* button_copy(unsigned long long at, int button, int pressed, BOOL want_raw, BOOL hid)
 +{
 +    struct button_change* best = NULL;
 +    unsigned int i;
@@ -373,10 +469,35 @@ index ce6a702..4b5f308 100644
 +        if ((change->from != BUTTON_APPKIT) != want_raw) continue;
 +        raw_at = want_raw ? change->at : at;
 +        hardware_at = want_raw ? at : change->at;
-+        if (raw_at + button_match_before < hardware_at || raw_at > hardware_at + button_match_after) continue;
++        if (raw_at + ((want_raw ? change->hid : hid) ? hid_match_before : button_match_before) < hardware_at ||
++            raw_at > hardware_at + button_match_after)
++            continue;
 +        if (!best || change->at < best->at) best = change;
 +    }
 +    return best;
++}
++
++/* Statistics: for an AppKit change posted while HID delivered, the nearest raw
++ * change of its kind, matched or not.  Called with mouselook_lock held. */
++static void button_note_unmatched(unsigned long long at, int button, int pressed)
++{
++    long long nearest = 0;
++    BOOL near = FALSE;
++    unsigned int i;
++
++    for (i = 0; i < BUTTON_RECENT; i++)
++    {
++        const struct button_change* change = &button_recent[i];
++        long long offset = (long long)change->at - (long long)at;
++
++        if (!change->at || change->from == BUTTON_APPKIT || change->button != button || change->pressed != pressed)
++            continue;
++        if (!near || llabs(offset) < llabs(nearest)) nearest = offset;
++        near = TRUE;
++    }
++    button_stats.appkit_unmatched++;
++    button_stats.appkit_unmatched_nearest_ns = nearest;
++    button_stats.appkit_unmatched_near = near;
 +}
 +
 +/* Whether raw input posted this change within the last 5 ms: the mouse's other
@@ -396,10 +517,11 @@ index ce6a702..4b5f308 100644
 +    return FALSE;
 +}
 +
-+/* A GCMouse button change.  With INPUT_RAW_BUTTONS it goes to Wine now, after the
-+ * motion pending before it, unless AppKit's copy got there first; the press is
-+ * where Wine's cursor is, as mouselook clicks are.  Otherwise it is only noted. */
-+static void raw_button(int button, BOOL pressed)
++/* A GCMouse or HID button change.  With INPUT_RAW_BUTTONS it goes to Wine now,
++ * after the motion pending before it, unless AppKit's copy got there first; the
++ * press is where Wine's cursor is, as mouselook clicks are.  Otherwise it is
++ * only noted. */
++static void raw_button(int button, BOOL pressed, BOOL hid)
 +{
 +    unsigned long long now = raw_clock();
 +    BOOL post = (input_flags() & INPUT_RAW_BUTTONS) != 0;
@@ -411,9 +533,9 @@ index ce6a702..4b5f308 100644
 +    os_unfair_lock_lock(&mouselook_lock);
 +    if (!post)
 +    {
-+        if (macdrv_input_stats_on) button_remember(now, button, pressed, BUTTON_OBSERVED);
++        if (macdrv_input_stats_on) button_remember(now, button, pressed, BUTTON_OBSERVED, hid);
 +    }
-+    else if ((copy = button_copy(now, button, pressed, FALSE)))
++    else if ((copy = button_copy(now, button, pressed, FALSE, hid)))
 +        copy->matched = 1;
 +    else if (!raw_window)
 +        ;   /* mouselook just ended: AppKit posts it */
@@ -431,10 +553,165 @@ index ce6a702..4b5f308 100644
 +        event->mouse_button.no_move = TRUE;
 +        [raw_window.queue postEvent:event];
 +        macdrv_release_event(event);
-+        button_remember(now, button, pressed, BUTTON_RAW);
++        button_remember(now, button, pressed, BUTTON_RAW, hid);
 +        button_stats.raw_posted++;
 +    }
 +    os_unfair_lock_unlock(&mouselook_lock);
++}
++
++/* A HID report's motion, as GCMouse would give it (Y up), once all of the report's
++ * values have arrived: they arrive together, so this runs right after them. */
++static void hid_report_done(void* context)
++{
++    double dx = hid_pending_x, dy = hid_pending_y;
++
++    hid_report_scheduled = FALSE;
++    hid_pending_x = hid_pending_y = 0;
++    if (dx || dy) raw_motion(dx, -dy, hid_pending_source);
++}
++
++/* Whether macOS gives this process mouse input, so that HID's may go to the game. */
++static BOOL hid_confirmed(void)
++{
++    unsigned long long now = raw_clock(), seen = __atomic_load_n(&macos_mouse_last, __ATOMIC_RELAXED);
++
++    if (seen + hid_confirm_window > now)
++    {
++        hid_unconfirmed_since = 0;
++        return TRUE;
++    }
++    if (!hid_unconfirmed_since || seen > hid_unconfirmed_since) hid_unconfirmed_since = now;
++    return now - hid_unconfirmed_since < hid_confirm_window;
++}
++
++static void hid_value(void* context, IOReturn result, void* sender, IOHIDValueRef value)
++{
++    IOHIDElementRef element = IOHIDValueGetElement(value);
++    IOHIDDeviceRef device = IOHIDElementGetDevice(element);
++    uint32_t page = IOHIDElementGetUsagePage(element), usage = IOHIDElementGetUsage(element);
++    CFIndex amount = IOHIDValueGetIntegerValue(value);
++    uint64_t stamp = IOHIDValueGetTimeStamp(value);
++    BOOL fresh;
++    int i;
++
++    for (i = 0; i < hid_device_count && hid_devices[i].device != device; i++);
++    if (i == hid_device_count || hid_devices[i].ignored || !__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE))
++        return;
++    if (page == kHIDPage_Button)
++    {
++        unsigned int bit;
++
++        hid_stats.buttons++;
++        if (usage < 1 || usage > RAW_BUTTONS) return;
++        bit = 1u << (usage - 1);
++        if (!(amount ? hid_confirmed() : (hid_buttons_down & bit) != 0))
++        {
++            hid_stats.withheld++;
++            return;
++        }
++        if (amount) hid_buttons_down |= bit;
++        else hid_buttons_down &= ~bit;
++        /* The motion before the change goes first, as GCMouse's does. */
++        hid_report_done(NULL);
++        raw_button(usage - 1, amount != 0, TRUE);
++        return;
++    }
++    if (page != kHIDPage_GenericDesktop || (usage != kHIDUsage_GD_X && usage != kHIDUsage_GD_Y) || !amount)
++        return;
++    fresh = stamp != hid_devices[i].last_stamp;
++    if (fresh)
++    {
++        hid_devices[i].last_stamp = stamp;
++        hid_stats.reports++;
++    }
++    if (!hid_confirmed())
++    {
++        if (fresh) hid_stats.withheld++;
++        return;
++    }
++    /* HID becomes the source with its first motion, not when a mouse opens: an
++       opened mouse that never reports leaves GCMouse delivering. */
++    if (!__atomic_load_n(&hid_active, __ATOMIC_RELAXED))
++        __atomic_store_n(&hid_active, 1, __ATOMIC_RELEASE);
++    if (usage == kHIDUsage_GD_X) hid_pending_x += amount;
++    else hid_pending_y += amount;
++    hid_pending_source = HID_SOURCE + i;
++    if (!hid_report_scheduled)
++    {
++        hid_report_scheduled = TRUE;
++        dispatch_async_f(raw_queue, NULL, hid_report_done);
++    }
++}
++
++static BOOL hid_is_trackpad(IOHIDDeviceRef device)
++{
++    CFTypeRef product = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductKey));
++    CFTypeRef builtIn = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDBuiltInKey));
++
++    if (builtIn && CFGetTypeID(builtIn) == CFBooleanGetTypeID() && CFBooleanGetValue(builtIn))
++        return TRUE;
++    return product && CFGetTypeID(product) == CFStringGetTypeID() &&
++           CFStringFind(product, CFSTR("Trackpad"), kCFCompareCaseInsensitive).location != kCFNotFound;
++}
++
++static void hid_device_matched(void* context, IOReturn result, void* sender, IOHIDDeviceRef device)
++{
++    int i, slot = -1;
++
++    for (i = 0; i < hid_device_count; i++)
++    {
++        if (hid_devices[i].device == device) return;
++        if (!hid_devices[i].device && slot < 0) slot = i;
++    }
++    if (slot < 0)
++    {
++        if (hid_device_count == HID_DEVICES) return;
++        slot = hid_device_count++;
++    }
++    hid_devices[slot].device = device;
++    hid_devices[slot].ignored = hid_is_trackpad(device);
++    hid_devices[slot].last_stamp = 0;
++    if (!hid_devices[slot].ignored) __atomic_add_fetch(&hid_mice, 1, __ATOMIC_RELAXED);
++}
++
++static void hid_device_removed(void* context, IOReturn result, void* sender, IOHIDDeviceRef device)
++{
++    int i;
++
++    for (i = 0; i < hid_device_count; i++)
++    {
++        if (hid_devices[i].device != device) continue;
++        hid_devices[i].device = NULL;
++        if (!hid_devices[i].ignored && __atomic_sub_fetch(&hid_mice, 1, __ATOMIC_RELAXED) == 0)
++            __atomic_store_n(&hid_active, 0, __ATOMIC_RELEASE);
++        return;
++    }
++}
++
++/* Opens the mice on raw_queue, so the game's main thread doesn't wait for it, if
++ * Recall has Input Monitoring. */
++static void hid_start(void)
++{
++    dispatch_async(raw_queue, ^{
++        NSDictionary* devices = @{@kIOHIDDeviceUsagePageKey: @(kHIDPage_GenericDesktop),
++                                  @kIOHIDDeviceUsageKey: @(kHIDUsage_GD_Mouse)};
++        NSArray* elements = @[@{@kIOHIDElementUsagePageKey: @(kHIDPage_GenericDesktop), @kIOHIDElementUsageKey: @(kHIDUsage_GD_X)},
++                              @{@kIOHIDElementUsagePageKey: @(kHIDPage_GenericDesktop), @kIOHIDElementUsageKey: @(kHIDUsage_GD_Y)},
++                              @{@kIOHIDElementUsagePageKey: @(kHIDPage_Button)}];
++        IOHIDAccessType access = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent);
++
++        __atomic_store_n(&hid_access, access, __ATOMIC_RELAXED);
++        if (access != kIOHIDAccessTypeGranted) return;
++        hid_manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
++        IOHIDManagerSetDeviceMatching(hid_manager, (CFDictionaryRef)devices);
++        IOHIDManagerSetInputValueMatchingMultiple(hid_manager, (CFArrayRef)elements);
++        IOHIDManagerRegisterDeviceMatchingCallback(hid_manager, hid_device_matched, NULL);
++        IOHIDManagerRegisterDeviceRemovalCallback(hid_manager, hid_device_removed, NULL);
++        IOHIDManagerRegisterInputValueCallback(hid_manager, hid_value, NULL);
++        IOHIDManagerSetDispatchQueue(hid_manager, raw_queue);
++        __atomic_store_n(&hid_open_result, IOHIDManagerOpen(hid_manager, kIOHIDOptionsTypeNone), __ATOMIC_RELAXED);
++        IOHIDManagerActivate(hid_manager);
++    });
 +}
 +
 +/* AppKit's button change: whether raw input posted it already.  If not, AppKit
@@ -450,7 +727,7 @@ index ce6a702..4b5f308 100644
 +    if (button < 0 || button >= RAW_BUTTONS || !raw_queue) return FALSE;
 +
 +    os_unfair_lock_lock(&mouselook_lock);
-+    if ((copy = button_copy(at, button, pressed, TRUE)))
++    if ((copy = button_copy(at, button, pressed, TRUE, FALSE)))
 +    {
 +        double counts = hypot(__atomic_load_n(&raw_sum_x, __ATOMIC_RELAXED) - copy->sum_x,
 +                              __atomic_load_n(&raw_sum_y, __ATOMIC_RELAXED) - copy->sum_y);
@@ -463,12 +740,15 @@ index ce6a702..4b5f308 100644
 +        if (gap > button_stats.gap_max_ns) button_stats.gap_max_ns = gap;
 +        button_stats.gap_counts += counts;
 +        if (counts > button_stats.gap_counts_max) button_stats.gap_counts_max = counts;
++        if (copy->hid && copy->at + button_match_before < at) button_stats.appkit_copies_late_stamp++;
 +    }
 +    if (posted)
 +        button_stats.appkit_copies++;
 +    else
 +    {
-+        button_remember(at, button, pressed, BUTTON_APPKIT);
++        if (__atomic_load_n(&hid_active, __ATOMIC_ACQUIRE) && __atomic_load_n(&raw_on, __ATOMIC_ACQUIRE))
++            button_note_unmatched(at, button, pressed);
++        button_remember(at, button, pressed, BUTTON_APPKIT, FALSE);
 +        if (input_flags() & INPUT_RAW_BUTTONS) button_stats.appkit_posted++;
 +    }
 +    os_unfair_lock_unlock(&mouselook_lock);
@@ -478,7 +758,7 @@ index ce6a702..4b5f308 100644
  
  /* Whether every frame of a cursor is fully transparent.  Some clients hide
   * the cursor by setting an empty image rather than no cursor. */
-@@ -823,6 +1203,7 @@ - (void) keyboardSelectionDidChange:(BOOL)force
+@@ -823,6 +1469,7 @@ - (void) keyboardSelectionDidChange:(BOOL)force
  
      - (void) keyboardSelectionDidChange
      {
@@ -486,7 +766,7 @@ index ce6a702..4b5f308 100644
          [self keyboardSelectionDidChange:NO];
      }
  
-@@ -838,6 +1219,8 @@ - (void) setKeyboardType:(CGEventSourceKeyboardType)newType
+@@ -838,6 +1485,8 @@ - (void) setKeyboardType:(CGEventSourceKeyboardType)newType
      - (void) enabledKeyboardInputSourcesChanged
      {
          macdrv_layout_list_needs_update = TRUE;
@@ -495,7 +775,65 @@ index ce6a702..4b5f308 100644
      }
  
      - (CGFloat) primaryScreenHeight
-@@ -1805,30 +2188,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
+@@ -1034,8 +1683,57 @@ - (void) adjustWindowLevels
+         [self adjustWindowLevels:[NSApp isActive]];
+     }
+ 
++    /* A borderless game: a window covering a whole screen outside a fullscreen Space (which
++       hides them itself) keeps the menu bar and the Dock out of its picture while this app is
++       active, as Windows keeps the taskbar under a borderless game.  Without macOS Game
++       Mode's own gaming session the menu bar otherwise covered the top 30 points of the
++       game (REC-45).  Only the options set here are taken back; another app's are its own.
++       WINEMAC_KEEP_MENU_BAR=1 leaves the menu bar and Dock alone, for comparison. */
++    - (void) updateCoveringPresentation
++    {
++        static int keep = -1;
++        static BOOL hidden;
++        const NSApplicationPresentationOptions ours = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
++        NSApplicationPresentationOptions options;
++        BOOL covering = FALSE;
++
++        if (keep < 0)
++        {
++            const char* value = getenv("WINEMAC_KEEP_MENU_BAR");
++            keep = value && *value == '1';
++        }
++        if (keep) return;
++        if ([NSApp isActive])
++        {
++            for (NSNumber* windowNumber in [NSWindow windowNumbersWithOptions:0])
++            {
++                WineWindow* window = (WineWindow*)[NSApp windowWithWindowNumber:[windowNumber integerValue]];
++                if ([window isKindOfClass:[WineWindow class]] && window.fullscreen && [window isVisible] &&
++                    ![window isMiniaturized])
++                {
++                    covering = TRUE;
++                    break;
++                }
++            }
++        }
++        options = [NSApp presentationOptions];
++        if (options & NSApplicationPresentationFullScreen) return;
++        if (covering && (options & ours) != ours)
++        {
++            hidden = TRUE;
++            options &= ~(NSApplicationPresentationAutoHideDock | NSApplicationPresentationAutoHideMenuBar);
++            [NSApp setPresentationOptions:options | ours];
++        }
++        else if (!covering && hidden)
++        {
++            hidden = FALSE;
++            [NSApp setPresentationOptions:options & ~ours];
++        }
++    }
++
+     - (void) updateFullscreenWindows
+     {
++        [self updateCoveringPresentation];
+         if (capture_displays_for_fullscreen && [NSApp isActive])
+         {
+             BOOL anyFullscreen = FALSE;
+@@ -1805,30 +2503,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
      {
          static int unscaled = -1;
          double scale = retina_on ? 2.0 : 1.0;
@@ -514,7 +852,7 @@ index ce6a702..4b5f308 100644
 +            // while, which raw input may have missed.
 +            if (macdrv_input_stats_on && ([anEvent deltaX] || [anEvent deltaY]) &&
 +                macdrv_stat_clock() - __atomic_load_n(&raw_last_report, __ATOMIC_RELAXED) > raw_unmatched_gap)
-             {
++            {
 +                cocoa_stats.pointer_unmatched++;
 +                cocoa_stats.pointer_unmatched_dx += fabs([anEvent deltaX]);
 +                cocoa_stats.pointer_unmatched_dy += fabs([anEvent deltaY]);
@@ -522,7 +860,7 @@ index ce6a702..4b5f308 100644
 +            BOOL live = raw_clock() - __atomic_load_n(&raw_last_motion, __ATOMIC_RELAXED) < raw_silence;
 +
 +            if (!(input_flags() & INPUT_FALLBACK) || live)
-+            {
+             {
 +                if (live) pointer_points_raw += fabs([anEvent deltaX]) + fabs([anEvent deltaY]);
                  mouselookWarpDelta = CGPointZero;
                  cocoa_stats.pointer_ignored++;
@@ -558,7 +896,15 @@ index ce6a702..4b5f308 100644
              scale /= macdrv_v1_canvas_scale(mouselookWindow);
  
          // deltaY is already top-down, like Windows.
-@@ -1880,6 +2290,32 @@ - (void) startRawInput
+@@ -1869,6 +2594,7 @@ - (void) startRawInput
+     {
+         const char* setting = getenv("WINEMAC_MOUSELOOK_RAW");
+         const char* interval = getenv("WINEMAC_MOUSELOOK_RAW_INTERVAL_US");
++        const char* source;
+         NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+         NSString* const* connected;
+         NSString* const* disconnected;
+@@ -1880,6 +2606,32 @@ - (void) startRawInput
              return;
          rawStarted = TRUE;
  
@@ -591,7 +937,17 @@ index ce6a702..4b5f308 100644
          framework = dlopen("/System/Library/Frameworks/GameController.framework/GameController", RTLD_LAZY | RTLD_LOCAL);
          mouseClass = NSClassFromString(@"GCMouse");
          connected = framework ? dlsym(framework, "GCMouseDidConnectNotification") : NULL;
-@@ -1920,22 +2356,98 @@ - (void) attachRawMouse:(GCMouse*)mouse
+@@ -1900,6 +2652,9 @@ - (void) startRawInput
+         dispatch_source_set_timer(raw_timer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
+         dispatch_resume(raw_timer);
+ 
++        if ((source = getenv("WINEMAC_RAW_SOURCE")) && !strcmp(source, "hid"))
++            hid_start();
++
+         rawMice = [[NSMutableArray alloc] init];
+         [center addObserverForName:*connected object:nil queue:[NSOperationQueue mainQueue]
+                         usingBlock:^(NSNotification* note){ [self attachRawMouse:note.object]; }];
+@@ -1920,22 +2675,116 @@ - (void) attachRawMouse:(GCMouse*)mouse
          // "Magic Trackpad").
          if ([mouse.vendorName rangeOfString:@"Trackpad" options:NSCaseInsensitiveSearch].location != NSNotFound)
              return;
@@ -610,7 +966,8 @@ index ce6a702..4b5f308 100644
 +
 +    /* Sets a mouse's raw input handlers, which run on raw_queue: its motion, and
 +       its buttons in AppKit's numbering (left, right, middle, then the side
-+       buttons, which Wine sends as X buttons). */
++       buttons, which Wine sends as X buttons).  While HID is the source, they
++       only count what GCMouse gave (hid_shadow). */
 +    - (void) armRawMouse:(GCMouse*)mouse source:(unsigned int)source
 +    {
 +        GCMouseInput* input = mouse.mouseInput;
@@ -620,6 +977,17 @@ index ce6a702..4b5f308 100644
          mouse.handlerQueue = raw_queue;
 -        mouse.mouseInput.mouseMovedHandler = ^(GCMouseInput* input, float deltaX, float deltaY){
 +        input.mouseMovedHandler = ^(GCMouseInput* profile, float deltaX, float deltaY){
++            __atomic_store_n(&macos_mouse_last, raw_clock(), __ATOMIC_RELAXED);
++            if (__atomic_load_n(&hid_active, __ATOMIC_ACQUIRE))
++            {
++                if (__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE))
++                {
++                    hid_shadow.moves++;
++                    hid_shadow.dx += fabs(deltaX);
++                    hid_shadow.dy += fabs(deltaY);
++                }
++                return;
++            }
              raw_motion(deltaX, deltaY, source);
          };
 +        [buttons addObject:input.leftButton ? (id)input.leftButton : [NSNull null]];
@@ -632,7 +1000,13 @@ index ce6a702..4b5f308 100644
 +
 +            if (buttons[i] == [NSNull null]) continue;
 +            ((GCControllerButtonInput*)buttons[i]).pressedChangedHandler =
-+                ^(GCControllerButtonInput* button, float value, BOOL pressed){ raw_button(number, pressed); };
++                ^(GCControllerButtonInput* button, float value, BOOL pressed){
++                    __atomic_store_n(&macos_mouse_last, raw_clock(), __ATOMIC_RELAXED);
++                    if (!__atomic_load_n(&hid_active, __ATOMIC_ACQUIRE))
++                        raw_button(number, pressed, FALSE);
++                    else if (__atomic_load_n(&raw_on, __ATOMIC_ACQUIRE))
++                        hid_shadow.buttons++;
++                };
 +        }
 +        objc_setAssociatedObject(mouse, &raw_mouse_input_key, input, OBJC_ASSOCIATION_RETAIN);
 +        objc_setAssociatedObject(mouse, &raw_mouse_source_key, [NSNumber numberWithUnsignedInt:source],
@@ -693,7 +1067,7 @@ index ce6a702..4b5f308 100644
      /* Raw input delivers to the mouselook window unless it is unavailable or
         switched off. */
      - (void) updateRawInput
-@@ -1951,19 +2463,22 @@ - (void) updateRawInput
+@@ -1951,19 +2800,22 @@ - (void) updateRawInput
          [previous release];
      }
  
@@ -722,7 +1096,7 @@ index ce6a702..4b5f308 100644
          }
          if (!enabled || !mouselook_allowed || [anEvent keyCode] != kVK_ANSI_M)
              return NO;
-@@ -1978,16 +2493,57 @@ - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
+@@ -1978,16 +2830,57 @@ - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
              return NO;
  
          mouselookHotkeyDown = TRUE;
@@ -782,21 +1156,26 @@ index ce6a702..4b5f308 100644
      /* WINEMAC_INPUT_STATS=<prefix>: one JSON line per second to
         <prefix>-<pid>.jsonl while this process is frontmost or has input
         activity. */
-@@ -2007,7 +2563,9 @@ - (void) startInputStats
+@@ -2007,7 +2900,11 @@ - (void) startInputStats
      - (void) reportInputStats:(NSTimer*)timer
      {
          struct macdrv_input_stats wine;
-+        char marks[sizeof(test_marks_ms) / sizeof(test_marks_ms[0]) * 24];
++        char marks[sizeof(test_marks_ms) / sizeof(test_marks_ms[0]) * 24], nearest[32];
          __block __typeof__(raw_stats) raw = {0};
++        __block __typeof__(hid_stats) hid = {0};
++        __block __typeof__(hid_shadow) shadow = {0};
 +        __typeof__(button_stats) buttons;
          const char* handler = !clipCursorHandler ? "none" :
              [clipCursorHandler isKindOfClass:[WineConfinementClipCursorHandler class]] ? "confinement" : "eventtap";
          WineWindow* key = (WineWindow*)[NSApp keyWindow];
-@@ -2016,6 +2574,11 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2016,6 +2913,14 @@ - (void) reportInputStats:(NSTimer*)timer
  #define TAKE(field) wine.field = __atomic_exchange_n(&macdrv_input_stats.field, 0, __ATOMIC_RELAXED)
          TAKE(moves_delivered); TAKE(deliver_ns); TAKE(setpos_calls); TAKE(setpos_fast); TAKE(setpos_ns);
          TAKE(setpos_max_ns); TAKE(getpos_calls); TAKE(getpos_ns); TAKE(clip_calls);
 +        TAKE(canvas_restores); TAKE(canvas_restores_suppressed); TAKE(canvas_restores_held); TAKE(canvas_fullscreen_held);
++        TAKE(minimize_waits); TAKE(minimize_after_exit); TAKE(minimize_timeouts); TAKE(minimize_returns);
++        TAKE(canvas_exits_held); TAKE(canvas_exits_resumed); TAKE(canvas_exits_applied); TAKE(minimize_held);
++        TAKE(minimize_recovered);
 +        TAKE(moved_relative); TAKE(moved_abs); TAKE(move_age_ms); TAKE(move_age_max_ms); TAKE(moved_x); TAKE(moved_y);
 +        TAKE(delivered_timed); TAKE(delivery_ns); TAKE(delivery_max_ns);
 +        TAKE(main_waits); TAKE(main_wait_ns); TAKE(main_wait_max_ns);
@@ -804,9 +1183,14 @@ index ce6a702..4b5f308 100644
  #undef TAKE
          wine.consumer_tid = macdrv_input_stats.consumer_tid;
          wine.setpos_tid = macdrv_input_stats.setpos_tid;
-@@ -2024,15 +2587,31 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2023,16 +2928,43 @@ - (void) reportInputStats:(NSTimer*)timer
+             dispatch_sync(raw_queue, ^{
                  raw = raw_stats;
                  memset(&raw_stats, 0, sizeof(raw_stats));
++                hid = hid_stats;
++                memset(&hid_stats, 0, sizeof(hid_stats));
++                shadow = hid_shadow;
++                memset(&hid_shadow, 0, sizeof(hid_shadow));
              });
 +        os_unfair_lock_lock(&mouselook_lock);
 +        buttons = button_stats;
@@ -823,9 +1207,16 @@ index ce6a702..4b5f308 100644
 +              raw.moves || buttons.raw_posted || buttons.gaps ||
 +              wine.moves_delivered || wine.setpos_calls || wine.getpos_calls || wine.clip_calls ||
 +              wine.canvas_restores || wine.canvas_restores_suppressed || wine.canvas_restores_held ||
-+              wine.canvas_fullscreen_held))
++              wine.canvas_fullscreen_held || wine.minimize_waits || wine.minimize_after_exit ||
++              wine.minimize_timeouts || wine.minimize_returns || wine.canvas_exits_held ||
++              wine.canvas_exits_resumed || wine.canvas_exits_applied || wine.minimize_held ||
++              wine.minimize_recovered))
              return;
  
++        if (buttons.appkit_unmatched && buttons.appkit_unmatched_near)
++            snprintf(nearest, sizeof(nearest), "%.3f", buttons.appkit_unmatched_nearest_ns / 1e6);
++        else
++            strcpy(nearest, "null");
 +        {
 +            int i, used = 0;
 +
@@ -837,7 +1228,7 @@ index ce6a702..4b5f308 100644
          fprintf(inputStatsFile,
                  "{\"schema\":1,\"unix_ms\":%.0f,\"pid\":%d,\"exe\":\"%s\",\"allowed\":%s,\"mode\":\"%s\","
                  "\"app_active\":%s,\"hidden\":%s,\"transparent\":%s,\"clipping\":%s,\"hidden_warp\":%s,\"clip_handler\":\"%s\","
-@@ -2041,12 +2620,30 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2041,12 +2973,37 @@ - (void) reportInputStats:(NSTimer*)timer
                  "\"posted_absolute\":%llu,\"posted_relative\":%llu,\"dropped_after_warp\":%llu,"
                  "\"warps\":%llu,\"warp_us\":%.1f,\"mouselook_moves\":%llu,\"mouselook_posted\":%llu,"
                  "\"mouselook_enters\":%llu,\"mouselook_exits\":%llu,\"clicks\":%llu,\"switches\":%llu,"
@@ -845,6 +1236,9 @@ index ce6a702..4b5f308 100644
                  "\"raw_started\":%s,\"raw_switched_off\":%s,\"raw_interval_us\":%.0f,\"raw_mice\":%lu,"
                  "\"raw_moves\":%llu,\"raw_posted\":%llu,\"raw_dx\":%.1f,\"raw_dy\":%.1f,\"raw_sources\":%d,"
 +                "\"raw_timing\":\"%s\",\"raw_posted_x\":%lld,\"raw_posted_y\":%lld,"
++                "\"raw_source\":\"%s\",\"hid_access\":\"%s\",\"hid_open\":\"0x%08x\",\"hid_mice\":%d,"
++                "\"hid_reports\":%llu,\"hid_buttons\":%llu,\"hid_shadow_moves\":%llu,\"hid_shadow_buttons\":%llu,"
++                "\"hid_shadow_dx\":%.1f,\"hid_shadow_dy\":%.1f,\"hid_withheld\":%llu,"
                  "\"pointer_ignored\":%llu,\"pointer_fallback\":%llu,"
 +                "\"pointer_unmatched\":%llu,\"pointer_unmatched_dx\":%.1f,\"pointer_unmatched_dy\":%.1f,"
                  "\"moves_delivered\":%llu,\"deliver_us\":%.1f,\"setpos_calls\":%llu,\"setpos_fast\":%llu,"
@@ -852,6 +1246,9 @@ index ce6a702..4b5f308 100644
 -                "\"clip_calls\":%llu,\"consumer_tid\":%u,\"setpos_tid\":%u}\n",
 +                "\"clip_calls\":%llu,\"canvas_restores\":%llu,\"canvas_restores_suppressed\":%llu,"
 +                "\"canvas_restores_held\":%llu,\"canvas_fullscreen_held\":%llu,"
++                "\"minimize_waits\":%llu,\"minimize_after_exit\":%llu,\"minimize_timeouts\":%llu,"
++                "\"minimize_returns\":%llu,\"canvas_exits_held\":%llu,\"canvas_exits_resumed\":%llu,"
++                "\"canvas_exits_applied\":%llu,\"minimize_held\":%llu,\"minimize_recovered\":%llu,"
 +                "\"moved_relative\":%llu,\"moved_x\":%lld,\"moved_y\":%lld,\"moved_abs\":%llu,"
 +                "\"move_age_ms_avg\":%.1f,\"move_age_ms_max\":%llu,"
 +                "\"variant\":\"%s\",\"stretch\":%d,\"marks\":%llu,\"marks_ms\":[%s],"
@@ -862,6 +1259,7 @@ index ce6a702..4b5f308 100644
 +                "\"main_lag_probes\":%llu,\"main_lag_ms_avg\":%.3f,\"main_lag_ms_max\":%.3f,"
 +                "\"main_lag_over_4ms\":%llu,\"main_lag_over_16ms\":%llu,"
 +                "\"raw_buttons\":%llu,\"raw_button_repeats\":%llu,\"appkit_buttons\":%llu,\"appkit_copies\":%llu,"
++                "\"appkit_copies_late_stamp\":%llu,\"appkit_unmatched\":%llu,\"appkit_unmatched_nearest_ms\":%s,"
 +                "\"click_gaps\":%llu,\"click_gap_ms_avg\":%.3f,\"click_gap_ms_max\":%.3f,"
 +                "\"click_counts_avg\":%.1f,\"click_counts_max\":%.1f,"
 +                "\"rearms\":%llu,\"inputs_replaced\":%llu,\"counts_per_point\":%.4f,"
@@ -869,7 +1267,7 @@ index ce6a702..4b5f308 100644
                  [[NSDate date] timeIntervalSince1970] * 1000, getpid(), mouselook_process,
                  mouselook_allowed ? "true" : "false",
                  __atomic_load_n(&raw_on, __ATOMIC_ACQUIRE) ? "raw" : mouselookWindow ? "mouselook" : "legacy",
-@@ -2058,14 +2655,36 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2058,14 +3015,43 @@ - (void) reportInputStats:(NSTimer*)timer
                  cocoa_stats.posted_absolute, cocoa_stats.posted_relative, cocoa_stats.dropped_after_warp,
                  cocoa_stats.warps, cocoa_stats.warp_ns / 1e3, cocoa_stats.mouselook_moves, cocoa_stats.mouselook_posted,
                  cocoa_stats.mouselook_enters, cocoa_stats.mouselook_exits, cocoa_stats.clicks, cocoa_stats.switches,
@@ -877,6 +1275,9 @@ index ce6a702..4b5f308 100644
                  raw_queue ? "true" : "false", rawSwitchedOff ? "true" : "false", raw_interval / 1e3,
                  (unsigned long)[rawMice count], raw.moves, raw.posted, raw.dx, raw.dy, __builtin_popcount(raw.sources),
 +                (input_flags() & INPUT_REAL_TIME) ? "fixed" : "legacy", raw.posted_x, raw.posted_y,
++                __atomic_load_n(&hid_active, __ATOMIC_ACQUIRE) ? "hid" : "gcmouse", hid_access_name(),
++                (unsigned int)__atomic_load_n(&hid_open_result, __ATOMIC_RELAXED), __atomic_load_n(&hid_mice, __ATOMIC_RELAXED),
++                hid.reports, hid.buttons, shadow.moves, shadow.buttons, shadow.dx, shadow.dy, hid.withheld,
                  cocoa_stats.pointer_ignored, cocoa_stats.pointer_fallback,
 +                cocoa_stats.pointer_unmatched, cocoa_stats.pointer_unmatched_dx, cocoa_stats.pointer_unmatched_dy,
                  wine.moves_delivered, wine.deliver_ns / 1e3, wine.setpos_calls, wine.setpos_fast,
@@ -884,6 +1285,9 @@ index ce6a702..4b5f308 100644
 -                wine.clip_calls, wine.consumer_tid, wine.setpos_tid);
 +                wine.clip_calls, wine.canvas_restores, wine.canvas_restores_suppressed,
 +                wine.canvas_restores_held, wine.canvas_fullscreen_held,
++                wine.minimize_waits, wine.minimize_after_exit, wine.minimize_timeouts, wine.minimize_returns,
++                wine.canvas_exits_held, wine.canvas_exits_resumed, wine.canvas_exits_applied, wine.minimize_held,
++                wine.minimize_recovered,
 +                wine.moved_relative, wine.moved_x, wine.moved_y, wine.moved_abs,
 +                wine.moved_relative ? (double)wine.move_age_ms / wine.moved_relative : 0.0, wine.move_age_max_ms,
 +                input_variants[__atomic_load_n(&input_variant, __ATOMIC_RELAXED)].name, test_stretch,
@@ -895,6 +1299,7 @@ index ce6a702..4b5f308 100644
 +                main_lag.probes, main_lag.probes ? main_lag.lag_ns / 1e6 / main_lag.probes : 0.0,
 +                main_lag.lag_max_ns / 1e6, main_lag.over_4ms, main_lag.over_16ms,
 +                buttons.raw_posted, buttons.raw_duplicates, buttons.appkit_posted, buttons.appkit_copies,
++                buttons.appkit_copies_late_stamp, buttons.appkit_unmatched, nearest,
 +                buttons.gaps, buttons.gaps ? buttons.gap_ns / 1e6 / buttons.gaps : 0.0, buttons.gap_max_ns / 1e6,
 +                buttons.gaps ? buttons.gap_counts / buttons.gaps : 0.0, buttons.gap_counts_max,
 +                cocoa_stats.rearms, cocoa_stats.inputs_replaced, [rawMice count] ? [self rawCountsPerPoint] : 0.0,
@@ -907,7 +1312,7 @@ index ce6a702..4b5f308 100644
      }
  
      - (BOOL) isKeyPressed:(uint16_t)keyCode
-@@ -2439,6 +3058,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+@@ -2439,6 +3425,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
                  unmatchedMouseDowns &= ~downMask;
              }
  
@@ -919,7 +1324,23 @@ index ce6a702..4b5f308 100644
              if (process)
              {
                  macdrv_event* event;
-@@ -2895,6 +3519,7 @@ - (void) setupObservations
+@@ -2664,6 +3655,7 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+         {
+             unsigned long long start = macdrv_stat_clock();
+ 
++            __atomic_store_n(&macos_mouse_last, raw_clock(), __ATOMIC_RELAXED);
+             [self handleMouseMove:anEvent];
+             ret = mouseCaptureWindow && ![windowsBeingDragged count];
+             if (macdrv_input_stats_on)
+@@ -2678,6 +3670,7 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+                  type == NSEventTypeRightMouseDown || type == NSEventTypeRightMouseUp ||
+                  type == NSEventTypeOtherMouseDown || type == NSEventTypeOtherMouseUp)
+         {
++            __atomic_store_n(&macos_mouse_last, raw_clock(), __ATOMIC_RELAXED);
+             [self handleMouseButton:anEvent];
+             ret = mouseCaptureWindow && ![windowsBeingDragged count];
+         }
+@@ -2895,6 +3888,7 @@ - (void) setupObservations
                      usingBlock:^(NSNotification *note){
              if (displaysTemporarilyUncapturedForDialog)
              {
@@ -927,7 +1348,18 @@ index ce6a702..4b5f308 100644
                  [self applicationDidBecomeActive:nil];
  
                  displaysTemporarilyUncapturedForDialog = FALSE;
-@@ -3238,6 +3863,7 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3235,9 +4229,18 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+         [self updateFullscreenWindows];
+         [self adjustWindowLevels:YES];
+ 
++        for (NSWindow* window in [NSApp windows])
++        {
++            if ([window isKindOfClass:[WineWindow class]])
++            {
++                [(WineWindow*)window finishMinimizeAfterExit:2];
++                [(WineWindow*)window restoreHeldMinimize];
++            }
++        }
          if (beenActive)
              [self unminimizeWindowIfNoneVisible];
          beenActive = TRUE;
@@ -935,7 +1367,7 @@ index ce6a702..4b5f308 100644
  
          // If a Wine process terminates abruptly while it has the display captured
          // and switched to a different resolution, Mac OS X will uncapture the
-@@ -3248,8 +3874,21 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3248,8 +4251,21 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          //
          // To solve this, we synthesize a displays-changed event whenever we're
          // activated.  This will provoke a re-synchronization of Wine's notion of
@@ -959,7 +1391,7 @@ index ce6a702..4b5f308 100644
  
          // The cursor probably moved while we were inactive.  Accumulated mouse
          // movement deltas are invalidated.  Make sure the next mouse move event
-@@ -3257,11 +3896,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3257,11 +4273,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          forceNextMouseMoveAbsolute = TRUE;
  
          [self updateMouselook];
@@ -973,7 +1405,7 @@ index ce6a702..4b5f308 100644
          [self sendDisplaysChanged:FALSE];
          [self adjustWindowLevels];
  
-@@ -3276,6 +3917,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
+@@ -3276,6 +4294,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
          macdrv_event* event;
          WineEventQueue* queue;
  
@@ -983,7 +1415,7 @@ index ce6a702..4b5f308 100644
          [self updateMouselook];
          [self invalidateGotFocusEvents];
          [self releasePressedKeys];
-@@ -3791,10 +4435,38 @@ void macdrv_quit_reply(int reply)
+@@ -3791,10 +4812,38 @@ void macdrv_quit_reply(int reply)
  bool macdrv_using_input_method(void)
  {
      __block bool ret;
@@ -1063,10 +1495,10 @@ index d2c478d..96c4a8d 100644
  }
  
 diff --git a/dlls/winemac.drv/cocoa_v1.h b/dlls/winemac.drv/cocoa_v1.h
-index a58f2f9..bc67bcf 100644
+index a58f2f9..45dd20f 100644
 --- a/dlls/winemac.drv/cocoa_v1.h
 +++ b/dlls/winemac.drv/cocoa_v1.h
-@@ -4,6 +4,8 @@
+@@ -4,11 +4,15 @@
  @class WineWindow;
  BOOL macdrv_v1_canvas_active(WineWindow *window);
  BOOL macdrv_v1_canvas_requested(WineWindow *window);
@@ -1075,43 +1507,121 @@ index a58f2f9..bc67bcf 100644
  void macdrv_v1_canvas_settled(WineWindow *window);
  void macdrv_v1_canvas_failed(WineWindow *window);
  void macdrv_v1_canvas_transition(WineWindow *window, BOOL entering);
-@@ -18,3 +20,10 @@
+ void macdrv_v1_canvas_layout(WineWindow *window);
+ void macdrv_v1_canvas_restore(WineWindow *window);
++/* Wine set a view's frame (macdrv_set_view_frame); remembered for the client view. */
++void macdrv_v1_canvas_view_frame(WineWindow *window, NSView *view, NSRect frame);
+ CGRect macdrv_v1_canvas_frame(WineWindow *window, CGRect physical);
+ CGPoint macdrv_v1_canvas_point(WineWindow *window, CGPoint point, BOOL to_physical);
+ /* Physical Wine pixels per logical canvas pixel; 1 when the canvas is inactive. */
+@@ -18,3 +22,13 @@
  void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused);
  /* Maps the canvas overlay presentation window to the Wine window that owns it. */
  NSWindow *macdrv_v1_canvas_owner(NSWindow *window);
 +/* The player switched to another app while the game was fullscreen: until they come
-+   back, the canvas window is neither restored nor put back into fullscreen. */
++   back, the canvas window is neither restored nor put back into fullscreen, and it
++   stays fullscreen when the game asks to leave. */
 +BOOL macdrv_v1_canvas_held(WineWindow *window);
 +void macdrv_v1_canvas_hold_restore(WineWindow *window);
 +void macdrv_v1_canvas_app_resigned(void);
 +void macdrv_v1_canvas_app_activated(void);
 +void macdrv_v1_canvas_deminiaturized(WineWindow *window);
++/* A DXMT_CANVAS_LOG line for a registered window (no effect without one). */
++void macdrv_v1_canvas_record(WineWindow *window, const char *event);
 diff --git a/dlls/winemac.drv/cocoa_v1.m b/dlls/winemac.drv/cocoa_v1.m
-index 6e1afe0..d1e7ad8 100644
+index 6e1afe0..9191e73 100644
 --- a/dlls/winemac.drv/cocoa_v1.m
 +++ b/dlls/winemac.drv/cocoa_v1.m
-@@ -29,6 +29,8 @@ @interface OWCanvas : NSObject {
+@@ -29,6 +29,20 @@ @interface OWCanvas : NSObject {
      NSRect savedMetalFrame;
      NSUInteger savedMetalAutoresizing;
      BOOL overlayActive;
 +    /* Wine restored the window while the player was away (see requestTransition). */
 +    BOOL restoreHeld;
++    /* The game asked to leave fullscreen while the player was away: the window stayed
++       fullscreen (see requestTransition). */
++    BOOL exitHeld;
++    unsigned exitHeldSerial;
++    /* Outside fullscreen the window is Wine's: the client view where Wine last put it
++     * (macdrv_set_view_frame) and the Metal layer as the translator last set it
++     * (macdrv_v1_update_metal_layer). Leaving fullscreen returns to these. */
++    NSRect wineClient;
++    BOOL wineClientKnown;
++    CGSize translatorDrawable;
++    CGFloat translatorScale;
++    BOOL translatorKnown;
  }
  @end
  @implementation OWCanvas
-@@ -128,6 +130,11 @@ BOOL macdrv_v1_canvas_requested(WineWindow *window) {
-     return state && state->requested;
+@@ -102,30 +116,62 @@ static void overlayWarmUp(NSRect content) {
+     return window ? objc_getAssociatedObject(window, &canvasKey) : nil;
  }
  
++static NSView *clientMetalView(OWCanvas *state);
++
++/* DXMT_CANVAS_LOG=<prefix>: one JSON line per canvas event, with the geometry that decides
++ * where the game's picture lands, all in points: the window's frame, the content view's
++ * frame and bounds (they differ only while the canvas scales), the client view the game
++ * draws into, its Metal view, and the Metal layer's drawable size and scale. */
+ static void record(WineWindow *window, const char *event) {
+     OWCanvas *state = canvas(window);
+     const char *prefix = getenv("DXMT_CANVAS_LOG");
+-    if (!state || !prefix || !*prefix || state->transitions++ >= 256) return;
++    if (!state || !prefix || !*prefix || state->transitions++ >= 4096) return;
+     char path[PATH_MAX];
+     if (snprintf(path, sizeof(path), "%s-%d.jsonl", prefix, getpid()) >= sizeof(path)) return;
+     FILE *file = fopen(path, "a");
+     if (!file) return;
+-    fprintf(file, "{\"schema\":1,\"native_pid\":%d,\"windows_pid\":%u,\"unix_ms\":%.0f,\"host_s\":%.9f,\"event\":\"%s\",\"active\":%s,"
+-        "\"logical\":[%.0f,%.0f],\"physical\":[%.0f,%.0f],\"focused\":%s}\n",
++    NSRect frame = window.frame, rootFrame = window.contentView.frame, rootBounds = window.contentView.bounds;
++    NSRect client = state->client.frame;
++    NSView *metal = state->overlayActive ? state->metalView : clientMetalView(state);
++    NSRect metalFrame = metal ? metal.frame : NSZeroRect;
++    CAMetalLayer *layer = [metal.layer isKindOfClass:CAMetalLayer.class] ? (CAMetalLayer *)metal.layer : nil;
++    fprintf(file, "{\"schema\":2,\"native_pid\":%d,\"windows_pid\":%u,\"unix_ms\":%.0f,\"host_s\":%.9f,\"event\":\"%s\",\"active\":%s,"
++        "\"requested\":%s,\"transitioning\":%s,\"logical\":[%.0f,%.0f],\"physical\":[%.0f,%.0f],\"focused\":%s,"
++        "\"fullscreen_style\":%s,\"backing\":%.2f,\"window\":[%.2f,%.2f,%.2f,%.2f],\"root_frame\":[%.2f,%.2f,%.2f,%.2f],"
++        "\"root_bounds\":[%.2f,%.2f,%.2f,%.2f],\"client\":[%.2f,%.2f,%.2f,%.2f],\"metal\":[%.2f,%.2f,%.2f,%.2f],"
++        "\"drawable\":[%.0f,%.0f],\"contents_scale\":%.3f}\n",
+         getpid(), state->windowsPid, NSDate.date.timeIntervalSince1970*1000, CACurrentMediaTime(), event, state->active ? "true" : "false",
++        state->requested ? "true" : "false", state->transitioning ? "true" : "false",
+         state->pixels.width, state->pixels.height, state->physical.size.width, state->physical.size.height,
+-        window.isKeyWindow ? "true" : "false");
++        window.isKeyWindow ? "true" : "false", (window.styleMask & NSWindowStyleMaskFullScreen) ? "true" : "false",
++        window.backingScaleFactor, frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
++        rootFrame.origin.x, rootFrame.origin.y, rootFrame.size.width, rootFrame.size.height,
++        rootBounds.origin.x, rootBounds.origin.y, rootBounds.size.width, rootBounds.size.height,
++        client.origin.x, client.origin.y, client.size.width, client.size.height,
++        metalFrame.origin.x, metalFrame.origin.y, metalFrame.size.width, metalFrame.size.height,
++        layer ? layer.drawableSize.width : 0, layer ? layer.drawableSize.height : 0, layer ? layer.contentsScale : 0);
+     fclose(file);
+ }
+ 
++void macdrv_v1_canvas_record(WineWindow *window, const char *event) {
++    if (canvas(window)) record(window, event);
++}
++
+ BOOL macdrv_v1_canvas_active(WineWindow *window) {
+     OWCanvas *state = canvas(window);
+     return state && state->active;
+ }
+ 
++/* A held exit counts as fullscreen still asked for: the window keeps its fullscreen
++ * behaviour (adjustFullScreenBehavior would otherwise take it out of fullscreen). */
+ BOOL macdrv_v1_canvas_requested(WineWindow *window) {
+     OWCanvas *state = canvas(window);
+-    return state && state->requested;
++    return state && (state->requested || state->exitHeld);
++}
++
 +BOOL macdrv_v1_canvas_owns_frame(WineWindow *window) {
 +    OWCanvas *state = canvas(window);
 +    return state && state->active && state->requested && !state->transitioning;
-+}
-+
+ }
+ 
  /* Drawable pool depth for the registered canvas layer. Two drawables force the
-  * translator's encoding thread to wait for the on-screen drawable to be released
-  * at every refresh; measured 2026-09-12 gameplay spent about 7% of wall time in
-@@ -278,13 +285,23 @@ static void updateLayers(WineWindow *window, OWCanvas *state) {
+@@ -278,26 +324,57 @@ static void updateLayers(WineWindow *window, OWCanvas *state) {
      double scale = state->active ? fmin(state->physical.size.width/state->pixels.width,
                                        state->physical.size.height/state->pixels.height) : 1.0;
      if (!isfinite(scale) || scale <= 0) return;
@@ -1128,16 +1638,55 @@ index 6e1afe0..d1e7ad8 100644
      for (NSView *view in state->client.subviews) {
          if (![view.layer isKindOfClass:CAMetalLayer.class]) continue;
          CAMetalLayer *layer = (CAMetalLayer *)view.layer;
-         // Render the final enlargement at display pixels, rather than leaving
-         // Core Animation to magnify a low-resolution finished drawable.
+-        // Render the final enlargement at display pixels, rather than leaving
+-        // Core Animation to magnify a low-resolution finished drawable.
 -        layer.drawableSize = CGSizeMake(llround(state->pixels.width*scale), llround(state->pixels.height*scale));
 -        layer.contentsScale = (retina_on ? 2.0 : 1.0)*scale;
-+        layer.drawableSize = CGSizeMake(llround(state->pixels.width*pixelScale), llround(state->pixels.height*pixelScale));
-+        layer.contentsScale = retina*pixelScale;
++        if (state->active) {
++            // Render the final enlargement at display pixels, rather than leaving
++            // Core Animation to magnify a low-resolution finished drawable.
++            layer.drawableSize = CGSizeMake(llround(state->pixels.width*pixelScale), llround(state->pixels.height*pixelScale));
++            layer.contentsScale = retina*pixelScale;
++        } else if (state->translatorKnown) {
++            // A window draws at the game's own size (its swapchain), never at the canvas's.
++            layer.drawableSize = state->translatorDrawable;
++            layer.contentsScale = state->translatorScale;
++        }
          layer.maximumDrawableCount = canvasDrawableCount();
      }
      if (state->active) overlayAttach(window, state);
-@@ -321,6 +338,7 @@ void macdrv_v1_canvas_layout(WineWindow *window) {
+     overlayLayout(window, state);
+ }
+ 
++/* The translator has just set the layer's drawable size and scale for its swapchain:
++ * remembered for when the window is not fullscreen, replaced by the canvas's while it is. */
+ __attribute__((visibility("default"))) void macdrv_v1_update_metal_layer(void *object) {
++    CAMetalLayer *layer = (CAMetalLayer *)object;
+     for (WineWindow *window in NSApp.windows) {
+         OWCanvas *state = canvas(window);
+-        if (!state || !state->active) continue;
++        if (!state) continue;
++        BOOL client = NO;
+         for (NSView *view in state->client.subviews)
+-            if (view.layer == object) { updateLayers(window, state); return; }
+-        if (state->metalView && state->metalView.layer == object) { overlayLayout(window, state); return; }
++            if (view.layer == object) client = YES;
++        BOOL overlay = state->metalView && state->metalView.layer == object;
++        if (!client && !overlay) continue;
++        if ([layer isKindOfClass:CAMetalLayer.class]) {
++            state->translatorDrawable = layer.drawableSize;
++            state->translatorScale = layer.contentsScale;
++            state->translatorKnown = YES;
++        }
++        if (state->active) {
++            if (client) updateLayers(window, state);
++            else overlayLayout(window, state);
++        }
++        return;
+     }
+ }
+ 
+@@ -321,6 +398,7 @@ void macdrv_v1_canvas_layout(WineWindow *window) {
      [state->client setAutoresizingMask:NSViewNotSizable];
      [state->client setFrame:NSMakeRect(0, 0, logical.width, logical.height)];
      [window setBackgroundColor:NSColor.blackColor];
@@ -1145,15 +1694,51 @@ index 6e1afe0..d1e7ad8 100644
      updateLayers(window, state);
      state->layingOut = NO;
  }
-@@ -342,6 +360,7 @@ void macdrv_v1_canvas_restore(WineWindow *window) {
-     [window.contentView setBounds:state->savedBounds];
-     [state->client setFrame:state->savedClientFrame];
-     [state->client setAutoresizingMask:state->savedAutoresizing];
-+    [window.contentView setNeedsDisplay:YES]; // draw the Win32 surface again
-     updateLayers(window, state);
+@@ -333,16 +411,38 @@ CGRect macdrv_v1_canvas_frame(WineWindow *window, CGRect physical) {
+     return physical;
  }
  
-@@ -365,6 +384,7 @@ void macdrv_v1_canvas_transition(WineWindow *window, BOOL entering) {
++/* Wine's own layout, as if the window had never been fullscreen: the content view unscaled
++ * (bounds = its frame) and the client view where Wine last put it. Wine never scales the
++ * content view, and it may have resized the window since fullscreen began: a game leaving
++ * fullscreen for a window sets its window's size during the exit animation. Restoring the
++ * bounds and client frame saved on entry left the picture scaled by the old size over the
++ * new one, too small with gray around it or too large and cropped, while clicks followed
++ * Wine's rectangle; each toggle compounded it (REC-45). */
++static void windowLayout(WineWindow *window, OWCanvas *state) {
++    NSView *root = window.contentView;
++    NSSize size = root.frame.size;
++    [root setBounds:NSMakeRect(0, 0, size.width, size.height)];
++    [state->client setFrame:state->wineClientKnown ? state->wineClient : state->savedClientFrame];
++    [state->client setAutoresizingMask:state->savedAutoresizing];
++}
++
+ void macdrv_v1_canvas_restore(WineWindow *window) {
+     OWCanvas *state = canvas(window);
+     if (!state || state->active) return;
+     overlayDetach(window, state);
+-    // Cocoa resizes bounds proportionally during the exit animation. Restore
+-    // after the final physical frame, otherwise each toggle compounds scaling.
+-    [window.contentView setBounds:state->savedBounds];
+-    [state->client setFrame:state->savedClientFrame];
+-    [state->client setAutoresizingMask:state->savedAutoresizing];
++    // After the final physical frame: during the exit animation Cocoa resizes the
++    // saved bounds proportionally, which keeps the picture filling the window.
++    windowLayout(window, state);
++    [window.contentView setNeedsDisplay:YES]; // draw the Win32 surface again
+     updateLayers(window, state);
++    record(window, "restored");
++}
++
++void macdrv_v1_canvas_view_frame(WineWindow *window, NSView *view, NSRect frame) {
++    OWCanvas *state = canvas(window);
++    if (!state || view != state->client) return;
++    state->wineClient = frame;
++    state->wineClientKnown = YES;
+ }
+ 
+ void macdrv_v1_canvas_transition(WineWindow *window, BOOL entering) {
+@@ -365,6 +465,7 @@ void macdrv_v1_canvas_transition(WineWindow *window, BOOL entering) {
          [state->client setFrame:state->savedClientFrame];
          [state->client setAutoresizingMask:state->savedAutoresizing];
          [window setBackgroundColor:state->savedBackground];
@@ -1161,7 +1746,7 @@ index 6e1afe0..d1e7ad8 100644
      }
      record(window, entering ? "enter_fullscreen" : "exit_fullscreen");
  }
-@@ -425,6 +445,25 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+@@ -425,6 +526,25 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
      record(window, focused ? "focus_gained" : "focus_lost");
  }
  
@@ -1187,7 +1772,7 @@ index 6e1afe0..d1e7ad8 100644
  /* Explicit bridge registration is per-window and preserves the existing
   * macdrv_functions ABI. Older drivers report unavailable through dlsym. */
  __attribute__((visibility("default"))) unsigned
-@@ -433,8 +472,7 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+@@ -433,8 +553,7 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
      dispatch_block_t configure = ^{
          NSView *view = (NSView *)client_view;
          WineWindow *window = (WineWindow *)macdrv_v1_canvas_owner(view.window);
@@ -1197,9 +1782,17 @@ index 6e1afe0..d1e7ad8 100644
          OWCanvas *state = canvas(window);
          if (!state) {
              state = [[[OWCanvas alloc] init] autorelease];
-@@ -445,10 +483,15 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+@@ -444,11 +563,23 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+         if (state->client != view) {
              [state->client release];
              state->client = [view retain];
++            state->wineClientKnown = NO;
++            state->translatorKnown = NO;
++        }
++        // Where Wine has put a new client view (macdrv_set_view_frame keeps it after this).
++        if (!state->wineClientKnown && !state->active) {
++            state->wineClient = view.frame;
++            state->wineClientKnown = YES;
          }
 +        NSSize previous = state->pixels;
          state->pixels = NSMakeSize(width,height);
@@ -1213,7 +1806,7 @@ index 6e1afe0..d1e7ad8 100644
          record(window, "registered");
          result = 1;
      };
-@@ -457,6 +500,36 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
+@@ -457,6 +588,47 @@ void macdrv_v1_canvas_focus(WineWindow *window, BOOL focused) {
      return result;
  }
  
@@ -1230,14 +1823,25 @@ index 6e1afe0..d1e7ad8 100644
 + * Windows never gives exclusive fullscreen to a background window either. So
 + * once the player has left the game in fullscreen, its canvas window keeps the
 + * state they left it in until they come back (Cmd-Tab, the Dock, a click);
-+ * what the game asked for meanwhile is applied then. Leaving fullscreen stays
-+ * allowed. The game's first fullscreen at launch is unaffected: it still comes
-+ * to the front when it is ready. */
++ * what the game asked for meanwhile is applied then. The game's first fullscreen
++ * at launch is unaffected: it still comes to the front when it is ready.
++ *
++ * Leaving fullscreen is held too, as a native fullscreen app stays in its Space
++ * when the player switches away. Played out, the game's exit and minimize took
++ * macOS's leave-fullscreen animation and the Dock, and its return the Dock and
++ * the enter-fullscreen animation: 1.2-1.5 s from the return to fullscreen again
++ * (REC-55, the owner's LG, 2026-10-24). With the window still fullscreen, the
++ * game's minimize is held as well (setMacDrvState:): the game believes it is
++ * minimized and stops drawing, and on return it is restored and activated
++ * (restoreHeldMinimize) and asks for the fullscreen it already has. If it does
++ * not within EXIT_HELD_GRACE of the return, the exit is applied then. */
 +static BOOL playerAway;
 +
 +BOOL macdrv_v1_canvas_held(WineWindow *window) {
 +    return playerAway && !NSApp.isActive && canvas(window) != nil;
 +}
++
++static const double EXIT_HELD_GRACE = 3.0;
 +
 +void macdrv_v1_canvas_hold_restore(WineWindow *window) {
 +    OWCanvas *state = canvas(window);
@@ -1250,13 +1854,21 @@ index 6e1afe0..d1e7ad8 100644
  /* Called only through the explicit DXMT bridge. Never changes display modes.
   * Cocoa transitions are asynchronous; requests received during an animation
   * are reconciled by the did-enter/did-exit callbacks, without blocking Wine. */
-@@ -464,11 +537,58 @@ static void requestTransition(WineWindow *window, OWCanvas *state) {
+@@ -464,17 +636,85 @@ static void requestTransition(WineWindow *window, OWCanvas *state) {
      if (state->transitioning) return;
      BOOL actual = (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
      if (actual == state->requested) return;
 +    if (state->requested && macdrv_v1_canvas_held(window)) {
 +        MACDRV_STAT_ADD(canvas_fullscreen_held, 1);
 +        record(window, "fullscreen_held");
++        return;
++    }
++    if (!state->requested && actual && state->active && (state->exitHeld || macdrv_v1_canvas_held(window))) {
++        if (!state->exitHeld) {
++            state->exitHeld = YES;
++            MACDRV_STAT_ADD(canvas_exits_held, 1);
++            record(window, "exit_held");
++        }
 +        return;
 +    }
      [window setCollectionBehavior:(window.collectionBehavior | NSWindowCollectionBehaviorFullScreenPrimary)
@@ -1274,6 +1886,18 @@ index 6e1afe0..d1e7ad8 100644
 +        if (window.isMiniaturized) [window deminiaturize:nil];
 +    }
 +    if (window.isMiniaturized) return;
++    if (state->exitHeld && !state->requested) {
++        // The game, restored by the return, asks for fullscreen again (macdrv_v1_set_fullscreen).
++        unsigned serial = ++state->exitHeldSerial;
++        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(EXIT_HELD_GRACE * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
++            if (state->exitHeldSerial != serial || !state->exitHeld || state->requested || !NSApp.isActive) return;
++            state->exitHeld = NO;
++            MACDRV_STAT_ADD(canvas_exits_applied, 1);
++            record(window, "exit_applied");
++            requestTransition(window, state);
++        });
++        return;
++    }
 +    requestTransition(window, state);
 +}
 +
@@ -1309,7 +1933,14 @@ index 6e1afe0..d1e7ad8 100644
  void macdrv_v1_canvas_settled(WineWindow *window) {
      OWCanvas *state = canvas(window);
      if (!state) return;
-@@ -496,11 +616,23 @@ void macdrv_v1_canvas_failed(WineWindow *window) {
+     state->transitioning = NO;
+     if (state->active) overlayAttach(window, state);
+     else overlayDetach(window, state);
++    record(window, "settled");
+     // A green-button transition remains supported. Reconciliation is needed
+     // only when a subsequent explicit game request arrived during animation.
+     if (state->requested != state->active) requestTransition(window, state);
+@@ -496,11 +736,30 @@ void macdrv_v1_canvas_failed(WineWindow *window) {
          NSView *view = (NSView *)client_view;
          WineWindow *window = (WineWindow *)macdrv_v1_canvas_owner(view.window);
          OWCanvas *state = [window isKindOfClass:WineWindow.class] ? canvas(window) : nil;
@@ -1328,18 +1959,36 @@ index 6e1afe0..d1e7ad8 100644
 +        NSSize previous = state->pixels;
 +        if (supported) state->pixels = NSMakeSize(width, height);
          state->requested = enable != 0;
++        BOOL resumed = state->requested && state->exitHeld;
++        if (resumed) {
++            state->exitHeld = NO;
++            MACDRV_STAT_ADD(canvas_exits_resumed, 1);
++            record(window, "exit_resumed");
++        }
          if (state->active) macdrv_v1_canvas_layout(window);
-+        // A new resolution in fullscreen: Wine's rectangle follows the canvas.
-+        if (!NSEqualSizes(previous, state->pixels) && macdrv_v1_canvas_owns_frame(window))
++        // A new resolution in fullscreen, or fullscreen kept through the player's absence:
++        // Wine's rectangle follows the canvas.
++        if ((resumed || !NSEqualSizes(previous, state->pixels)) && macdrv_v1_canvas_owns_frame(window))
 +            [window postCanvasFrame];
          requestTransition(window, state);
          record(window, enable ? "game_fullscreen_requested" : "game_windowed_requested");
          result = 1;
 diff --git a/dlls/winemac.drv/cocoa_window.h b/dlls/winemac.drv/cocoa_window.h
-index 23ecd6d..b4520d0 100644
+index 23ecd6d..15c13f4 100644
 --- a/dlls/winemac.drv/cocoa_window.h
 +++ b/dlls/winemac.drv/cocoa_window.h
-@@ -71,6 +71,9 @@ @interface WineWindow : NSPanel <NSWindowDelegate>
+@@ -35,6 +35,10 @@ @interface WineWindow : NSPanel <NSWindowDelegate>
+     BOOL maximized;
+     BOOL fullscreen;
+     BOOL pendingMinimize;
++    BOOL minimizeAfterExit;
++    unsigned int minimizeAfterExitSerial;
++    BOOL minimizeHeld;
++    BOOL wineMinimized;
+     BOOL pendingOrderOut;
+     BOOL savedVisibleState;
+     BOOL drawnSinceShown;
+@@ -71,6 +75,9 @@ @interface WineWindow : NSPanel <NSWindowDelegate>
      NSRect nonFullscreenFrame;
      NSTimeInterval enteredFullScreenTime;
  
@@ -1349,7 +1998,15 @@ index 23ecd6d..b4520d0 100644
      int draggingPhase;
      NSPoint dragStartPosition;
      NSPoint dragWindowStartPosition;
-@@ -110,6 +113,9 @@ - (WineWindow*) ancestorWineWindow;
+@@ -105,11 +112,17 @@ - (void) updateFullscreen;
+ 
+     - (void) postKeyEvent:(NSEvent *)theEvent;
+     - (void) postBroughtForwardEvent;
++    - (void) finishMinimizeAfterExit:(int)reason;
++    - (void) restoreHeldMinimize;
++    - (void) restoreMinimizedOnScreen;
+ 
+     - (WineWindow*) ancestorWineWindow;
  
      - (void) updateForCursorClipping;
  
@@ -1360,7 +2017,7 @@ index 23ecd6d..b4520d0 100644
  
  @end
 diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
-index 94fe12a..65fe916 100644
+index 94fe12a..401eaa9 100644
 --- a/dlls/winemac.drv/cocoa_window.m
 +++ b/dlls/winemac.drv/cocoa_window.m
 @@ -528,6 +528,16 @@ - (void) updateLayer
@@ -1380,7 +2037,132 @@ index 94fe12a..65fe916 100644
          imageRect = layer.bounds;
          imageRect.origin.x *= layer.contentsScale;
          imageRect.origin.y *= layer.contentsScale;
-@@ -1372,9 +1382,16 @@ - (void) setMacDrvState:(const struct macdrv_window_state*)state
+@@ -1282,8 +1292,73 @@ - (void) postDidUnminimizeEvent
+                                forWindow:self];
+ 
+         event = macdrv_create_event(WINDOW_DID_UNMINIMIZE, self);
++        event->window_did_unminimize.app_active = [NSApp isActive];
+         [queue postEvent:event];
+         macdrv_release_event(event);
++        /* Wine restores it: nothing is left for restoreMinimizedOnScreen. */
++        wineMinimized = FALSE;
++    }
++
++    /* The minimize Wine asked for while the window left fullscreen in the background
++       (setMacDrvState:): reason 0 when the exit animation ended, 1 at the time limit,
++       2 when the application became active.  A player who is back before the window
++       reached the Dock gets the game restored instead (WINDOW_DID_UNMINIMIZE, which
++       also activates it). */
++    - (void) finishMinimizeAfterExit:(int)reason
++    {
++        if (!minimizeAfterExit) return;
++        minimizeAfterExit = FALSE;
++
++        if ([NSApp isActive])
++        {
++            MACDRV_STAT_ADD(minimize_returns, 1);
++            [self postDidUnminimizeEvent];
++            return;
++        }
++        if (reason == 1)
++            MACDRV_STAT_ADD(minimize_timeouts, 1);
++        else
++            MACDRV_STAT_ADD(minimize_after_exit, 1);
++        if ([self isMiniaturized]) return;
++        if (![self isVisible])
++        {
++            pendingMinimize = TRUE;
++            return;
++        }
++        [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
++        [super miniaturize:nil];
++    }
++
++    /* The minimize Wine asked for while the window stayed fullscreen in the background
++       (setMacDrvState:, cocoa_v1.m): once the player is back, the game is restored, which
++       also activates it (WINDOW_DID_UNMINIMIZE), and its window takes the keyboard at
++       once rather than when AppKit gets round to it. */
++    - (void) restoreHeldMinimize
++    {
++        if (!minimizeHeld || !([NSApp isActive] || [self isKeyWindow])) return;
++        minimizeHeld = FALSE;
++        MACDRV_STAT_ADD(minimize_returns, 1);
++        [self postDidUnminimizeEvent];
++        if (!self.disabled && !self.noForeground && ![self isKeyWindow])
++            [self makeFocused:NO];
++    }
++
++    /* The window becomes key while Wine has it minimized: a held minimize (above), or one
++       macOS never carried out.  In builds 77 and 78 a leave-fullscreen animation that never
++       ended or turned back left Overwatch minimized for Wine but on screen, and Wine refused
++       it focus on every return until it quit: frozen picture, no input (REC-55).  The player
++       is at the window, so it is restored.  A minimize still waiting for the animation is
++       answered by the activation (finishMinimizeAfterExit:). */
++    - (void) restoreMinimizedOnScreen
++    {
++        if (minimizeHeld)
++        {
++            [self restoreHeldMinimize];
++            return;
++        }
++        if (!wineMinimized || [self isMiniaturized] || minimizeAfterExit) return;
++        MACDRV_STAT_ADD(minimize_recovered, 1);
++        [self postDidUnminimizeEvent];
+     }
+ 
+     - (void) sendResizeStartQuery
+@@ -1339,9 +1414,49 @@ - (void) setMacDrvState:(const struct macdrv_window_state*)state
+             macdrv_event_mask discard = event_mask_for_type(WINDOW_DID_UNMINIMIZE);
+ 
+             pendingMinimize = FALSE;
++            minimizeAfterExit = FALSE;
++            minimizeHeld = FALSE;
++            wineMinimized = state->minimized;
+             if (state->minimized && ![self isMiniaturized])
+             {
+-                if ([self wouldBeVisible])
++                /* In fullscreen, Overwatch leaves fullscreen and minimizes itself when the
++                   player switches away.  Miniaturized during the exit animation, the window
++                   came back out of the Dock when the animation ended (about 1.4 s), and Wine
++                   restored and activated the game while another app was in front: with an
++                   app on another display the game clipped the cursor in the background, and
++                   with Game Mode on macOS made it frontmost again (REC-55, 2026-10-24).
++                   Minimize once the animation is over, as an order-out waits for it.  On one
++                   switch in three the animation's end never arrived (or came unnoticed) and
++                   the game, minimized for Wine but still on screen, froze when the player
++                   came back: a time limit applies the minimize anyway, as before, and a
++                   return first restores the game (finishMinimizeAfterExit:).
++                   Where the canvas keeps the window fullscreen while the player is away
++                   (cocoa_v1.m), there is no animation: the minimize is held until they come
++                   back, and then answered with a restore (restoreHeldMinimize). */
++                if (macdrv_v1_canvas_held(self) && ([self styleMask] & NSWindowStyleMaskFullScreen) &&
++                    !exitingFullScreen && !enteringFullScreen)
++                {
++                    minimizeHeld = TRUE;
++                    MACDRV_STAT_ADD(minimize_held, 1);
++                    discard |= event_mask_for_type(WINDOW_BROUGHT_FORWARD) |
++                               event_mask_for_type(WINDOW_GOT_FOCUS) |
++                               event_mask_for_type(WINDOW_LOST_FOCUS);
++                }
++                else if (exitingFullScreen && ![NSApp isActive] && !stage_manager_enabled())
++                {
++                    unsigned int serial = ++minimizeAfterExitSerial;
++
++                    minimizeAfterExit = TRUE;
++                    MACDRV_STAT_ADD(minimize_waits, 1);
++                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++                        if (minimizeAfterExitSerial == serial)
++                            [self finishMinimizeAfterExit:1];
++                    });
++                    discard |= event_mask_for_type(WINDOW_BROUGHT_FORWARD) |
++                               event_mask_for_type(WINDOW_GOT_FOCUS) |
++                               event_mask_for_type(WINDOW_LOST_FOCUS);
++                }
++                else if ([self wouldBeVisible])
+                 {
+                     if (([self styleMask] & NSWindowStyleMaskFullScreen) || stage_manager_enabled())
+                     {
+@@ -1372,9 +1487,16 @@ - (void) setMacDrvState:(const struct macdrv_window_state*)state
              }
              else if (!state->minimized && [self isMiniaturized])
              {
@@ -1400,7 +2182,37 @@ index 94fe12a..65fe916 100644
              }
  
              if (discard)
-@@ -2073,7 +2090,8 @@ - (void) checkTransparency
+@@ -1915,17 +2037,19 @@ - (void) updateFullscreen
+     {
+         NSRect contentRect = [self contentRectForFrameRect:self.wine_fractionalFrame];
+         BOOL nowFullscreen = !([self styleMask] & NSWindowStyleMaskFullScreen) && screen_covered_by_rect(contentRect, [NSScreen screens]);
++        WineApplicationController* controller = [WineApplicationController sharedController];
+ 
+         if (nowFullscreen != fullscreen)
+         {
+-            WineApplicationController* controller = [WineApplicationController sharedController];
+-
+             fullscreen = nowFullscreen;
+             if ([self isVisible] && [self isOnActiveSpace])
+                 [controller updateFullscreenWindows];
+ 
+             [controller adjustWindowLevels];
+         }
++        // Also when nothing changed here: a window covering the screen as it leaves a
++        // fullscreen Space was skipped while the Space lasted.
++        [controller updateCoveringPresentation];
+     }
+ 
+     - (void) setFrameAndWineFrame:(NSRect)frame
+@@ -2005,6 +2129,7 @@ - (void) setFrameFromWine:(NSRect)contentRect
+                 }
+ 
+                 [self setFrameAndWineFrame:frame];
++                macdrv_v1_canvas_record(self, "wine_frame");
+                 if ([self preventResizing])
+                 {
+                     [self setContentMinSize:contentRect.size];
+@@ -2073,7 +2198,8 @@ - (void) checkTransparency
          {
              self.shapeChangedSinceLastDraw = TRUE;
              [[self contentView] setNeedsDisplay:YES];
@@ -1410,7 +2222,7 @@ index 94fe12a..65fe916 100644
              [self setOpaque:YES];
          }
          else if ([self isOpaque] && self.needsTransparency)
-@@ -2216,6 +2234,53 @@ - (void) postWindowFrameChanged:(NSRect)frame fullscreen:(BOOL)isFullscreen resi
+@@ -2216,6 +2342,53 @@ - (void) postWindowFrameChanged:(NSRect)frame fullscreen:(BOOL)isFullscreen resi
          macdrv_release_event(event);
      }
  
@@ -1464,7 +2276,16 @@ index 94fe12a..65fe916 100644
      - (void) updateForCursorClipping
      {
          [self adjustFeaturesForState];
-@@ -3078,6 +3143,7 @@ - (void)windowDidDeminiaturize:(NSNotification *)notification
+@@ -3037,6 +3210,8 @@ - (void)windowDidBecomeKey:(NSNotification *)notification
+ 
+         /* CrossOver Hack #18896: don't return here based on causing_becomeKeyWindow */
+ 
++        /* Ahead of WINDOW_GOT_FOCUS, which Wine refuses a minimized window. */
++        [self restoreMinimizedOnScreen];
+         [controller windowGotFocus:self];
+         macdrv_v1_canvas_focus(self, TRUE);
+     }
+@@ -3078,6 +3253,7 @@ - (void)windowDidDeminiaturize:(NSNotification *)notification
  
          [self windowDidResize:notification];
          [self checkWineDisplayLink];
@@ -1472,7 +2293,7 @@ index 94fe12a..65fe916 100644
      }
  
      - (void) windowDidEndLiveResize:(NSNotification *)notification
-@@ -3096,6 +3162,8 @@ - (void) windowDidEnterFullScreen:(NSNotification*)notification
+@@ -3096,6 +3272,8 @@ - (void) windowDidEnterFullScreen:(NSNotification*)notification
          enteredFullScreenTime = [[NSProcessInfo processInfo] systemUptime];
          macdrv_v1_canvas_layout(self);
          macdrv_v1_canvas_settled(self);
@@ -1481,7 +2302,28 @@ index 94fe12a..65fe916 100644
          if (pendingOrderOut)
              [self doOrderOut];
      }
-@@ -3631,7 +3699,11 @@ void macdrv_set_cocoa_window_frame(macdrv_window w, const CGRect* new_frame)
+@@ -3109,6 +3287,7 @@ - (void) windowDidExitFullScreen:(NSNotification*)notification
+         macdrv_v1_canvas_settled(self);
+         if (pendingOrderOut)
+             [self doOrderOut];
++        [self finishMinimizeAfterExit:0];
+     }
+ 
+     - (void) windowDidFailToEnterFullScreen:(NSWindow*)window
+@@ -3130,6 +3309,12 @@ - (void) windowDidFailToExitFullScreen:(NSWindow*)window
+         [self windowDidResize:nil];
+         if (pendingOrderOut)
+             [self doOrderOut];
++        else if (minimizeAfterExit)
++        {
++            /* Still fullscreen, which can't be minimized: as when Wine asks then. */
++            minimizeAfterExit = FALSE;
++            [self postDidUnminimizeEvent];
++        }
+     }
+ 
+     - (void)windowDidMiniaturize:(NSNotification *)notification
+@@ -3631,7 +3816,11 @@ void macdrv_set_cocoa_window_frame(macdrv_window w, const CGRect* new_frame)
      WineWindow* window = (WineWindow*)w;
  
      OnMainThread(^{
@@ -1494,7 +2336,23 @@ index 94fe12a..65fe916 100644
          else [window setFrameFromWine:NSRectFromCGRect(cgrect_mac_from_win(*new_frame))];
      });
  }
-@@ -4188,6 +4260,7 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
+@@ -3914,6 +4103,7 @@ void macdrv_set_view_frame(macdrv_view v, CGRect rect)
+         NSRect newFrame = NSRectFromCGRect(cgrect_mac_from_win(rect));
+         NSRect oldFrame = [view frame];
+ 
++        macdrv_v1_canvas_view_frame((WineWindow *)view.window, view, newFrame);
+         if (!NSEqualRects(oldFrame, newFrame))
+         {
+             [[view superview] setNeedsDisplayInRect:oldFrame];
+@@ -3926,6 +4116,7 @@ void macdrv_set_view_frame(macdrv_view v, CGRect rect)
+             [view setNeedsDisplay:YES];
+             [view wine_setBackingSize:(int[2]){ 0 }];
+             [(WineWindow*)[view window] updateForGLSubviews];
++            macdrv_v1_canvas_record((WineWindow *)view.window, "view_frame");
+         }
+         macdrv_v1_canvas_layout((WineWindow *)view.window);
+     });
+@@ -4188,6 +4379,7 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
              NSUInteger localFlags = flags;
              CGEventRef c;
              NSEvent* event;
@@ -1502,7 +2360,7 @@ index 94fe12a..65fe916 100644
  
              window.himc = himc;
              fix_device_modifiers_by_generic(&localFlags);
-@@ -4202,7 +4275,9 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
+@@ -4202,7 +4394,9 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
              CFRelease(c);
  
              window.commandDone = FALSE;
@@ -1607,6 +2465,19 @@ index 2663eb8..0be985b 100644
      free_display_mode_descriptor(desc);
  
      for (i = 0; !modes_has_16bpp && i < count; i++)
+diff --git a/dlls/winemac.drv/event.c b/dlls/winemac.drv/event.c
+index d9ae30b..2d4a330 100644
+--- a/dlls/winemac.drv/event.c
++++ b/dlls/winemac.drv/event.c
+@@ -461,7 +461,7 @@ void macdrv_handle_event(const macdrv_event *event)
+         macdrv_window_did_minimize(hwnd);
+         break;
+     case WINDOW_DID_UNMINIMIZE:
+-        macdrv_window_did_unminimize(hwnd);
++        macdrv_window_did_unminimize(hwnd, event);
+         break;
+     case WINDOW_DRAG_BEGIN:
+         macdrv_window_drag_begin(hwnd, event);
 diff --git a/dlls/winemac.drv/gdi.c b/dlls/winemac.drv/gdi.c
 index 7342494..c031291 100644
 --- a/dlls/winemac.drv/gdi.c
@@ -1701,16 +2572,39 @@ index 7342494..c031291 100644
      .dc_funcs.pGetDeviceGammaRamp = macdrv_GetDeviceGammaRamp,
      .dc_funcs.pSetDeviceGammaRamp = macdrv_SetDeviceGammaRamp,
      .dc_funcs.priority = GDI_PRIORITY_GRAPHICS_DRV,
+diff --git a/dlls/winemac.drv/macdrv.h b/dlls/winemac.drv/macdrv.h
+index 5735ff7..48ccc7b 100644
+--- a/dlls/winemac.drv/macdrv.h
++++ b/dlls/winemac.drv/macdrv.h
+@@ -233,7 +233,7 @@ extern BOOL macdrv_SystemParametersInfo(UINT action, UINT int_param, void *ptr_p
+ extern void macdrv_window_maximize_requested(HWND hwnd);
+ extern void macdrv_window_minimize_requested(HWND hwnd);
+ extern void macdrv_window_did_minimize(HWND hwnd);
+-extern void macdrv_window_did_unminimize(HWND hwnd);
++extern void macdrv_window_did_unminimize(HWND hwnd, const macdrv_event *event);
+ extern void macdrv_window_brought_forward(HWND hwnd);
+ extern void macdrv_window_resize_ended(HWND hwnd);
+ extern void macdrv_window_restore_requested(HWND hwnd, const macdrv_event *event);
 diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
-index 4d4efaa..aee3568 100644
+index 4d4efaa..59fc37f 100644
 --- a/dlls/winemac.drv/macdrv_cocoa.h
 +++ b/dlls/winemac.drv/macdrv_cocoa.h
-@@ -249,12 +249,35 @@ static inline CGPoint cgpoint_win_from_mac(CGPoint point)
+@@ -249,12 +249,45 @@ static inline CGPoint cgpoint_win_from_mac(CGPoint point)
      unsigned long long setpos_calls, setpos_fast, setpos_ns, setpos_max_ns;
      unsigned long long getpos_calls, getpos_ns;
      unsigned long long clip_calls;
 +    unsigned long long canvas_restores, canvas_restores_suppressed;
 +    unsigned long long canvas_restores_held, canvas_fullscreen_held;
++    /* Minimizes asked for while leaving fullscreen (REC-55): waited for, applied when the
++       animation ended or after the time limit, or answered with a restore because the
++       player was back first. */
++    unsigned long long minimize_waits, minimize_after_exit, minimize_timeouts, minimize_returns;
++    /* Fullscreen kept while the player was away: the game's requests to leave it held,
++       its minimizes held with it, and on return whether the game asked for fullscreen
++       again (resumed) or the held exit was applied. */
++    unsigned long long canvas_exits_held, canvas_exits_resumed, canvas_exits_applied, minimize_held;
++    /* Windows minimized for Wine but on screen and made key, restored (restoreMinimizedOnScreen). */
++    unsigned long long minimize_recovered;
 +    /* Relative moves Wine sent on: their counts (signed sums and magnitude)
 +       and how old their Windows event time was, in milliseconds. */
 +    unsigned long long moved_relative, moved_abs, move_age_ms, move_age_max_ms;
@@ -1741,7 +2635,7 @@ index 4d4efaa..aee3568 100644
  static inline unsigned long long macdrv_stat_clock(void)
  {
      return macdrv_input_stats_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
-@@ -419,6 +442,7 @@ static inline unsigned long long macdrv_stat_clock(void)
+@@ -419,6 +452,7 @@ static inline unsigned long long macdrv_stat_clock(void)
              int             y;
              bool            drag;
              unsigned long   time_ms;
@@ -1749,6 +2643,16 @@ index 4d4efaa..aee3568 100644
          }                                           mouse_moved;
          struct {
              int             x_scroll;
+@@ -453,6 +487,9 @@ static inline unsigned long long macdrv_stat_clock(void)
+             bool    in_resize;
+             bool    skip_size_move_loop;
+         }                                           window_frame_changed;
++        struct {
++            bool    app_active;     /* the application was active when the window came back */
++        }                                           window_did_unminimize;
+         struct {
+             unsigned long   serial;
+             void           *tried_windows;
 diff --git a/dlls/winemac.drv/mouse.c b/dlls/winemac.drv/mouse.c
 index 59f891e..40d60d1 100644
 --- a/dlls/winemac.drv/mouse.c
@@ -1783,4 +2687,42 @@ index 59f891e..40d60d1 100644
 +        }
      }
  }
+ 
+diff --git a/dlls/winemac.drv/window.c b/dlls/winemac.drv/window.c
+index 6e09399..8bde010 100644
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -1987,12 +1987,12 @@ void macdrv_window_did_minimize(HWND hwnd)
+  *
+  * Handler for WINDOW_DID_UNMINIMIZE events.
+  */
+-void macdrv_window_did_unminimize(HWND hwnd)
++void macdrv_window_did_unminimize(HWND hwnd, const macdrv_event *event)
+ {
+     struct macdrv_win_data *data;
+     unsigned int style;
+ 
+-    TRACE("win %p\n", hwnd);
++    TRACE("win %p app_active %d\n", hwnd, event->window_did_unminimize.app_active);
+ 
+     if (!(data = get_win_data(hwnd))) return;
+     if (!data->minimized) goto done;
+@@ -2005,6 +2005,18 @@ void macdrv_window_did_unminimize(HWND hwnd)
+         TRACE("restoring win %p/%p\n", hwnd, data->cocoa_window);
+         release_win_data(data);
+         send_message(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
++        /* Back in the active application (Cmd-Tab, the Dock), the restored window is
++           the one the player came back to.  Its own restore asks for the foreground
++           without the right to it, which wineserver refuses when another process had
++           input more recently, and leaves the activation to the WINDOW_GOT_FOCUS that
++           follows (REC-55: some Cmd-Tab returns left Overwatch ignoring the mouse until
++           Esc-Esc, or the keyboard).  Activate it here, right after the restore. */
++        if (event->window_did_unminimize.app_active && can_window_become_foreground(hwnd) &&
++            !(NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_MINIMIZE) && hwnd != NtUserGetForegroundWindow())
++        {
++            TRACE("setting foreground window to %p\n", hwnd);
++            NtUserSetForegroundWindowInternal(hwnd);
++        }
+         return;
+     }
  

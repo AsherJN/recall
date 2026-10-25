@@ -58,34 +58,42 @@ import Foundation
 
         model.setAdvanced(.koreanSupport,true)
         precondition(model.busy,"The worker must be reserved synchronously")
-        precondition(!model.koreanSupport,"Do not show an unpersisted choice")
-        var launched=false
-        model.perform { launched=true }
+        precondition(model.koreanSupport,"The choice shows at once")
+        var launchCalls:[String]?
+        model.perform { launchCalls=calls() }
         model.setAdvanced(.koreanSupport,false)
         model.setAdvanced(.proxyAutoDetect,true)
-        try await wait { !model.busy }
-        precondition(!launched && !model.koreanSupport && model.proxyAutoDetect)
-        precondition(calls()==["korean-support:True","korean-support:False","network:True"])
+        precondition(!model.koreanSupport && model.proxyAutoDetect,"Each choice shows at once")
+        try await wait { launchCalls != nil && !model.busy }
+        precondition(launchCalls==["korean-support:True","korean-support:False","network:True"],"Play waits for every queued save")
+        precondition(!model.koreanSupport && model.proxyAutoDetect)
 
         // Keep a choice queued behind another operation, including the interval
         // between that operation releasing busy and the queued task waking.
         model.busy=true
         model.setAdvanced(.koreanSupport,true)
+        precondition(model.koreanSupport,"A choice queued behind another operation shows at once")
         model.busy=false
-        model.perform { launched=true }
-        try await wait { model.koreanSupport && !model.busy }
-        precondition(!launched)
+        launchCalls=nil
+        model.perform { launchCalls=calls() }
+        try await wait { launchCalls != nil && !model.busy }
+        precondition(launchCalls?.last=="korean-support:True" && model.koreanSupport)
 
         try Data().write(to:root.appendingPathComponent("fail-setting"))
+        launchCalls=nil
         model.setAdvanced(.koreanSupport,false)
+        precondition(!model.koreanSupport,"The choice shows at once, before the save fails")
+        model.perform { launchCalls=calls() }
         try await wait { !model.busy }
-        precondition(model.koreanSupport && !model.notice.isEmpty,"Failed writes must keep the saved choice")
+        try await Task.sleep(for:.milliseconds(300))
+        precondition(model.koreanSupport && !model.notice.isEmpty,"A failed write snaps back to the saved choice")
+        precondition(launchCalls == nil,"Play doesn't start after a failed save")
         try fm.removeItem(at:root.appendingPathComponent("fail-setting"))
 
         try Data().write(to:root.appendingPathComponent("fail-status"))
         model.setAdvanced(.koreanSupport,false)
         try await wait { !model.busy }
         precondition(!model.koreanSupport && !model.notice.isEmpty,"A failed refresh must not undo a successful write")
-        print("PASS: immediate launch exclusion, queued opposite choices, busy-operation handoff, failed writes and failed status reads")
+        print("PASS: choices show at once, Play waits for queued saves, busy-operation handoff, failed writes snap back and stop Play, failed status reads")
     }
 }

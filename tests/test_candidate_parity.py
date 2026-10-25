@@ -73,12 +73,18 @@ class CandidateParity(unittest.TestCase):
             actual=render_values(self.path.read_text())
             for key,value in render_values(legacy).items():self.assertEqual(actual[key],value)
 
-    def test_reapply_corrects_game_rewritten_fullscreen_mode(self):
+    def test_the_games_display_mode_stays_until_reset(self):
+        # REC-45: Borderless or Windowed chosen in Overwatch is the player's, not drift to undo.
         self.fixture('[Render.13]\n')
         self.call('display','--height','1200')
-        self.path.write_text(self.path.read_text().replace('FullscreenWindowEnabled = "0"','FullscreenWindowEnabled = "1"'))
+        text=self.path.read_text().replace('WindowMode = "0"','WindowMode = "1"')
+        self.path.write_text(text.replace('WindowedFullscreen = "0"','WindowedFullscreen = "1"'))
         self.call('display','--height','1200')
-        self.assertEqual(render_values(self.path.read_text())['FullscreenWindowEnabled'],'0')
+        values=render_values(self.path.read_text())
+        self.assertEqual((values['WindowMode'],values['WindowedFullscreen']),('1','1'))
+        self.call('display','--height','1200','--reset','1')
+        values=render_values(self.path.read_text())
+        self.assertEqual((values['WindowMode'],values['WindowedFullscreen']),('0','0'))
 
     def test_ambiguous_settings_rejected_without_changes(self):
         original='[Render.13]\nDynamicRenderScale = "0"\nDynamicRenderScale = "1"\n'

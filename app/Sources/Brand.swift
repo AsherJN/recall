@@ -20,6 +20,9 @@ enum Brand {
     /// The community server's permanent invite (unlimited uses); it lands in #start-here.
     /// Opens in the browser, which hands it to the Discord app when one is installed.
     static let discord=URL(string:"https://discord.gg/pexasKezCn")!
+    /// The "High-precision mouse feedback" post in #setups-and-performance (Settings › General ›
+    /// Mouse). It opens only for the server's members, so the invite sits beside it.
+    static let mouseFeedback=URL(string:"https://discord.com/channels/1559714959758196797/1563619981671792760")!
     static var trademarks:String { L("Not affiliated with or endorsed by Blizzard Entertainment or Apple. Overwatch is a trademark of Blizzard Entertainment, Inc. Mac is a trademark of Apple Inc.") }
 
     // The author's links. Mosaic News opens on the App Store, where every Mac that runs

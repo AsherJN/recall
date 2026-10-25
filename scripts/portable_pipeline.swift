@@ -15,8 +15,16 @@ let cache = root.appendingPathComponent("cache/pipelines")
 // What the last preparation after a session added, for the next launch to report.
 let report = root.appendingPathComponent("cache/prepared.json")
 let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("pipeline-prepare")
-// The app Overwatch runs as (the engine's Game Mode app), when the launch uses it.
+// The program Overwatch runs as, when the launch names it: the engine's Game Mode app, or Wine's own
+// loader with Game Mode off (REC-51). Each keeps its own compiled-shader cache.
 let gameApp = arguments.count > 2 ? URL(fileURLWithPath: arguments[2]).standardizedFileURL : nil
+// Its identifier, which names that cache: an app's Info.plist, or the one the loader carries in its
+// own file (CrossOver's, com.codeweavers.CrossOver.wineloader).
+func gameIdentifier(_ program: URL) -> String? {
+    let info = program.pathExtension == "app" ? NSDictionary(contentsOf: program.appendingPathComponent("Contents/Info.plist"))
+                                              : CFBundleCopyInfoDictionaryForURL(program as CFURL) as NSDictionary?
+    return info?["CFBundleIdentifier"] as? String
+}
 let started = Date()
 var child: Process?
 var interrupted: Int32 = 0
@@ -268,16 +276,16 @@ func consolidate() throws -> URL {
 // macOS keeps compiled shaders per app. With Game Mode, Overwatch runs as the
 // engine's game app, whose cache starts empty after the update that brings it and
 // after each macOS update, so every learned pipeline would be compiled again
-// mid-match. pipeline-warm compiles them into that app's cache before the session,
-// costliest first, once per app, macOS version and GPU (cache/warmed.json); after
-// that the game adds what it compiles itself.
+// mid-match; without, it runs as Wine's own loader, whose cache is just as cold after a
+// macOS update, or when the player last played with Game Mode on. pipeline-warm compiles
+// them into that program's cache before the session, costliest first, once per program,
+// macOS version and GPU (cache/warmed.json); after that the game adds what it compiles itself.
 // Before a session (launch), once per app, macOS version and GPU and within the launch's
 // budget. After one, every time and every learned pipeline: Metal skips what the cache
 // already holds, so this only adds what it lacks, whatever cleared it.
 func warm(_ folder: URL, _ costs: [String: Double], after: Bool = false) throws -> Int {
     guard let app = gameApp, !costs.isEmpty,
-          let info = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist")),
-          let identifier = info["CFBundleIdentifier"] as? String,
+          let identifier = gameIdentifier(app),
           identifier.range(of: "^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$", options: .regularExpression) != nil, !identifier.contains("..") else { return 0 }
     let tool = helper.deletingLastPathComponent().appendingPathComponent("pipeline-warm")
     var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))

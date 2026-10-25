@@ -26,7 +26,7 @@ enum HelpTab:String, CaseIterable, Identifiable {
 /// button to where the steps point. Short, plain sentences; **bold** marks what to choose.
 /// A topic with regions shows only to players on one of them (AppModel.currentRegion).
 struct HelpTopic:Identifiable {
-    enum Action { case settings(SettingsTab), displays, workshopCode }
+    enum Action { case settings(SettingsTab), displays, workshopCode, showFolder }
     let id:String
     let symbol:String
     let title:String
@@ -194,6 +194,14 @@ extension HelpTopic {
                          L("If you haven’t restarted your Mac in days, restart it. Over time macOS itself can hold on to memory, and a restart frees it.")]),
         HelpTopic(id:"window",symbol:"macwindow.on.rectangle",title:L("I can’t find the game window"),
                   answer:L("Choose **Show Overwatch** in {0}, or select Overwatch in the Dock. If it’s still hidden, check your other desktops.",Brand.name)),
+        // REC-58: a player's fix from Discord (October 24). Only its safe step is here: uninstalling
+        // costs the whole download, and staying signed out of Battle.net is untried with Korea and China.
+        HelpTopic(id:"missing",symbol:"questionmark.app",title:L("Overwatch is missing from Battle.net, or Play does nothing"),
+                  answer:L("Sometimes Battle.net shows **Play** instead of **Install** for Overwatch, Play does nothing, or Overwatch isn’t listed at all."),
+                  steps:[L("In Battle.net, choose **Home**, then **+** beside **Favorites**, and add Overwatch."),
+                         L("Select Overwatch in Favorites, then choose **Install** or **Play**.")],
+                  note:L("Still missing? Close Battle.net and open it again from {0}. If that doesn’t help, send a report from the **Support** tab. Uninstalling {0} won’t fix it: it removes Overwatch too, so the whole game downloads again.",Brand.name),
+                  regions:[.global,.korea]),
         HelpTopic(id:"blank",symbol:"macwindow",title:L("Battle.net shows a blank window"),
                   answer:L("Close Battle.net, then open it again from {0}.",Brand.name)),
         // Issue #33: the page that hands an Xbox sign-in back to Battle.net reports to
@@ -220,17 +228,38 @@ extension HelpTopic {
                          L("Switch on {0} in System Settings, then open {0} again.",Brand.name),
                          L("Check the voice chat settings in Overwatch’s **Options › Sound**.")],
                   action:.settings(.audio)),
+        // REC-15 (1.6): Wine follows the Mac's sound output while the game runs.
         HelpTopic(id:"output",symbol:"speaker.wave.2",title:L("Sound plays from the wrong speakers"),
-                  answer:L("Overwatch keeps the sound output that was selected when it started."),
-                  steps:[L("Quit Overwatch."),
-                         L("Connect your headphones and select them on your Mac."),
-                         L("Play again.")]),
+                  answer:L("Overwatch plays through the sound output selected on your Mac, and follows it when you change it."),
+                  steps:[L("On your Mac, select your headphones or speakers in Control Center or **System Settings › Sound**."),
+                         L("Check the voice chat settings in Overwatch’s **Options › Sound**."),
+                         L("If the sound still doesn’t move, quit Overwatch and play again.")]),
         HelpTopic(id:"proxy",symbol:"network",title:L("Battle.net can’t connect on a work or school network"),
                   answer:L("Some of these networks set up their proxy automatically."),
                   steps:[L("Close Battle.net."),
                          L("Turn on **Settings › Advanced › Detect network proxy automatically**."),
                          L("Open Battle.net again from {0}.",Brand.name)],
                   action:.settings(.advanced)),
+        // REC-47: the setup screen's case-sensitive notice opens this (InstallLocation.caseSensitiveTopic).
+        HelpTopic(id:InstallLocation.caseSensitiveTopic,symbol:"externaldrive.badge.exclamationmark",title:L("My drive is case-sensitive"),
+                  answer:L("Windows games expect file names that ignore upper and lower case, so {0} can’t install on a case-sensitive drive. You don’t need to erase it: add a volume that isn’t case-sensitive. It shares the drive’s free space, and your files stay where they are.",Brand.name),
+                  steps:[L("Open **Disk Utility**, in Applications › Utilities."),
+                         L("In the sidebar, select a volume on your drive."),
+                         L("Choose **Edit › Add APFS Volume**."),
+                         L("Name it, set **Format** to **APFS** and choose **Add**."),
+                         L("In {0}, open the **Install location** menu, choose **Choose Another Location…** and select the new volume.",Brand.name)],
+                  note:L("A Time Machine backup volume can’t hold Overwatch either: add a volume beside it the same way. On a drive formatted as Mac OS Extended (Case-sensitive), back it up first, then select the drive itself (**View › Show All Devices**) and use **Partition** to add an APFS partition.")),
+        // REC-54: the setup screen's How to Fix It opens this (SetupFailure.isFolderAccess). Finder's
+        // Get Info grants the player's account; it can't take back a folder another account owns.
+        HelpTopic(id:InstallLocation.folderAccessTopic,symbol:"folder.badge.questionmark",title:L("{0} can’t use its folder",Brand.name),
+                  answer:L("{0} keeps Battle.net, Overwatch and its settings in a folder called {1}, inside Application Support in your Library unless you chose another location. If macOS doesn’t let {0} create or change that folder, setup stops until its permissions are fixed. Reinstalling {0} doesn’t change them.",Brand.name,InstallLocation.folderName),
+                  steps:[L("Choose **Show in Finder**. Finder selects the folder that needs fixing."),
+                         L("Choose **File › Get Info**, then open **Sharing & Permissions** at the bottom."),
+                         L("Click the lock and enter your Mac’s password."),
+                         L("Set your account to **Read & Write**. If it isn’t listed, click **+** and add it first."),
+                         L("Back in {0}, choose **Try Again**.",Brand.name)],
+                  note:L("This usually follows a Terminal command run with sudo, or files copied from another Mac or account, so other apps may be affected too. If Finder selects the {0} folder itself and it belongs to another account, Finder can’t fix it: send a report from the **Support** tab.",InstallLocation.folderName),
+                  action:.showFolder),
         HelpTopic(id:"korean",symbol:"person.crop.circle.badge.exclamationmark",title:L("Overwatch closes as it starts on a Korean account"),
                   answer:L("Korean accounts linked to Nexon need {0}’s Korea region.",Brand.name),
                   steps:[L("Close Battle.net."),
@@ -281,9 +310,13 @@ struct HelpSheet:View {
             LauncherTabs(tabs:HelpTab.allCases,selection:Binding(get:{ model.helpTab },set:{ query="";model.helpTab=$0 }),
                          width:118,showsSelection:!searching,title:\.title,symbol:\.symbol)
             searchField
-            ScrollView {
-                page.padding(.bottom,2)
-            }.scrollIndicators(.never)
+            // Opened on a topic further down (the setup screen's Open Help): scroll it into view.
+            ScrollViewReader { reader in
+                ScrollView {
+                    page.padding(.bottom,2)
+                }.scrollIndicators(.never)
+                    .onAppear { DispatchQueue.main.async { if let open { reader.scrollTo(open,anchor:.top) } } }
+            }
             HStack {
                 if model.helpTab != .support || searching {
                     Button { query="";model.helpTab = .support } label: {
@@ -389,7 +422,7 @@ struct HelpSheet:View {
                 }.padding(.horizontal,20).padding(.vertical,13).frame(maxWidth:.infinity,alignment:.leading).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityValue(isOpen ? L("Expanded") : L("Collapsed"))
             if isOpen { detail(topic).padding(.leading,54).padding(.trailing,20).padding(.bottom,18) }
-        }
+        }.id(topic.id)
     }
     private func detail(_ topic:HelpTopic)->some View {
         VStack(alignment:.leading,spacing:12) {
@@ -422,6 +455,8 @@ struct HelpSheet:View {
             Button(copied == "code" ? L("Copied") : L("Copy Code {0}",FirstMatchTip.workshopCode)) {
                 copy(FirstMatchTip.workshopCode);copied="code"
             }.buttonStyle(.bordered).buttonBorderShape(.capsule)
+        case .showFolder:
+            Button(L("Show in Finder"),action:model.showFolder).buttonStyle(.bordered).buttonBorderShape(.capsule)
         }
     }
     /// Where to ask (the community, or GitHub on China's Battle.net) and how to report a bug

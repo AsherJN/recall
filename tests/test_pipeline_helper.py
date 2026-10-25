@@ -355,6 +355,35 @@ class PipelineHelper(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn('Warmed 620', again.stdout)
 
+    def test_without_game_mode_wines_own_loaders_cache_is_warmed(self):
+        # Without Game Mode the game runs as Wine's own loader (REC-51), an x86_64 program whose
+        # identifier is in its own file (CrossOver's loader embeds an Info.plist); macOS keeps its
+        # compiled shaders apart from the game app's.
+        identifier = 'org.overwatch2mac.helper-test-' + secrets.token_hex(4)
+        cache = self.caches / identifier / 'com.apple.metal'
+        self.addCleanup(shutil.rmtree, self.caches / identifier, True)
+        info = self.base / 'loader-Info.plist'; info.write_bytes(plistlib.dumps({'CFBundleIdentifier': identifier}))
+        loader = self.base / 'engine/lib/wine/x86_64-unix/wine'; loader.parent.mkdir(parents=True)
+        subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-x', 'c', '-', '-o', str(loader), f'-Wl,-sectcreate,__TEXT,__info_plist,{info}'],
+                       input='int main(void){return 0;}\n', text=True, check=True)
+        keys = self.recipes(30)
+        result, steps, _ = self.run_helper(loader, launch=True)
+        self.assertEqual(result.returncode, 0, result)
+        self.assertIn('Warmed 30 learned pipelines for ' + identifier, result.stdout)
+        self.assertEqual(sorted((cache / 'functions.data').read_text().split()), sorted(keys))
+        self.assertEqual(json.loads((self.root / 'cache/warmed.json').read_text())['app'], identifier)
+        # Switching Game Mode on names another program, whose cache is warmed in turn.
+        other = 'org.overwatch2mac.helper-test-' + secrets.token_hex(4)
+        self.addCleanup(shutil.rmtree, self.caches / other, True)
+        app = self.base / 'Overwatch.app'; (app / 'Contents').mkdir(parents=True)
+        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': other}))
+        self.assertIn('Warmed 30 learned pipelines for ' + other, self.run_helper(app, launch=True)[0].stdout)
+        # A program without an identifier of its own is not warmed.
+        bare = self.base / 'bare'
+        subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-x', 'c', '-', '-o', str(bare)], input='int main(void){return 0;}\n', text=True, check=True)
+        (self.root / 'cache/warmed.json').unlink()
+        self.assertNotIn('warming', [s['graphics'] for s in self.run_helper(bare, launch=True)[1]])
+
     def test_an_unusable_game_app_is_not_warmed(self):
         self.recipes(5)
         for identifier in ('../escape', '.hidden', 'a/b', ''):
