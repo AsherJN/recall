@@ -2,7 +2,7 @@
 
 On the same MacBook Pro, in the same custom game, Recall averaged 70% more
 frames per second than CrossOver, with 1% lows about five times higher, 95%
-fewer stutters and up to 16 times more mouse updates. This page explains what
+fewer stutters and up to 66 times more mouse updates. This page explains what
 Recall does differently to get there. The full results are in the
 [performance notes](PERFORMANCE.md).
 
@@ -32,7 +32,7 @@ the changes on this page, made to DXMT and Wine for Overwatch.
 | +70% average FPS | Keeping Apple's image compression on, a cheaper scaling step, a third frame buffer |
 | 5× higher 1% lows | Waits that end on time, and frame pacing |
 | 95% fewer stutters | Shaders prepared before they're needed, and Wine's freezes removed |
-| Up to 16× more mouse updates | Reading the mouse directly |
+| Up to 66× more mouse updates | Reading the mouse directly |
 
 **About the numbers below.** Each change was measured on my M1 Pro by testing
 Recall with and without it. Recall's developer tools can replay a recorded match
@@ -126,13 +126,14 @@ re-reads happened during play.
 
 CrossOver gets mouse movement from macOS pointer updates, 120 times a second.
 Every time Overwatch snaps its hidden cursor back to the center of the screen,
-a little of your movement is lost. Recall reads the mouse directly, up to 2,000
-times a second depending on your mouse, the way native Mac games do, so none of
-your movement is lost. The [mouse input notes](PERFORMANCE.md#mouse-input) have
+a little of your movement is lost. Recall reads your mouse directly, skipping
+macOS's mouse layer, and passes every update your mouse sends to the game: up
+to 8,000 a second with an 8,000 Hz mouse. It never snaps the cursor back, so
+none of your movement is lost. The [mouse input notes](PERFORMANCE.md#mouse-input) have
 the details. Trackpads keep working the usual way.
 
 <p align="center">
-  <img src="../app/Resources/HowItWorksMouse.png" width="100%" alt="Mouse updates in 50 ms. CrossOver: 6 updates, 120 a second, one every 8.3 ms. Recall: 100 updates, up to 2,000 a second, one every 0.5 ms.">
+  <img src="../app/Resources/HowItWorksMouse.png" width="100%" alt="Mouse updates in 20 ms. CrossOver: 3 updates, 120 a second, one every 8.3 ms. Recall with an 8,000 Hz mouse: 160 updates, 8,000 a second, one every 0.125 ms.">
 </p>
 
 ## The code

@@ -25,11 +25,11 @@
   </tr>
   <tr>
     <td align="center"><h2>95%</h2>卡顿减少</td>
-    <td align="center"><h2>最高 16×</h2>鼠标更新频率</td>
+    <td align="center"><h2>最高 66×</h2>鼠标更新频率</td>
   </tr>
 </table>
 
-<p align="center"><sub>与 CrossOver 在同一台 14 英寸 MacBook Pro（M1 Pro，16 GB）、同一场自定义比赛中对比。鼠标：Recall 每秒最多更新 2,000 次，CrossOver 为 120 次。</sub></p>
+<p align="center"><sub>与 CrossOver 在同一台 14 英寸 MacBook Pro（M1 Pro，16 GB）、同一场自定义比赛中对比。鼠标：使用 8,000 Hz 鼠标时，Recall 每秒最多更新 8,000 次，CrossOver 为 120 次。</sub></p>
 
 https://github.com/user-attachments/assets/c0f5cac1-67fb-4b75-8bf9-06ccf402ae42
 
@@ -41,7 +41,7 @@ Recall 为 Apple 芯片 Mac 带来最优化、最顺畅的守望先锋体验。�
 
 - **比赛更流畅。** 在同一台 Mac、同一场比赛中，Recall 的平均帧率比 CrossOver 高 70%，1% 低帧接近其五倍，卡顿减少 95%。
 - **MetalFX 超分辨率带来更高帧率。** 守望先锋渲染更少的像素，再由 Apple 的 MetalFX 重建完整分辨率的画面：在 1440p、“高”预设下，帧率最多提高 77%。[工作原理](docs/METALFX.md)（英文）。
-- **瞄准跟得上。** Recall 直接读取鼠标，每秒最多 2,000 次。你的甩枪和跟枪更快到达游戏，并精准落在你手指向的位置。
+- **瞄准跟得上。** Recall 绕过 macOS 的鼠标层直接读取你的鼠标，并把每一次更新都传给游戏：使用 8,000 Hz 鼠标时每秒最多 8,000 次。你的甩枪和跟枪更快到达游戏，并精准落在你手指向的位置。
 - **免费。** 没有价格、试用期、订阅、广告或账号。代码开源。
 - **下载、登录、开玩。** Recall 会安装所需的一切并为你打开战网。可以在 MacBook 屏幕或外接显示器上玩，带鱼屏和 5K 显示器也支持。
 - **国服战网。** 设置时选择“国服”，用网易账号登录，即可在国服玩。Recall 的界面跟随 Mac 的语言，支持简体中文。
@@ -69,7 +69,7 @@ CrossOver 是在 Mac 上玩 Windows 游戏最流行的方式，所以它是最�
 
 想知道 Recall 是如何做到的？请参阅 [Recall 为什么更快](docs/HOW-IT-WORKS.md)（英文）。
 
-**你的瞄准。** 守望先锋的胜负取决于甩枪和跟枪，所以鼠标输入如何到达游戏和帧率同样重要。CrossOver 要等 macOS 更新指针，每秒 120 次，而且每当游戏把隐藏的光标拉回屏幕中心时，都会丢掉一点你的移动。Recall 像原生 Mac 游戏一样直接读取鼠标，每秒最多 2,000 次，你的移动不会丢失，也能以更低的延迟到达游戏。[两者如何处理鼠标](docs/PERFORMANCE.md#mouse-input)（英文）。
+**你的瞄准。** 守望先锋的胜负取决于甩枪和跟枪，所以鼠标输入如何到达游戏和帧率同样重要。CrossOver 要等 macOS 更新指针，每秒 120 次，而且每当游戏把隐藏的光标拉回屏幕中心时，都会丢掉一点你的移动。Recall 绕过 macOS 的鼠标层直接读取你的鼠标，并把每一次更新都传给游戏，使用 8,000 Hz 鼠标时每秒最多 8,000 次。它从不把光标拉回中心，所以你的移动不会丢失，也能更快到达游戏。首次使用时，Recall 会请你在 macOS 中允许“输入监控”；它只读取你的鼠标。[两者如何处理鼠标](docs/PERFORMANCE.md#mouse-input)（英文）。
 
 **价格。** CrossOver 一年更新的价格为 74 美元，终身版为 494 美元。Recall 免费。
 

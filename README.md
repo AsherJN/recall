@@ -24,11 +24,11 @@
   </tr>
   <tr>
     <td align="center"><h2>95%</h2>fewer stutters</td>
-    <td align="center"><h2>Up to 16×</h2>more mouse updates</td>
+    <td align="center"><h2>Up to 66×</h2>more mouse updates</td>
   </tr>
 </table>
 
-<p align="center"><sub>Compared with CrossOver on the same 14-inch MacBook Pro (M1 Pro, 16 GB), in the same custom match. Mouse: up to 2,000 updates a second in Recall, 120 in CrossOver.</sub></p>
+<p align="center"><sub>Compared with CrossOver on the same 14-inch MacBook Pro (M1 Pro, 16 GB), in the same custom match. Mouse: up to 8,000 updates a second in Recall with an 8,000 Hz mouse, 120 in CrossOver.</sub></p>
 
 https://github.com/user-attachments/assets/c0f5cac1-67fb-4b75-8bf9-06ccf402ae42
 
@@ -40,7 +40,7 @@ Recall offers the most optimized and seamless Overwatch experience on Apple Sili
 
 - **Smoother matches.** In the same match on the same Mac, Recall averaged 70% more frames per second than CrossOver, with 1% lows nearly five times higher and 95% fewer stutters.
 - **More FPS with MetalFX upscaling.** Overwatch draws fewer pixels and Apple's MetalFX rebuilds the full-resolution picture: up to 77% more frames per second at 1440p on the High preset. [How it works](docs/METALFX.md).
-- **Aim that keeps up.** Recall reads your mouse directly, up to 2,000 times a second. Your flicks and tracking reach the game sooner and land exactly where your hand put them.
+- **Aim that keeps up.** Recall reads your mouse directly, skipping macOS's mouse layer, and passes every update to the game: up to 8,000 a second with an 8,000 Hz mouse. Your flicks and tracking reach the game sooner and land exactly where your hand put them.
 - **Free.** No price, trial, subscription, ads or account. The code is open source.
 - **Download, sign in, play.** Recall installs what it needs and opens Battle.net for you. Play on your MacBook's screen or an external monitor, ultrawide and 5K included.
 
@@ -67,7 +67,7 @@ CrossOver is the most popular way to play Windows games on a Mac, so it's the co
 
 Curious how Recall gets these results? See [how Recall runs faster](docs/HOW-IT-WORKS.md).
 
-**Your aim.** Overwatch is decided by flicks and tracking, so how the mouse reaches the game matters as much as frame rate. CrossOver waits for macOS to update the pointer, 120 times a second, and drops a little of your movement each time the game snaps its hidden cursor back to the center. Recall reads the mouse directly, up to 2,000 times a second, the way native Mac games do, so none of your movement is lost and it reaches the game with less delay. [How each one handles the mouse](docs/PERFORMANCE.md#mouse-input).
+**Your aim.** Overwatch is decided by flicks and tracking, so how the mouse reaches the game matters as much as frame rate. CrossOver waits for macOS to update the pointer, 120 times a second, and drops a little of your movement each time the game snaps its hidden cursor back to the center. Recall reads your mouse directly, skipping macOS's mouse layer, and passes every update to the game, up to 8,000 a second with an 8,000 Hz mouse. It never snaps the cursor back, so none of your movement is lost, and it reaches the game sooner. The first time, Recall asks you to allow Input Monitoring in macOS; it reads only your mouse. [How each one handles the mouse](docs/PERFORMANCE.md#mouse-input).
 
 **Price.** CrossOver costs $74 with a year of updates, or $494 for life. Recall is free.
 

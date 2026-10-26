@@ -66,7 +66,8 @@ Rendered from HTML for docs/HOW-IT-WORKS.md on 2026-10-03, with no metadata.
 HowItWorksStack.png is a diagram of the software layers; HowItWorksMouse.png
 and HowItWorksShaders.png chart the project's own measurements.
 HowItWorksStack.png SHA-256: bcdd822c8001984822d71c047d1a64543e7ada9de9d720fec63f9afe3e0357cf
-HowItWorksMouse.png SHA-256: 409eef05ccad7ad05e8075d57bf9debc0dc01e053c6061827d035f63164c372e
+HowItWorksMouse.png SHA-256: 73164995dc48d4d492d9bc0de0e9bc50a110465ecc792311d214d9d30fe83467
+(redrawn on 2026-10-25 for an 8,000 Hz mouse over 20 ms)
 HowItWorksShaders.png SHA-256: 0fedfb291cfd28805a2bfc4b3fbd9db6d639f00b5a424c572ea1e06c1ab44016
 
 MetalFX artwork

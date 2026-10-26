@@ -66,6 +66,11 @@ app shows a reminder on its home screen while it's on; turn it off when you're d
   as an NVIDIA GeForce RTX 4090 (that's how it offers DLSS; your Mac does the
   work), and the NVIDIA Reflex option has no effect. See
   [how MetalFX upscaling works](METALFX.md).
+- <a id="id-high-precision"></a>**Allowing Input Monitoring for your mouse.** Recall reads your mouse
+  directly, which needs macOS's Input Monitoring permission. Choose Turn On… on the Play
+  screen's card (or Settings › General › Mouse › High-precision), then Turn On. When macOS
+  asks, choose Open System Settings and switch on Recall, then choose Quit & Reopen if macOS
+  offers it.
 - **My team can't hear me.** Open Settings › Audio in the app. If the microphone
   is off, choose Turn On…, switch on Recall in System Settings, then open Recall
   again. Then check the voice chat settings in Overwatch's Sound options.
@@ -162,6 +167,10 @@ people's names (such as in a device's name), Battle.net account numbers and
 sign-in codes, Windows user IDs, IPv6 addresses, hardware addresses, email
 addresses and BattleTags, and it never includes Overwatch's crash dumps. Logging
 (Settings › Advanced) is off unless you turn it on.
+To read your mouse directly, Recall uses macOS's Input Monitoring permission, which
+only you can allow, in System Settings. macOS describes it as receiving keystrokes
+because one permission covers both mice and keyboards; Recall opens only mice and
+reads only their movement and buttons, never your keyboard.
 Nothing is uploaded automatically, there is no project login, and the app does
 not inventory other apps. Battle.net and Apple handle their own sign-in and
 privacy.

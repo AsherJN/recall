@@ -71,9 +71,8 @@ matters as much as frame rate. Recall and CrossOver handle it differently.
 
 | | CrossOver | Recall |
 |---|---|---|
-| How the mouse is read | Waits for macOS pointer updates | Directly from the mouse |
-| Updates per second | 120 | Up to 2,000, depending on your mouse |
-| Time from movement to update | About 4.5 ms on average | About 0.26 ms |
+| How the mouse is read | Waits for macOS pointer updates | Directly from the mouse, skipping macOS's mouse layer |
+| Updates per second | 120 | Every update your mouse sends: up to 8,000 with an 8,000 Hz mouse |
 | Movement lost when the game re-centers the cursor | Some | None |
 
 **Why it matters.** Like most shooters, Overwatch hides the cursor and snaps it
@@ -94,6 +93,11 @@ movement is thrown away. In engineering tests, the main thread's work per mouse
 update fell from 4.1–4.3 ms to 0.03 ms, and the slowest cursor re-centers fell
 from 2.5 ms to 0.2 ms. Part of any frame rate dip while turning is the game
 drawing new views, which happens in every app.
+
+**Input Monitoring.** Reading your mouse directly needs macOS's Input Monitoring
+permission, and the Play screen walks you through it the first time. macOS asks
+to let Recall "receive keystrokes" because one permission covers both mice and
+keyboards. Recall reads only your mouse, never your keyboard.
 
 These figures describe how each driver handles the mouse. They come from
 engineering tests of Wine's standard Mac driver and of Recall's, not from the

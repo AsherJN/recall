@@ -37,7 +37,7 @@ REVIEWED_ASSETS = {
     'app/Resources/ButtonMosaic.png': {'ea5da8825e2c7b0994d3740c10abe4dc01f0b191466edd8c34bb4bc6e927ef0c'},
     'app/Resources/ButtonLinkedIn.png': {'1f2c35468d22bb0a8aec2808b1d6a1946833d03ff0180acc8cc8607ee570f8f2'},
     'app/Resources/HowItWorksStack.png': {'bcdd822c8001984822d71c047d1a64543e7ada9de9d720fec63f9afe3e0357cf'},
-    'app/Resources/HowItWorksMouse.png': {'409eef05ccad7ad05e8075d57bf9debc0dc01e053c6061827d035f63164c372e'},
+    'app/Resources/HowItWorksMouse.png': {'409eef05ccad7ad05e8075d57bf9debc0dc01e053c6061827d035f63164c372e', '73164995dc48d4d492d9bc0de0e9bc50a110465ecc792311d214d9d30fe83467'},
     'app/Resources/HowItWorksShaders.png': {'0fedfb291cfd28805a2bfc4b3fbd9db6d639f00b5a424c572ea1e06c1ab44016'},
     'app/Resources/MetalFXResults.png': {'6134cbfa9676bc38e5e6bfe2c2f5fc3228e75370c2caf1ee4acb1bc7431a34c3'},
     'app/Resources/MetalFXPixels.png': {'9d82b2c18c24b2a7e5f517ae4321c740e854a6576725289316bd56b36dcaaa94'},
