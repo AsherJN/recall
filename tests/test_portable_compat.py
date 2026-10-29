@@ -9,8 +9,10 @@ import json
 from pathlib import Path
 import re
 import struct
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -401,6 +403,77 @@ class AdvancedSettings(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertEqual(self.calls()[-1], [str(installer), '--lang=enUS'])
+
+    # REC-68: finish-installer closes the Battle.net Blizzard's installer opens.
+    def session_process(self, windows_name):
+        """A stand-in Wine process as the worker finds one: Windows name, engine program, prefix file mapped."""
+        program = self.root/'runtimes/v1/bin/session-process'
+        if not program.exists():
+            source = self.base/'session-process.c'
+            source.write_text('#include <fcntl.h>\n#include <sys/mman.h>\n#include <unistd.h>\n'
+                              'int main(int c,char**v){int f=open(v[1],O_RDONLY);'
+                              'if(f<0||mmap(0,4096,PROT_READ,MAP_PRIVATE,f,0)==MAP_FAILED)return 1;sleep(60);return 0;}\n')
+            subprocess.run(['clang', '-o', program, source], check=True)
+        mapped = self.root/'environment/drive_c/Program Files (x86)/Battle.net/Battle.net.exe'
+        process = subprocess.Popen([windows_name, mapped], executable=program)
+        self.addCleanup(process.kill)
+        threading.Thread(target=process.wait, daemon=True).start()  # reaped as soon as it ends
+        time.sleep(0.3)
+        return process
+
+    def installer_watch(self, *args):
+        worker = subprocess.Popen([str(self.binary), 'finish-installer', '--root', str(self.root), *args],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(worker.kill)
+        named = self.root/'cache/installer-watch.pid'
+        for _ in range(200):
+            if named.exists() and named.read_text() == str(worker.pid):
+                break
+            time.sleep(0.05)
+        self.assertEqual(named.read_text(), str(worker.pid))
+        return worker
+
+    def finished(self, worker):
+        stdout, _ = worker.communicate(timeout=20)
+        return worker.returncode, [json.loads(line) for line in stdout.splitlines()]
+
+    def test_installer_watch_leaves_setup_free_while_it_waits(self):
+        self.fixture()
+        worker = self.installer_watch('--timeout', '3')
+        self.assertEqual(self.call('status')[-1]['stage'], 'status')
+        self.assertEqual(self.finished(worker), (0, [{'stage': 'installer_wait_ended', 'game': False}]))
+        self.assertFalse((self.root/'cache/installer-watch.pid').exists())
+
+    def test_installer_watch_closes_the_battlenet_the_installer_opens(self):
+        self.launch_fixture()
+        # The installer names Battle.net with forward slashes; the processes Battle.net starts use backslashes.
+        clients = [self.session_process('C:/Program Files (x86)/Battle.net/Battle.net.exe'),
+                   self.session_process(r'C:\Program Files (x86)\Battle.net\Battle.net.exe')]
+        started = time.monotonic()
+        events = self.call('finish-installer', '--timeout', '30')
+        self.assertEqual(events, [{'stage': 'installer_client_closed', 'processes': 2}])
+        self.assertLess(time.monotonic() - started, 5)
+        for client in clients:
+            client.wait(timeout=5)
+            self.assertEqual(client.returncode, -15)
+
+    def test_installer_watch_leaves_battlenet_alone_once_overwatch_runs(self):
+        self.launch_fixture()
+        client = self.session_process(r'C:\Program Files (x86)\Battle.net\Battle.net.exe')
+        self.session_process(r'C:\Program Files (x86)\Overwatch\_retail_\Overwatch.exe')
+        self.assertEqual(self.call('finish-installer', '--timeout', '30'), [{'stage': 'installer_wait_ended', 'game': True}])
+        self.assertIsNone(client.poll())
+
+    def test_a_launch_or_another_watch_stops_the_installer_watch(self):
+        self.launch_fixture()
+        first = self.installer_watch('--timeout', '60')
+        second = self.installer_watch('--timeout', '60')
+        self.assertEqual(self.finished(first)[1][-1], {'stage': 'error', 'code': 'cancelled'})
+        # The Korean certificate fails after the launch's first step, before Battle.net would open.
+        (self.root/'reg-fails').write_text('')
+        self.assertEqual(self.call('launch', '--play', '1', success=False)[-1]['code'], 'korean_support_failed')
+        self.assertEqual(self.finished(second)[1][-1], {'stage': 'error', 'code': 'cancelled'})
+        self.assertFalse((self.root/'cache/installer-watch.pid').exists())
 
 
 class MissingRosetta(unittest.TestCase):

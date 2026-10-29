@@ -502,7 +502,6 @@ final class AppModel {
             case "cancelled": return L("Setup paused")
             case "insufficient_disk_space": return L("More space needed")
             case "rosetta_required": return L("Install Rosetta")
-            case "close_installer_client": return L("Close Battle.net first")
             case "setup_already_running", "app_worker_busy", "pipeline_cache_busy": return L("Another operation is finishing")
             case "download_hash_mismatch", "client_installer_hash_mismatch", "cached_download_hash_mismatch": return L("Download verification failed")
             case "run_from_installed_app", "app_move_failed", "app_name_taken": return L("Move {0} to Applications",Brand.name)
@@ -1084,6 +1083,27 @@ final class AppModel {
         canCancel=false
         _ = try await service.run("install-battlenet",["--installer",root.appendingPathComponent("downloads/"+installerSHA256).path,"--sha256",installerSHA256],event:receive)
         screen = .installer
+        watchInstaller()
+    }
+    /// REC-68: Blizzard's installer opens Battle.net itself when it finishes, without this app's
+    /// settings (its sign-in page stays blank). The worker closes that Battle.net as it starts
+    /// (finish-installer), and setup goes on as Continue does. The watch has its own runner, so
+    /// setup's commands aren't held up while the installer runs.
+    private var installerWatch:(service:SetupService,task:Task<Void,Never>)?
+    private func watchInstaller() {
+        guard !isPreview,installerWatch == nil else { return }
+        let watcher=SetupService(root:root,helper:service.helper)
+        installerWatch=(watcher,Task {
+            let events=(try? await watcher.run("finish-installer")) ?? []
+            installerWatch=nil
+            guard screen == .installer,events.contains(where:{ $0["stage"] as? String == "installer_client_closed" }) else { return }
+            finishInstaller()
+        })
+    }
+    private func stopWatchingInstaller() async {
+        guard let watch=installerWatch else { return }
+        watch.service.cancel()
+        await watch.task.value
     }
     /// Closes Overwatch and Battle.net at once (wineserver -k), for a game that
     /// stopped responding. The player confirms first.
@@ -1111,15 +1131,19 @@ final class AppModel {
         }
     }
     var repairing=false
+    /// The installer watch's next step, and Continue's. A Battle.net still open here is the
+    /// installer's (no one has signed in to it), so it's closed, and Battle.net opens with a launch.
     func finishInstaller() {
         perform {
+            await self.stopWatchingInstaller()
             try await self.refresh()
             guard self.clientInstalled else { throw SetupFailure(code:"battlenet_not_installed") }
-            // The installer may open CEF without the required renderer flags.
-            // User explicitly closes that window; normal launch never kills it.
             let sessions=try await self.service.run("session")
-            if let processes=sessions.last?["processes"] as? [[String:Any]],!processes.isEmpty { throw SetupFailure(code:"close_installer_client") }
-            self.screen = .ready
+            if let processes=sessions.last?["processes"] as? [[String:Any]],!processes.isEmpty {
+                self.screen = .launching;self.stage=L("Closing Battle.net")
+                _ = try await self.service.run("close-client",event:self.receive)
+            }
+            try await self.openClient()
         }
     }
     func openClient(play:Bool=false) async throws {

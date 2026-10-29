@@ -173,9 +173,9 @@ struct SetupView: View {
                 if model.lowMemory && !model.gameInstalled { memoryWarning }
             }
         case .installer:
-            // Blizzard's installer opens Battle.net without this app's renderer
-            // settings, so its sign-in window can load blank until reopened here.
-            LauncherNotice(text:L("When setup finishes, close any Battle.net window it opens. Then choose Continue here.\n\nIf the Battle.net sign-in window is blank or white, that’s expected at this step. Close it and choose Continue. This app reopens Battle.net with the right display settings, and you can sign in there."))
+            // The Battle.net Blizzard's installer opens is closed as it starts and opened again
+            // from here (REC-68, AppModel.watchInstaller); Continue does the same by hand.
+            LauncherNotice(text:L("Finish installing in the Battle.net installer. When it’s done, {0} opens Battle.net for you to sign in.\n\nIf Battle.net doesn’t open by itself, choose Continue.",Brand.name))
         case .failure:
             if model.failure.code == "rosetta_required" {
                 Text(L("macOS will guide you through Apple’s installation.")).font(LauncherStyle.font(13)).foregroundStyle(.secondary)
@@ -392,8 +392,7 @@ struct SetupView: View {
         }
     }
     private func retry() {
-        if model.failure.code == "close_installer_client" { model.finishInstaller() }
-        else if ["run_from_installed_app","app_move_failed","app_name_taken"].contains(model.failure.code) { model.moveToApplications() }
+        if ["run_from_installed_app","app_move_failed","app_name_taken"].contains(model.failure.code) { model.moveToApplications() }
         else if model.failure.code == "install_location_unavailable" { model.recheck() }
         else if model.clientInstalled && model.state["prepared_runtime"] as? String != model.release?.runtimeVersion { model.setup() }
         else if model.clientInstalled { model.launch() }

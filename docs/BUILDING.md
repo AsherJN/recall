@@ -184,6 +184,18 @@ game's window stays fullscreen until the player comes back, and on the way back 
 and made the active window. With the High-precision mouse, movement that macOS is briefly late to
 confirm is held for up to half a second and delivered when macOS's input arrives, instead of dropped.
 
+Runtime `phase2-20261028.1` is `phase2-20261025.1` with only `ntdll.so` replaced, built with
+`patches/wine-ntdll-syscall-log.patch` (`scripts/build_wine_native.py ntdll`, then
+`scripts/derive_runtime.py --native ntdll`): a thread's alert index under msync is no longer closed
+as if it were a file descriptor when the thread exits, which closed whichever file the process had
+under the same number, often one of Overwatch's game archives.
+
+Runtime `phase2-20261028.2` is `phase2-20261028.1` with only the Mac driver `winemac.so` replaced,
+built with `patches/wine-winemac-activation.patch` (`scripts/build_wine_native.py winemac`, then
+`scripts/derive_runtime.py --native winemac`): a keyboard layout chosen in macOS while the game runs
+reaches it, so chat types in the new layout without a restart; keys held during the switch are
+released.
+
 Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
 replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py
 --native winemac`), built with the updated `patches/wine-winemac-activation.patch`: with

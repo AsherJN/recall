@@ -563,10 +563,30 @@ index 91926a8..9e349a6 100644
      {
          struct syscall_frame *frame = get_syscall_frame();
 diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
-index f1324c7..27c086f 100644
+index f1324c7..34ffde2 100644
 --- a/dlls/ntdll/unix/thread.c
 +++ b/dlls/ntdll/unix/thread.c
-@@ -1134,7 +1134,7 @@ static void start_thread( TEB *teb )
+@@ -76,6 +76,7 @@
+ #include "wine/server.h"
+ #include "wine/debug.h"
+ #include "unix_private.h"
++#include "msync.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(thread);
+ WINE_DECLARE_DEBUG_CHANNEL(seh);
+@@ -1104,7 +1105,10 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
+  */
+ static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
+ {
+-    close( ntdll_get_thread_data()->alert_fd );
++    /* Under msync the alert "fd" is the thread's alert index in the server's shared semaphore
++     * table, not a descriptor: closing it closed whatever file the process had under that number
++     * (Overwatch's game archives, then read through another thread's pipe). */
++    if (!do_msync()) close( ntdll_get_thread_data()->alert_fd );
+     close( ntdll_get_thread_data()->wait_fd[0] );
+     close( ntdll_get_thread_data()->wait_fd[1] );
+     close( ntdll_get_thread_data()->reply_fd );
+@@ -1134,7 +1138,7 @@ static void start_thread( TEB *teb )
      BOOL suspend;
  
      thread_data->syscall_table = KeServiceDescriptorTable;

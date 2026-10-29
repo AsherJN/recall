@@ -25,7 +25,9 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               the busiest Windows system calls, BSD/Mach call counts, page faults, signal
               and fault counters, virtual_mutex waits and holds, the busiest threads and
               rare calls, plus a line per slow call; WINE_IO_ERROR_LOG=<file> logs failed
-              file reads.
+              file reads. Under msync a thread's alert index is not a descriptor: Wine closed
+              it at thread exit, shutting whichever file had that number (Overwatch's game
+              archives, #40/#50); it no longer does (tests/thread_exit/run.py).
   win32u      runtime/source/wine-win32u (the Phase 2 tree's dlls/win32u).
               WINE_DISPLAY_LOG=<file> logs every display-device update: forced or not,
               why, from where, and how long it took.
@@ -57,6 +59,9 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               (movement it is late to confirm waits for it up to 0.5 s, 1.6.1); GCMouse's
               input is then only counted. Korean and other input methods get the
               key after the window's input context is made current (PR #41, @sookcha).
+              A keyboard layout chosen while the game runs reaches it (macOS's notice of a
+              new selection, and becoming active, without a current input context); keys
+              held across the switch are released (#46, 1.6.2).
               While the player is away from the game in fullscreen its window stays
               fullscreen: the game's request to leave it and its minimize are held, and a
               return restores the game and makes it the foreground window, without the

@@ -49,7 +49,7 @@
     },
     {
      "patch": "patches/wine-ntdll-syscall-log.patch",
-     "sha256": "beac5bba576e36a0971e6581e812817e87f5cb8c41003c2e4edfe0e8f269623a"
+     "sha256": "6954daf1e96013d2508920b2999b2532e135541838958d04bb0baccab25b78a1"
     },
     {
      "patch": "patches/wine-win32u-display-log.patch",
@@ -57,7 +57,7 @@
     },
     {
      "patch": "patches/wine-winemac-activation.patch",
-     "sha256": "da3089402478976de5c4d35451398ae4ce2d81aa24190987b6ebe85c7a33222f"
+     "sha256": "b0a228442aaefe4a706e78cc856b243c577ce8b3d331437bcd400451dcd52fe2"
     },
     {
      "patch": "patches/wine-audio-devices.patch",
@@ -169,7 +169,7 @@
   },
   {
    "path": "patches/wine-ntdll-syscall-log.patch",
-   "sha256": "beac5bba576e36a0971e6581e812817e87f5cb8c41003c2e4edfe0e8f269623a"
+   "sha256": "6954daf1e96013d2508920b2999b2532e135541838958d04bb0baccab25b78a1"
   },
   {
    "path": "patches/wine-win32u-display-log.patch",
@@ -177,7 +177,7 @@
   },
   {
    "path": "patches/wine-winemac-activation.patch",
-   "sha256": "da3089402478976de5c4d35451398ae4ce2d81aa24190987b6ebe85c7a33222f"
+   "sha256": "b0a228442aaefe4a706e78cc856b243c577ce8b3d331437bcd400451dcd52fe2"
   },
   {
    "path": "patches/wine-audio-devices.patch",

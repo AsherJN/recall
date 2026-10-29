@@ -36,7 +36,6 @@ struct SetupFailure: Error {
         case "download_interrupted_retry_to_resume": return L("The download was interrupted. Check your connection and retry to resume.")
         case "download_hash_mismatch", "client_installer_hash_mismatch", "cached_download_hash_mismatch": return L("The download differs from the version this app expects. Retry once; if it happens again, check for a newer app release.")
         case "archive_hash_mismatch", "runtime_file_hash_mismatch", "runtime_missing": return L("An installation component is missing or damaged. Keep your game data and reinstall the app from the original download.")
-        case "close_installer_client": return L("Close the Battle.net window opened by its installer, then choose Retry here. This app will reopen it with the required display settings.")
         case "battlenet_not_installed": return L("Finish installing Battle.net in its installer window, then choose Continue.")
         case "retina_configuration_failed": return L("The display setup couldn’t finish. Close Overwatch and Battle.net, then retry. If it happens again, open Help & FAQ to save a support report.")
         case "directory_not_owned_by_app", "invalid_ownership_marker", "existing_environment_not_owned": return L("The destination contains data this app did not create. Nothing was replaced. Open Help & FAQ for installation guidance.")

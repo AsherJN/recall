@@ -462,6 +462,58 @@ static void stopAfterSession(void) {
     for(int i=0;i<600 && flock(fd,LOCK_EX|LOCK_NB);i++)[NSThread sleepForTimeInterval:0.05];
     close(fd);
 }
+/* finish-installer (REC-68). Blizzard's installer opens Battle.net when it finishes, and that
+ * Battle.net isn't a launch (launchClient): without its renderer options the sign-in page stays
+ * blank, and a game started from it would miss the player's settings. Setup runs this beside the
+ * installer. When Battle.net starts, before its window is up, this closes it (no one has signed
+ * in yet, so nothing is lost) and reports installer_client_closed; the app then opens Battle.net
+ * with a launch. It waits without setup's lock, for as long as an installer can take, holding
+ * installer-watch.lock instead: a launch, or another finish-installer, stops it first
+ * (stopInstallerWatch). It ends with the app that ran it. --timeout (seconds) is for tests. */
+static NSString *installerWatchPath(void) { return join(root,@"cache/installer-watch.pid"); }
+static void stopInstallerWatch(void) {
+    int fd=open(join(root,@"installer-watch.lock").fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
+    if(fd<0)return;
+    if(flock(fd,LOCK_EX|LOCK_NB)) {
+        pid_t pid=setupProcess(installerWatchPath());
+        if(pid>0)kill(pid,SIGTERM);
+        for(int i=0;i<100 && flock(fd,LOCK_EX|LOCK_NB);i++)[NSThread sleepForTimeInterval:0.05];
+    }
+    close(fd);
+}
+static void finishInstaller(NSTimeInterval timeout) {
+    runtime();stopInstallerWatch();
+    int fd=open(join(root,@"installer-watch.lock").fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
+    if(fd<0 || flock(fd,LOCK_EX|LOCK_NB))fail(@"setup_already_running");
+    flock(lockFD,LOCK_UN);close(lockFD);lockFD=-1;
+    [[NSString stringWithFormat:@"%d",getpid()] writeToFile:installerWatchPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    pid_t app=getppid();NSArray *clients=@[];BOOL game=NO;
+    @try {
+        NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:timeout];
+        while(!clients.count && !game && deadline.timeIntervalSinceNow>0 && !cancelRequested && getppid()==app) {
+            [NSThread sleepForTimeInterval:0.25];
+            if(![fm fileExistsAtPath:clientPath()])continue;
+            NSArray *rows=sessionProcesses();
+            // Overwatch running means the player is past this step: nothing here is the installer's.
+            game=[[rows valueForKey:@"kind"] containsObject:@"game"];
+            if(!game)clients=rows;
+        }
+        if(clients.count && !cancelRequested) {
+            for(NSDictionary *p in clients)kill([p[@"pid"] intValue],SIGTERM);
+            // Wine ends a process on SIGTERM; one still starting up gets KILL after two seconds.
+            for(int i=0;i<100;i++) {
+                BOOL running=NO;for(NSDictionary *p in clients)running|=kill([p[@"pid"] intValue],0)==0;
+                if(!running)break;
+                if(i==40)for(NSDictionary *p in clients)kill([p[@"pid"] intValue],SIGKILL);
+                [NSThread sleepForTimeInterval:0.05];
+            }
+            event(@"installer_client_closed",@{@"processes":@(clients.count)});
+        } else if(!cancelRequested && getppid()==app)event(@"installer_wait_ended",@{@"game":@(game)});
+    } @finally {
+        [fm removeItemAtPath:installerWatchPath() error:nil];
+    }
+    if(cancelRequested)fail(@"cancelled");
+}
 /* prepare-shaders: a monitor waiting for a match is ended; the one prepare-shaders starts
  * prepares now, then watches the session in its place. One already preparing is left to
  * finish (NO). A monitor from before 1.4 names no pid; it ends two minutes after Battle.net
@@ -698,6 +750,8 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     NSDictionary *logs=loggingEnvironment(logging,loggingCustom);
     requireRosetta();
     NSString *engine=runtime();if(![fm fileExistsAtPath:clientPath()])fail(@"battlenet_not_installed");
+    // A Battle.net this launch opens is not the installer's (finish-installer).
+    stopInstallerWatch();
     // Before anything else: an Overwatch started from a Battle.net already open reads it too.
     applyShaderMemory();
     NSArray *existing=sessionProcesses();
@@ -953,6 +1007,8 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         else if([command isEqual:@"verify"]) {verifyRuntime(runtime(),state()[@"active_runtime"]);event(@"runtime_verified",nil);}
         else if([command isEqual:@"prepare"])prepare();
         else if([command isEqual:@"install-battlenet"])installClient(options[@"installer"] ?: download(options[@"url"],options[@"sha256"]),options[@"sha256"]);
+        else if([command isEqual:@"finish-installer"])
+            finishInstaller(matches(options[@"timeout"] ?: @"",@"^[0-9]{1,5}$") ? [options[@"timeout"] doubleValue] : 3*3600);
         // --battlenet-scale 1 keeps Battle.net at Windows' size; otherwise it has the main display's (battleNetSize).
         // --metal-hud 1 shows Apple's Metal Performance HUD over Overwatch (Settings); off by default.
         // --game-mode 0 starts Overwatch without macOS Game Mode (the app's switch, off by default from 1.6); on otherwise.

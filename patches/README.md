@@ -94,8 +94,12 @@ matches. From 1.1, the programs named in `WINE_GAME_MODE` (Recall sets
 `Overwatch.exe`) start from the engine's game app,
 `lib/wine/game-mode/Overwatch.app`: a copy of Wine's loader in a bundle that
 declares itself a game, which is what macOS needs to turn Game Mode on.
-`scripts/game_mode_app.py` makes it. `WINE_SYSCALL_LOG` and `WINE_IO_ERROR_LOG`
-are developer diagnostics (off unless set).
+`scripts/game_mode_app.py` makes it. A thread's alert index under msync is no
+longer closed as if it were a file descriptor when the thread exits: that closed
+whichever file the process had under the same number, often one of Overwatch's
+game archives, whose next read then failed and crashed the game (issues #40 and
+#50). `WINE_SYSCALL_LOG` and `WINE_IO_ERROR_LOG` are developer diagnostics (off
+unless set).
 
 `wine-win32u-display-log.patch`: `WINE_DISPLAY_LOG` records each forced
 display-device update with its reason and duration (off unless set). The
@@ -178,7 +182,13 @@ patches above:
   Game Controller input stays;
 - Korean and other input methods get each key after the window's input context
   is made the current one, so typing in the game's chat works (contributed by
-  @sookcha).
+  @sookcha);
+- a keyboard layout chosen in macOS while the game or Battle.net runs
+  (Control-Space, the Globe key, the input menu) reaches it: the driver follows
+  macOS's notice of a new selection, and checks again when the program becomes
+  active, instead of waiting for the window's input context to be the current one,
+  which in game it often is not. Keys held during a switch are released, so none
+  stays down.
 `WINEMAC_INPUT_STATS` writes an input report (off unless set).
 
 Menus, Battle.net and every other program keep the standard behavior.
