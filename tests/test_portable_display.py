@@ -1,4 +1,5 @@
 """Real native display edits preserve unrelated game preferences and ownership."""
+import configparser
 import json
 import os
 import re
@@ -280,6 +281,33 @@ class DisplaySetup(setup.NativeSetup):
             self.assertIn(f'dxgi.fullscreenCanvasHeight = {height}\n',config)
             self.assertNotIn('fullScreenCanvas',config)
             self.assertIn(f'FullScreenWidth = "{width}"',path.read_text())
+    def test_diablo_fullscreen_profile_is_scoped_and_independent_of_overwatch_resolution(self):
+        self.launchable_fixture()
+        engine_profile=self.root/'runtimes/v1/config/dxmt.conf'
+        engine_before=engine_profile.read_bytes()
+        prefs=self.root/'environment/drive_c/users/player/Documents/Diablo III/D3Prefs.txt'
+        prefs.parent.mkdir(parents=True)
+        before=b'DisplayModeWidth "3840"\r\nDisplayModeHeight "2160"\r\nDisplayModeRefreshRate "240"\r\nVsync "0"\r\n'
+        prefs.write_bytes(before)
+        for width,height in ((1920,1080),(2560,1440),(1920,1200),(1920,1080)):
+            with self.subTest(resolution=(width,height)):
+                self.call('display','--width',str(width),'--height',str(height))
+                self.call('launch',success=False)  # the fixture runtime cannot start Wine
+                text=(self.root/'dxmt.conf').read_text()
+                config=configparser.ConfigParser(strict=False)
+                config.optionxform=str
+                config.read_string(text)
+                self.assertEqual(config.defaults(),{})
+                self.assertEqual(set(config.sections()),{'Overwatch.exe','Diablo III64.exe'})
+                self.assertEqual(dict(config['Diablo III64.exe']),{
+                    'dxgi.fullscreenCanvasWidth':'1920','dxgi.fullscreenCanvasHeight':'1080',
+                    'dxgi.nativeFullscreen':'True'})
+                self.assertEqual(text.count('[Diablo III64.exe]'),1)
+                self.assertEqual(config['Overwatch.exe']['dxgi.fullscreenCanvasWidth'],str(width))
+                self.assertEqual(config['Overwatch.exe']['dxgi.fullscreenCanvasHeight'],str(height))
+                self.assertEqual(config['Overwatch.exe']['d3d11.shaderCompilerThreads'],'8')
+                self.assertEqual(prefs.read_bytes(),before)
+                self.assertEqual(engine_profile.read_bytes(),engine_before)
     def test_launch_ends_a_session_that_started_under_other_displays(self):
         # Battle.net's update Agent can keep a Wine session alive after the client
         # closes. After the owner unplugged their main display, Overwatch started in

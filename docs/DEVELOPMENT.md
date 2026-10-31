@@ -11,6 +11,17 @@ mode 3 with a 1 ms margin, and shader variants prepared when the game creates
 its shaders. It preserves the saved game FPS limit. Diagnostic overlay presentation has
 a known focus-return failure and is not a supported player option.
 
+The launch worker also enables native fullscreen for `Diablo III64.exe`. Its
+exclusive display-mode switch can change a scaled external monitor from HiDPI
+to 1x while Wine retains the session's Retina coordinates, leaving only part of
+the image visible. Native fullscreen keeps the macOS desktop mode. The profile's
+1920×1080 dimensions only register the canvas; the game's swapchain supplies
+the actual fullscreen resolution. This profile is appended after Overwatch's
+settings and does not change Diablo's preferences or apply Overwatch's tuning.
+When checking this path, start Battle.net on a scaled external main display,
+launch Diablo at 3840×2160 fullscreen, and verify the whole image and unchanged
+macOS display mode. Repeat after restarting Battle.net through Recall.
+
 Layout:
 
 - `app/` — the SwiftUI Mac app: setup wizard, launch, settings, support and

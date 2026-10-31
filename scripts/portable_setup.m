@@ -744,6 +744,17 @@ static void deleteShaders(void) {
     applyShaderMemory();
     event(@"shaders_deleted",nil);
 }
+/* Diablo III's exclusive fullscreen can change a HiDPI external display to a 1x mode
+ * while Wine keeps its session's Retina coordinates, clipping the game to part of the
+ * screen. The released engine's native canvas fills the current display without that
+ * mode switch. These dimensions enable it; the swapchain supplies the game's actual
+ * size. Append after Overwatch's canvas/sharpening edits so its settings stay separate. */
+static NSString *diabloFullscreenProfile(NSString *profile) {
+    return [profile stringByAppendingFormat:@"%@[Diablo III64.exe]\n"
+        "dxgi.fullscreenCanvasWidth = 1920\n"
+        "dxgi.fullscreenCanvasHeight = 1080\n"
+        "dxgi.nativeFullscreen = True\n",[profile hasSuffix:@"\n"]?@"":@"\n"];
+}
 static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx, NSString *sharpening,
                          NSString *logging, NSString *loggingCustom) {
     // A logging setting Wine wouldn't understand stops the launch before anything starts.
@@ -798,7 +809,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
         event(@"display_fitted",@{@"width":@(gameWidth),@"height":@(gameHeight),@"chosen_width":@(width),@"chosen_height":@(height)});
     NSString *config=[NSString stringWithContentsOfFile:join(engine,@"config/dxmt.conf") encoding:NSUTF8StringEncoding error:nil];
     if(!config)fail(@"runtime_missing");
-    config=sharpeningProfile(canvasProfile(config,gameWidth,gameHeight),sharpness);
+    config=diabloFullscreenProfile(sharpeningProfile(canvasProfile(config,gameWidth,gameHeight),sharpness));
     if(![config writeToFile:join(root,@"dxmt.conf") atomically:YES encoding:NSUTF8StringEncoding error:nil])fail(@"settings_write_failed");
     NSString *pipeline=helperPath(@"ow2-pipeline");
     stopAfterSession();
