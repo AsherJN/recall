@@ -57,7 +57,7 @@
     },
     {
      "patch": "patches/wine-winemac-activation.patch",
-     "sha256": "b0a228442aaefe4a706e78cc856b243c577ce8b3d331437bcd400451dcd52fe2"
+     "sha256": "fee5e199f880bfd8fce7400b65f552f441836f77908d9244f3cab8c45cdbdd10"
     },
     {
      "patch": "patches/wine-audio-devices.patch",
@@ -177,7 +177,7 @@
   },
   {
    "path": "patches/wine-winemac-activation.patch",
-   "sha256": "b0a228442aaefe4a706e78cc856b243c577ce8b3d331437bcd400451dcd52fe2"
+   "sha256": "fee5e199f880bfd8fce7400b65f552f441836f77908d9244f3cab8c45cdbdd10"
   },
   {
    "path": "patches/wine-audio-devices.patch",

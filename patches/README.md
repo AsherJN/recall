@@ -117,6 +117,11 @@ patches above:
 - macOS announces the game as active again on every left click; the driver
   re-reads the display list only after the game had actually been inactive, so
   clicks no longer cost a frame;
+- mouse buttons delivered to an active fullscreen canvas stay with Wine,
+  including their following drag and release events. Passing those events to
+  AppKit a second time could replace the game's cursor with the macOS pointer
+  and enter native window-move handling. Background activation, Command-clicks,
+  titlebar controls and windowed games keep their native behavior;
 - the fullscreen letterbox bars stay black, and on a 1x external monitor the
   drawable is capped at the monitor's own pixels;
 - when the game moves or resizes its window in fullscreen, the driver answers

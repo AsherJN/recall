@@ -11,7 +11,7 @@ index 4da4676..49a6d47 100644
      - (BOOL) handleEvent:(NSEvent*)anEvent;
      - (void) didSendEvent:(NSEvent*)anEvent;
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index ce6a702..5b8cdce 100644
+index ce6a702..8ac246b 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -25,8 +25,12 @@
@@ -1460,7 +1460,19 @@ index ce6a702..5b8cdce 100644
      }
  
      - (BOOL) isKeyPressed:(uint16_t)keyCode
-@@ -2439,6 +3533,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+@@ -2343,9 +3437,10 @@ - (void) handleMouseMove:(NSEvent*)anEvent
+         [self updateCursor:FALSE];
+     }
+ 
+-    - (void) handleMouseButton:(NSEvent*)theEvent
++    - (BOOL) handleMouseButton:(NSEvent*)theEvent
+     {
+         WineWindow* window = (WineWindow*)[theEvent window];
++        WineWindow* eventWindow = window;
+         NSEventType type = [theEvent type];
+         WineWindow* windowBroughtForward = nil;
+         BOOL process = FALSE;
+@@ -2439,6 +3534,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
                  unmatchedMouseDowns &= ~downMask;
              }
  
@@ -1472,7 +1484,20 @@ index ce6a702..5b8cdce 100644
              if (process)
              {
                  macdrv_event* event;
-@@ -2664,6 +3763,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+@@ -2492,6 +3592,12 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+         // dragged events and, after that, any notion of the cursor position
+         // computed from accumulating deltas would be wrong.
+         forceNextMouseMoveAbsolute = TRUE;
++
++        /* The native canvas already delivered a client click to Wine. Do not let
++           AppKit process it again and replace the game cursor. The window keeps
++           down/up ownership paired even if it leaves fullscreen before release. */
++        return [eventWindow isKindOfClass:[WineWindow class]] &&
++               [eventWindow consumeCanvasMouseButton:theEvent delivered:(process && window == eventWindow)];
+     }
+ 
+     - (void) handleScrollWheel:(NSEvent*)theEvent
+@@ -2664,8 +3770,12 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
          {
              unsigned long long start = macdrv_stat_clock();
  
@@ -1480,17 +1505,25 @@ index ce6a702..5b8cdce 100644
 +            hid_hand_over();
              [self handleMouseMove:anEvent];
              ret = mouseCaptureWindow && ![windowsBeingDragged count];
++            if (type != NSEventTypeMouseMoved && [[anEvent window] isKindOfClass:[WineWindow class]])
++                ret = [(WineWindow*)[anEvent window] ownsCanvasMouseDrag:anEvent] || ret;
              if (macdrv_input_stats_on)
-@@ -2678,6 +3779,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+             {
+                 cocoa_stats.mac_moves++;
+@@ -2678,8 +3788,10 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
                   type == NSEventTypeRightMouseDown || type == NSEventTypeRightMouseUp ||
                   type == NSEventTypeOtherMouseDown || type == NSEventTypeOtherMouseUp)
          {
+-            [self handleMouseButton:anEvent];
+-            ret = mouseCaptureWindow && ![windowsBeingDragged count];
 +            __atomic_store_n(&macos_mouse_last, raw_clock(), __ATOMIC_RELAXED);
 +            hid_hand_over();
-             [self handleMouseButton:anEvent];
-             ret = mouseCaptureWindow && ![windowsBeingDragged count];
++            ret = [self handleMouseButton:anEvent];
++            ret = ret || (mouseCaptureWindow && ![windowsBeingDragged count]);
          }
-@@ -2848,6 +3951,11 @@ - (void) setupObservations
+         else if (type == NSEventTypeScrollWheel)
+         {
+@@ -2848,6 +3960,11 @@ - (void) setupObservations
                      name:(NSString*)kTISNotifyEnabledKeyboardInputSourcesChanged
                    object:nil];
  
@@ -1502,7 +1535,7 @@ index ce6a702..5b8cdce 100644
          /* CW Hack 22310 */
          [dnc addObserver:self
                  selector:@selector(handleExternalQuitRequest:)
-@@ -2895,6 +4003,7 @@ - (void) setupObservations
+@@ -2895,6 +4012,7 @@ - (void) setupObservations
                      usingBlock:^(NSNotification *note){
              if (displaysTemporarilyUncapturedForDialog)
              {
@@ -1510,7 +1543,7 @@ index ce6a702..5b8cdce 100644
                  [self applicationDidBecomeActive:nil];
  
                  displaysTemporarilyUncapturedForDialog = FALSE;
-@@ -3235,9 +4344,18 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3235,9 +4353,18 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          [self updateFullscreenWindows];
          [self adjustWindowLevels:YES];
  
@@ -1529,7 +1562,7 @@ index ce6a702..5b8cdce 100644
  
          // If a Wine process terminates abruptly while it has the display captured
          // and switched to a different resolution, Mac OS X will uncapture the
-@@ -3248,8 +4366,22 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3248,8 +4375,22 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          //
          // To solve this, we synthesize a displays-changed event whenever we're
          // activated.  This will provoke a re-synchronization of Wine's notion of
@@ -1554,7 +1587,7 @@ index ce6a702..5b8cdce 100644
  
          // The cursor probably moved while we were inactive.  Accumulated mouse
          // movement deltas are invalidated.  Make sure the next mouse move event
-@@ -3257,11 +4389,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3257,11 +4398,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          forceNextMouseMoveAbsolute = TRUE;
  
          [self updateMouselook];
@@ -1568,7 +1601,7 @@ index ce6a702..5b8cdce 100644
          [self sendDisplaysChanged:FALSE];
          [self adjustWindowLevels];
  
-@@ -3276,6 +4410,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
+@@ -3276,6 +4419,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
          macdrv_event* event;
          WineEventQueue* queue;
  
@@ -1578,7 +1611,7 @@ index ce6a702..5b8cdce 100644
          [self updateMouselook];
          [self invalidateGotFocusEvents];
          [self releasePressedKeys];
-@@ -3791,10 +4928,38 @@ void macdrv_quit_reply(int reply)
+@@ -3791,10 +4937,38 @@ void macdrv_quit_reply(int reply)
  bool macdrv_using_input_method(void)
  {
      __block bool ret;
@@ -2137,7 +2170,7 @@ index 6e1afe0..9191e73 100644
          record(window, enable ? "game_fullscreen_requested" : "game_windowed_requested");
          result = 1;
 diff --git a/dlls/winemac.drv/cocoa_window.h b/dlls/winemac.drv/cocoa_window.h
-index 23ecd6d..15c13f4 100644
+index 23ecd6d..43989f0 100644
 --- a/dlls/winemac.drv/cocoa_window.h
 +++ b/dlls/winemac.drv/cocoa_window.h
 @@ -35,6 +35,10 @@ @interface WineWindow : NSPanel <NSWindowDelegate>
@@ -2151,17 +2184,18 @@ index 23ecd6d..15c13f4 100644
      BOOL pendingOrderOut;
      BOOL savedVisibleState;
      BOOL drawnSinceShown;
-@@ -71,6 +75,9 @@ @interface WineWindow : NSPanel <NSWindowDelegate>
+@@ -71,6 +75,10 @@ @interface WineWindow : NSPanel <NSWindowDelegate>
      NSRect nonFullscreenFrame;
      NSTimeInterval enteredFullScreenTime;
  
 +    NSTimeInterval canvasRestoreStart;
 +    NSUInteger canvasRestores;
++    NSUInteger canvasConsumedButtons;
 +
      int draggingPhase;
      NSPoint dragStartPosition;
      NSPoint dragWindowStartPosition;
-@@ -105,11 +112,17 @@ - (void) updateFullscreen;
+@@ -105,11 +113,21 @@ - (void) updateFullscreen;
  
      - (void) postKeyEvent:(NSEvent *)theEvent;
      - (void) postBroughtForwardEvent;
@@ -2176,11 +2210,15 @@ index 23ecd6d..15c13f4 100644
 +    /* Tells Wine the fullscreen canvas frame (see restoreCanvasFrame:). */
 +    - (void) postCanvasFrame;
 +
++    /* Paired mouse buttons already delivered to an active native canvas. */
++    - (BOOL) consumeCanvasMouseButton:(NSEvent*)event delivered:(BOOL)delivered;
++    - (BOOL) ownsCanvasMouseDrag:(NSEvent*)event;
++
      - (void) setRetinaMode:(BOOL)mode;
  
  @end
 diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
-index 94fe12a..401eaa9 100644
+index 94fe12a..e591620 100644
 --- a/dlls/winemac.drv/cocoa_window.m
 +++ b/dlls/winemac.drv/cocoa_window.m
 @@ -528,6 +528,16 @@ - (void) updateLayer
@@ -2385,7 +2423,7 @@ index 94fe12a..401eaa9 100644
              [self setOpaque:YES];
          }
          else if ([self isOpaque] && self.needsTransparency)
-@@ -2216,6 +2342,53 @@ - (void) postWindowFrameChanged:(NSRect)frame fullscreen:(BOOL)isFullscreen resi
+@@ -2216,6 +2342,91 @@ - (void) postWindowFrameChanged:(NSRect)frame fullscreen:(BOOL)isFullscreen resi
          macdrv_release_event(event);
      }
  
@@ -2436,10 +2474,48 @@ index 94fe12a..401eaa9 100644
 +        [self postCanvasFrame];
 +    }
 +
++    - (BOOL) consumeCanvasMouseButton:(NSEvent*)event delivered:(BOOL)delivered
++    {
++        NSInteger button = event.buttonNumber;
++        NSEventType type = event.type;
++        BOOL pressed = type == NSEventTypeLeftMouseDown || type == NSEventTypeRightMouseDown ||
++                       type == NSEventTypeOtherMouseDown;
++        NSUInteger mask;
++
++        if (button < 0 || (NSUInteger)button >= sizeof(canvasConsumedButtons) * 8) return NO;
++        mask = (NSUInteger)1 << button;
++        if (!pressed)
++        {
++            BOOL consumed = (canvasConsumedButtons & mask) != 0;
++            canvasConsumedButtons &= ~mask;
++            return consumed;
++        }
++
++        /* A new press replaces an abandoned pair (for example, focus changed
++           before release). If this press goes to AppKit, its release must too. */
++        canvasConsumedButtons &= ~mask;
++
++        /* First/background and Command-clicks keep their native activation and
++           window-management behavior. A titlebar/grow-box click was not delivered
++           to Wine. Windowed games and native fullscreen transitions are unchanged. */
++        if (!delivered || ![NSApp isActive] || ![self isKeyWindow] ||
++            [event wine_commandKeyDown] || !macdrv_v1_canvas_owns_frame(self)) return NO;
++
++        canvasConsumedButtons |= mask;
++        return YES;
++    }
++
++    - (BOOL) ownsCanvasMouseDrag:(NSEvent*)event
++    {
++        NSInteger button = event.buttonNumber;
++        if (button < 0 || (NSUInteger)button >= sizeof(canvasConsumedButtons) * 8) return NO;
++        return (canvasConsumedButtons & ((NSUInteger)1 << button)) != 0;
++    }
++
      - (void) updateForCursorClipping
      {
          [self adjustFeaturesForState];
-@@ -3037,6 +3210,8 @@ - (void)windowDidBecomeKey:(NSNotification *)notification
+@@ -3037,6 +3248,8 @@ - (void)windowDidBecomeKey:(NSNotification *)notification
  
          /* CrossOver Hack #18896: don't return here based on causing_becomeKeyWindow */
  
@@ -2448,7 +2524,7 @@ index 94fe12a..401eaa9 100644
          [controller windowGotFocus:self];
          macdrv_v1_canvas_focus(self, TRUE);
      }
-@@ -3078,6 +3253,7 @@ - (void)windowDidDeminiaturize:(NSNotification *)notification
+@@ -3078,6 +3291,7 @@ - (void)windowDidDeminiaturize:(NSNotification *)notification
  
          [self windowDidResize:notification];
          [self checkWineDisplayLink];
@@ -2456,7 +2532,7 @@ index 94fe12a..401eaa9 100644
      }
  
      - (void) windowDidEndLiveResize:(NSNotification *)notification
-@@ -3096,6 +3272,8 @@ - (void) windowDidEnterFullScreen:(NSNotification*)notification
+@@ -3096,6 +3310,8 @@ - (void) windowDidEnterFullScreen:(NSNotification*)notification
          enteredFullScreenTime = [[NSProcessInfo processInfo] systemUptime];
          macdrv_v1_canvas_layout(self);
          macdrv_v1_canvas_settled(self);
@@ -2465,7 +2541,7 @@ index 94fe12a..401eaa9 100644
          if (pendingOrderOut)
              [self doOrderOut];
      }
-@@ -3109,6 +3287,7 @@ - (void) windowDidExitFullScreen:(NSNotification*)notification
+@@ -3109,6 +3325,7 @@ - (void) windowDidExitFullScreen:(NSNotification*)notification
          macdrv_v1_canvas_settled(self);
          if (pendingOrderOut)
              [self doOrderOut];
@@ -2473,7 +2549,7 @@ index 94fe12a..401eaa9 100644
      }
  
      - (void) windowDidFailToEnterFullScreen:(NSWindow*)window
-@@ -3130,6 +3309,12 @@ - (void) windowDidFailToExitFullScreen:(NSWindow*)window
+@@ -3130,6 +3347,12 @@ - (void) windowDidFailToExitFullScreen:(NSWindow*)window
          [self windowDidResize:nil];
          if (pendingOrderOut)
              [self doOrderOut];
@@ -2486,7 +2562,7 @@ index 94fe12a..401eaa9 100644
      }
  
      - (void)windowDidMiniaturize:(NSNotification *)notification
-@@ -3631,7 +3816,11 @@ void macdrv_set_cocoa_window_frame(macdrv_window w, const CGRect* new_frame)
+@@ -3631,7 +3854,11 @@ void macdrv_set_cocoa_window_frame(macdrv_window w, const CGRect* new_frame)
      WineWindow* window = (WineWindow*)w;
  
      OnMainThread(^{
@@ -2499,7 +2575,7 @@ index 94fe12a..401eaa9 100644
          else [window setFrameFromWine:NSRectFromCGRect(cgrect_mac_from_win(*new_frame))];
      });
  }
-@@ -3914,6 +4103,7 @@ void macdrv_set_view_frame(macdrv_view v, CGRect rect)
+@@ -3914,6 +4141,7 @@ void macdrv_set_view_frame(macdrv_view v, CGRect rect)
          NSRect newFrame = NSRectFromCGRect(cgrect_mac_from_win(rect));
          NSRect oldFrame = [view frame];
  
@@ -2507,7 +2583,7 @@ index 94fe12a..401eaa9 100644
          if (!NSEqualRects(oldFrame, newFrame))
          {
              [[view superview] setNeedsDisplayInRect:oldFrame];
-@@ -3926,6 +4116,7 @@ void macdrv_set_view_frame(macdrv_view v, CGRect rect)
+@@ -3926,6 +4154,7 @@ void macdrv_set_view_frame(macdrv_view v, CGRect rect)
              [view setNeedsDisplay:YES];
              [view wine_setBackingSize:(int[2]){ 0 }];
              [(WineWindow*)[view window] updateForGLSubviews];
@@ -2515,7 +2591,7 @@ index 94fe12a..401eaa9 100644
          }
          macdrv_v1_canvas_layout((WineWindow *)view.window);
      });
-@@ -4188,6 +4379,7 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
+@@ -4188,6 +4417,7 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
              NSUInteger localFlags = flags;
              CGEventRef c;
              NSEvent* event;
@@ -2523,7 +2599,7 @@ index 94fe12a..401eaa9 100644
  
              window.himc = himc;
              fix_device_modifiers_by_generic(&localFlags);
-@@ -4202,7 +4394,9 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
+@@ -4202,7 +4432,9 @@ bool macdrv_ime_process_key(int keyc, unsigned int flags, int repeat, void *himc
              CFRelease(c);
  
              window.commandDone = FALSE;

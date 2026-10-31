@@ -99,7 +99,9 @@ python3 scripts/audit_public_source.py
 
 The portable selection runs deterministic source/analysis/recovery tests without
 the game or Wine runtime. Its process-counter tests compile a small local native
-helper; generated files remain ignored. Remaining `test_*.py` modules depend on
+helper; generated files remain ignored. The canvas mouse-policy test compiles the
+actual helper methods from the tracked Wine patch against headless stubs; it
+needs no Wine installation and sends no input. Remaining `test_*.py` modules depend on
 installed engines, reconstructed source, historical development shortcuts, or
 private measured sessions and are excluded from this portable selection.
 

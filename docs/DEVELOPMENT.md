@@ -22,6 +22,16 @@ When checking this path, start Battle.net on a scaled external main display,
 launch Diablo at 3840×2160 fullscreen, and verify the whole image and unchanged
 macOS display mode. Repeat after restarting Battle.net through Recall.
 
+Canvas client mouse presses already delivered to Wine also own their following
+drag and release events. Sending the same sequence to AppKit can replace the
+game cursor with the macOS arrow while the game remains active. The driver
+consumes these sequences only for an active, key, settled fullscreen canvas;
+background activation, Command-clicks, titlebar controls and windowed games
+retain their native handling. Check left/right clicks and held-button movement
+in the center of the fullscreen image. This input fix requires rebuilding the
+Wine runtime from the updated activation patch; rebuilding only the launcher
+with an existing runtime archive does not include it.
+
 Layout:
 
 - `app/` — the SwiftUI Mac app: setup wizard, launch, settings, support and
