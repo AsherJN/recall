@@ -11,7 +11,7 @@ index 4da4676..49a6d47 100644
      - (BOOL) handleEvent:(NSEvent*)anEvent;
      - (void) didSendEvent:(NSEvent*)anEvent;
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index ce6a702..5b8cdce 100644
+index ce6a702..8319c2a 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -25,8 +25,12 @@
@@ -106,12 +106,13 @@ index ce6a702..5b8cdce 100644
      unsigned int sources;
  } raw_stats;
  
-@@ -69,9 +137,258 @@
+@@ -69,9 +137,313 @@
      unsigned long long mac_moves, mac_move_ns, posted_absolute, posted_relative, dropped_after_warp;
      unsigned long long warps, warp_ns, mouselook_moves, mouselook_posted, mouselook_enters, mouselook_exits;
      unsigned long long clicks, switches, pointer_ignored, pointer_fallback;
 -    double mac_dx, mac_dy;
 +    unsigned long long activations, resigns, resyncs_skipped;
++    unsigned long long resyncs_unchanged;   /* activations after a resign with the displays as Wine knew them */
 +    unsigned long long pointer_unmatched;   /* pointer motion while GCMouse was silent (raw_unmatched_gap) */
 +    unsigned long long marks;               /* test marks: the player felt a hitch */
 +    unsigned long long rearms, inputs_replaced;  /* GCMouse handlers set again; profiles found replaced */
@@ -363,10 +364,64 @@ index ce6a702..5b8cdce 100644
 + * is needed only after the application has actually resigned.  Main thread. */
 +static BOOL activation_resync_needed = TRUE;
 +
++/* The displays as Wine's display list was last told of them (sendDisplaysChanged:): each
++ * online display's ID, the display it mirrors, its bounds and its current mode.  The usable
++ * area is left out: the menu bar and Dock come and go with every switch away from a
++ * fullscreen game, and macOS reports those with applicationDidChangeScreenParameters:
++ * whether or not the application is active.
++ *
++ * The re-sync on activation makes the game's thread broadcast WM_DISPLAYCHANGE to every
++ * top-level window, one at a time, each allowed 2 s (win32u's display_mode_changed), and
++ * explorer answers by rebuilding the display devices.  On 2026-10-31 that kept Overwatch's
++ * window thread from drawing for 8-13 s after 3 of 22 returns to the fullscreen game
++ * (Cmd-Tab and Spaces swipes, a 3840x1600 display), while nothing about the displays had
++ * changed; the held fullscreen exit was then applied as well (cocoa_v1.m).  The re-sync
++ * now goes out only when the displays differ from what Wine was last told.  Main thread. */
++static NSData *synced_displays;
++
++static NSData *display_configuration(void)
++{
++    CGDirectDisplayID displays[32];
++    uint32_t count, i;
++    NSMutableData *data;
++
++    if (CGGetOnlineDisplayList(32, displays, &count) != kCGErrorSuccess) return nil;
++    data = [NSMutableData data];
++    for (i = 0; i < count; i++)
++    {
++        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displays[i]);
++        struct
++        {
++            CGDirectDisplayID display, mirrors;
++            CGRect bounds;
++            size_t width, height, pixel_width, pixel_height;
++            double refresh;
++            uint32_t flags;
++        } entry = {
++            .display = displays[i],
++            .mirrors = CGDisplayMirrorsDisplay(displays[i]),
++            .bounds = CGDisplayBounds(displays[i]),
++        };
++
++        if (mode)
++        {
++            entry.width = CGDisplayModeGetWidth(mode);
++            entry.height = CGDisplayModeGetHeight(mode);
++            entry.pixel_width = CGDisplayModeGetPixelWidth(mode);
++            entry.pixel_height = CGDisplayModeGetPixelHeight(mode);
++            entry.refresh = CGDisplayModeGetRefreshRate(mode);
++            entry.flags = CGDisplayModeGetIOFlags(mode);
++            CGDisplayModeRelease(mode);
++        }
++        [data appendBytes:&entry length:sizeof(entry)];
++    }
++    return data;
++}
++
  
  /* Follows Wine's cursor, as Wine clips it, for placing the pointer when
   * mouselook ends.  Called with mouselook_lock held. */
-@@ -92,7 +409,8 @@ static void mouselook_move_position(int x, int y)
+@@ -92,7 +464,8 @@ static void mouselook_move_position(int x, int y)
  static void raw_flush(void)
  {
      int x = raw_pending_x, y = raw_pending_y;  /* truncation keeps the remainder */
@@ -376,7 +431,7 @@ index ce6a702..5b8cdce 100644
  
      raw_flush_armed = FALSE;
      if (!x && !y) return;
-@@ -103,7 +421,10 @@ static void raw_flush(void)
+@@ -103,7 +476,10 @@ static void raw_flush(void)
          macdrv_event* event = macdrv_create_event(MOUSE_MOVED_RELATIVE, raw_window);
          event->mouse_moved.x = x;
          event->mouse_moved.y = y;
@@ -388,7 +443,7 @@ index ce6a702..5b8cdce 100644
          [raw_window.queue postEvent:event];
          macdrv_release_event(event);
          mouselook_move_position(x, y);
-@@ -111,9 +432,14 @@ static void raw_flush(void)
+@@ -111,9 +487,14 @@ static void raw_flush(void)
          raw_pending_y -= y;
          raw_last_post = now;
          raw_stats.posted++;
@@ -403,7 +458,7 @@ index ce6a702..5b8cdce 100644
      os_unfair_lock_unlock(&mouselook_lock);
  }
  
-@@ -121,31 +447,426 @@ static void raw_flush(void)
+@@ -121,31 +502,426 @@ static void raw_flush(void)
   * between accumulates and is never dropped. */
  static void raw_motion(float dx, float dy, unsigned int source)
  {
@@ -833,7 +888,7 @@ index ce6a702..5b8cdce 100644
  
  /* Whether every frame of a cursor is fully transparent.  Some clients hide
   * the cursor by setting an empty image rather than no cursor. */
-@@ -397,6 +1118,10 @@ - (id) init
+@@ -397,6 +1173,10 @@ - (id) init
              [self setupObservations];
  
              keyboardType = LMGetKbdType();
@@ -844,7 +899,7 @@ index ce6a702..5b8cdce 100644
  
              if ([NSApp isActive])
                  [self applicationDidBecomeActive:nil];
-@@ -766,13 +1491,6 @@ - (void) keyboardSelectionDidChange:(BOOL)force
+@@ -766,13 +1546,6 @@ - (void) keyboardSelectionDidChange:(BOOL)force
      {
          TISInputSourceRef inputSource, inputSourceLayout;
  
@@ -858,7 +913,7 @@ index ce6a702..5b8cdce 100644
          inputSource = TISCopyCurrentKeyboardInputSource();
          inputSourceLayout = CopyKeyboardLayoutForKeyTables();
          if (!force && EqualInputSource(inputSource, lastKeyboardInputSource) &&
-@@ -783,6 +1501,15 @@ - (void) keyboardSelectionDidChange:(BOOL)force
+@@ -783,6 +1556,15 @@ - (void) keyboardSelectionDidChange:(BOOL)force
              return;
          }
  
@@ -874,7 +929,7 @@ index ce6a702..5b8cdce 100644
          if (lastKeyboardInputSource)
              CFRelease(lastKeyboardInputSource);
          lastKeyboardInputSource = inputSource;
-@@ -821,11 +1548,35 @@ - (void) keyboardSelectionDidChange:(BOOL)force
+@@ -821,11 +1603,35 @@ - (void) keyboardSelectionDidChange:(BOOL)force
          }
      }
  
@@ -910,7 +965,7 @@ index ce6a702..5b8cdce 100644
      - (void) setKeyboardType:(CGEventSourceKeyboardType)newType
      {
          if (newType != keyboardType)
-@@ -838,6 +1589,8 @@ - (void) setKeyboardType:(CGEventSourceKeyboardType)newType
+@@ -838,6 +1644,8 @@ - (void) setKeyboardType:(CGEventSourceKeyboardType)newType
      - (void) enabledKeyboardInputSourcesChanged
      {
          macdrv_layout_list_needs_update = TRUE;
@@ -919,7 +974,7 @@ index ce6a702..5b8cdce 100644
      }
  
      - (CGFloat) primaryScreenHeight
-@@ -1034,8 +1787,57 @@ - (void) adjustWindowLevels
+@@ -1034,8 +1842,57 @@ - (void) adjustWindowLevels
          [self adjustWindowLevels:[NSApp isActive]];
      }
  
@@ -977,7 +1032,17 @@ index ce6a702..5b8cdce 100644
          if (capture_displays_for_fullscreen && [NSApp isActive])
          {
              BOOL anyFullscreen = FALSE;
-@@ -1805,30 +2607,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
+@@ -1074,6 +1931,9 @@ - (void) sendDisplaysChanged:(BOOL)activating
+         macdrv_event* event;
+         WineEventQueue* queue;
+ 
++        [synced_displays release];
++        synced_displays = [display_configuration() retain];
++
+         event = macdrv_create_event(DISPLAYS_CHANGED, nil);
+         event->displays_changed.activating = activating;
+ 
+@@ -1805,30 +2665,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
      {
          static int unscaled = -1;
          double scale = retina_on ? 2.0 : 1.0;
@@ -996,7 +1061,7 @@ index ce6a702..5b8cdce 100644
 +            // while, which raw input may have missed.
 +            if (macdrv_input_stats_on && ([anEvent deltaX] || [anEvent deltaY]) &&
 +                macdrv_stat_clock() - __atomic_load_n(&raw_last_report, __ATOMIC_RELAXED) > raw_unmatched_gap)
-             {
++            {
 +                cocoa_stats.pointer_unmatched++;
 +                cocoa_stats.pointer_unmatched_dx += fabs([anEvent deltaX]);
 +                cocoa_stats.pointer_unmatched_dy += fabs([anEvent deltaY]);
@@ -1004,7 +1069,7 @@ index ce6a702..5b8cdce 100644
 +            BOOL live = raw_clock() - __atomic_load_n(&raw_last_motion, __ATOMIC_RELAXED) < raw_silence;
 +
 +            if (!(input_flags() & INPUT_FALLBACK) || live)
-+            {
+             {
 +                if (live) pointer_points_raw += fabs([anEvent deltaX]) + fabs([anEvent deltaY]);
                  mouselookWarpDelta = CGPointZero;
                  cocoa_stats.pointer_ignored++;
@@ -1040,7 +1105,7 @@ index ce6a702..5b8cdce 100644
              scale /= macdrv_v1_canvas_scale(mouselookWindow);
  
          // deltaY is already top-down, like Windows.
-@@ -1869,6 +2698,7 @@ - (void) startRawInput
+@@ -1869,6 +2756,7 @@ - (void) startRawInput
      {
          const char* setting = getenv("WINEMAC_MOUSELOOK_RAW");
          const char* interval = getenv("WINEMAC_MOUSELOOK_RAW_INTERVAL_US");
@@ -1048,7 +1113,7 @@ index ce6a702..5b8cdce 100644
          NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
          NSString* const* connected;
          NSString* const* disconnected;
-@@ -1880,6 +2710,32 @@ - (void) startRawInput
+@@ -1880,6 +2768,32 @@ - (void) startRawInput
              return;
          rawStarted = TRUE;
  
@@ -1081,7 +1146,7 @@ index ce6a702..5b8cdce 100644
          framework = dlopen("/System/Library/Frameworks/GameController.framework/GameController", RTLD_LAZY | RTLD_LOCAL);
          mouseClass = NSClassFromString(@"GCMouse");
          connected = framework ? dlsym(framework, "GCMouseDidConnectNotification") : NULL;
-@@ -1900,6 +2756,9 @@ - (void) startRawInput
+@@ -1900,6 +2814,9 @@ - (void) startRawInput
          dispatch_source_set_timer(raw_timer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
          dispatch_resume(raw_timer);
  
@@ -1091,7 +1156,7 @@ index ce6a702..5b8cdce 100644
          rawMice = [[NSMutableArray alloc] init];
          [center addObserverForName:*connected object:nil queue:[NSOperationQueue mainQueue]
                          usingBlock:^(NSNotification* note){ [self attachRawMouse:note.object]; }];
-@@ -1920,22 +2779,120 @@ - (void) attachRawMouse:(GCMouse*)mouse
+@@ -1920,22 +2837,120 @@ - (void) attachRawMouse:(GCMouse*)mouse
          // "Magic Trackpad").
          if ([mouse.vendorName rangeOfString:@"Trackpad" options:NSCaseInsensitiveSearch].location != NSNotFound)
              return;
@@ -1215,7 +1280,7 @@ index ce6a702..5b8cdce 100644
      /* Raw input delivers to the mouselook window unless it is unavailable or
         switched off. */
      - (void) updateRawInput
-@@ -1951,19 +2908,22 @@ - (void) updateRawInput
+@@ -1951,19 +2966,22 @@ - (void) updateRawInput
          [previous release];
      }
  
@@ -1244,7 +1309,7 @@ index ce6a702..5b8cdce 100644
          }
          if (!enabled || !mouselook_allowed || [anEvent keyCode] != kVK_ANSI_M)
              return NO;
-@@ -1978,16 +2938,57 @@ - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
+@@ -1978,16 +2996,57 @@ - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
              return NO;
  
          mouselookHotkeyDown = TRUE;
@@ -1304,7 +1369,7 @@ index ce6a702..5b8cdce 100644
      /* WINEMAC_INPUT_STATS=<prefix>: one JSON line per second to
         <prefix>-<pid>.jsonl while this process is frontmost or has input
         activity. */
-@@ -2007,7 +3008,11 @@ - (void) startInputStats
+@@ -2007,7 +3066,11 @@ - (void) startInputStats
      - (void) reportInputStats:(NSTimer*)timer
      {
          struct macdrv_input_stats wine;
@@ -1316,7 +1381,7 @@ index ce6a702..5b8cdce 100644
          const char* handler = !clipCursorHandler ? "none" :
              [clipCursorHandler isKindOfClass:[WineConfinementClipCursorHandler class]] ? "confinement" : "eventtap";
          WineWindow* key = (WineWindow*)[NSApp keyWindow];
-@@ -2016,6 +3021,14 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2016,6 +3079,14 @@ - (void) reportInputStats:(NSTimer*)timer
  #define TAKE(field) wine.field = __atomic_exchange_n(&macdrv_input_stats.field, 0, __ATOMIC_RELAXED)
          TAKE(moves_delivered); TAKE(deliver_ns); TAKE(setpos_calls); TAKE(setpos_fast); TAKE(setpos_ns);
          TAKE(setpos_max_ns); TAKE(getpos_calls); TAKE(getpos_ns); TAKE(clip_calls);
@@ -1331,7 +1396,7 @@ index ce6a702..5b8cdce 100644
  #undef TAKE
          wine.consumer_tid = macdrv_input_stats.consumer_tid;
          wine.setpos_tid = macdrv_input_stats.setpos_tid;
-@@ -2023,16 +3036,43 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2023,16 +3094,43 @@ - (void) reportInputStats:(NSTimer*)timer
              dispatch_sync(raw_queue, ^{
                  raw = raw_stats;
                  memset(&raw_stats, 0, sizeof(raw_stats));
@@ -1376,11 +1441,11 @@ index ce6a702..5b8cdce 100644
          fprintf(inputStatsFile,
                  "{\"schema\":1,\"unix_ms\":%.0f,\"pid\":%d,\"exe\":\"%s\",\"allowed\":%s,\"mode\":\"%s\","
                  "\"app_active\":%s,\"hidden\":%s,\"transparent\":%s,\"clipping\":%s,\"hidden_warp\":%s,\"clip_handler\":\"%s\","
-@@ -2041,12 +3081,37 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2041,12 +3139,37 @@ - (void) reportInputStats:(NSTimer*)timer
                  "\"posted_absolute\":%llu,\"posted_relative\":%llu,\"dropped_after_warp\":%llu,"
                  "\"warps\":%llu,\"warp_us\":%.1f,\"mouselook_moves\":%llu,\"mouselook_posted\":%llu,"
                  "\"mouselook_enters\":%llu,\"mouselook_exits\":%llu,\"clicks\":%llu,\"switches\":%llu,"
-+                "\"activations\":%llu,\"resigns\":%llu,\"resyncs_skipped\":%llu,"
++                "\"activations\":%llu,\"resigns\":%llu,\"resyncs_skipped\":%llu,\"resyncs_unchanged\":%llu,"
                  "\"raw_started\":%s,\"raw_switched_off\":%s,\"raw_interval_us\":%.0f,\"raw_mice\":%lu,"
                  "\"raw_moves\":%llu,\"raw_posted\":%llu,\"raw_dx\":%.1f,\"raw_dy\":%.1f,\"raw_sources\":%d,"
 +                "\"raw_timing\":\"%s\",\"raw_posted_x\":%lld,\"raw_posted_y\":%lld,"
@@ -1415,11 +1480,11 @@ index ce6a702..5b8cdce 100644
                  [[NSDate date] timeIntervalSince1970] * 1000, getpid(), mouselook_process,
                  mouselook_allowed ? "true" : "false",
                  __atomic_load_n(&raw_on, __ATOMIC_ACQUIRE) ? "raw" : mouselookWindow ? "mouselook" : "legacy",
-@@ -2058,14 +3123,43 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2058,14 +3181,43 @@ - (void) reportInputStats:(NSTimer*)timer
                  cocoa_stats.posted_absolute, cocoa_stats.posted_relative, cocoa_stats.dropped_after_warp,
                  cocoa_stats.warps, cocoa_stats.warp_ns / 1e3, cocoa_stats.mouselook_moves, cocoa_stats.mouselook_posted,
                  cocoa_stats.mouselook_enters, cocoa_stats.mouselook_exits, cocoa_stats.clicks, cocoa_stats.switches,
-+                cocoa_stats.activations, cocoa_stats.resigns, cocoa_stats.resyncs_skipped,
++                cocoa_stats.activations, cocoa_stats.resigns, cocoa_stats.resyncs_skipped, cocoa_stats.resyncs_unchanged,
                  raw_queue ? "true" : "false", rawSwitchedOff ? "true" : "false", raw_interval / 1e3,
                  (unsigned long)[rawMice count], raw.moves, raw.posted, raw.dx, raw.dy, __builtin_popcount(raw.sources),
 +                (input_flags() & INPUT_REAL_TIME) ? "fixed" : "legacy", raw.posted_x, raw.posted_y,
@@ -1460,7 +1525,7 @@ index ce6a702..5b8cdce 100644
      }
  
      - (BOOL) isKeyPressed:(uint16_t)keyCode
-@@ -2439,6 +3533,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+@@ -2439,6 +3591,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
                  unmatchedMouseDowns &= ~downMask;
              }
  
@@ -1472,7 +1537,7 @@ index ce6a702..5b8cdce 100644
              if (process)
              {
                  macdrv_event* event;
-@@ -2664,6 +3763,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+@@ -2664,6 +3821,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
          {
              unsigned long long start = macdrv_stat_clock();
  
@@ -1481,7 +1546,7 @@ index ce6a702..5b8cdce 100644
              [self handleMouseMove:anEvent];
              ret = mouseCaptureWindow && ![windowsBeingDragged count];
              if (macdrv_input_stats_on)
-@@ -2678,6 +3779,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+@@ -2678,6 +3837,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
                   type == NSEventTypeRightMouseDown || type == NSEventTypeRightMouseUp ||
                   type == NSEventTypeOtherMouseDown || type == NSEventTypeOtherMouseUp)
          {
@@ -1490,7 +1555,7 @@ index ce6a702..5b8cdce 100644
              [self handleMouseButton:anEvent];
              ret = mouseCaptureWindow && ![windowsBeingDragged count];
          }
-@@ -2848,6 +3951,11 @@ - (void) setupObservations
+@@ -2848,6 +4009,11 @@ - (void) setupObservations
                      name:(NSString*)kTISNotifyEnabledKeyboardInputSourcesChanged
                    object:nil];
  
@@ -1502,7 +1567,7 @@ index ce6a702..5b8cdce 100644
          /* CW Hack 22310 */
          [dnc addObserver:self
                  selector:@selector(handleExternalQuitRequest:)
-@@ -2895,6 +4003,7 @@ - (void) setupObservations
+@@ -2895,6 +4061,7 @@ - (void) setupObservations
                      usingBlock:^(NSNotification *note){
              if (displaysTemporarilyUncapturedForDialog)
              {
@@ -1510,7 +1575,7 @@ index ce6a702..5b8cdce 100644
                  [self applicationDidBecomeActive:nil];
  
                  displaysTemporarilyUncapturedForDialog = FALSE;
-@@ -3235,9 +4344,18 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3235,9 +4402,18 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          [self updateFullscreenWindows];
          [self adjustWindowLevels:YES];
  
@@ -1529,18 +1594,23 @@ index ce6a702..5b8cdce 100644
  
          // If a Wine process terminates abruptly while it has the display captured
          // and switched to a different resolution, Mac OS X will uncapture the
-@@ -3248,8 +4366,22 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3248,8 +4424,27 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          //
          // To solve this, we synthesize a displays-changed event whenever we're
          // activated.  This will provoke a re-synchronization of Wine's notion of
 -        // the desktop rect with the actual state.
 -        [self sendDisplaysChanged:TRUE];
-+        // the desktop rect with the actual state.  Only after a real resign: see
-+        // activation_resync_needed.
++        // the desktop rect with the actual state.  Only after a real resign (see
++        // activation_resync_needed), and only when the displays changed (synced_displays).
 +        if (activation_resync_needed)
 +        {
++            NSData* displays = display_configuration();
++
 +            activation_resync_needed = FALSE;
-+            [self sendDisplaysChanged:TRUE];
++            if (!displays || !synced_displays || ![displays isEqualToData:synced_displays])
++                [self sendDisplaysChanged:TRUE];
++            else
++                cocoa_stats.resyncs_unchanged++;
 +            /* The input source may have changed in another application. */
 +            [self refreshInputMethodCache];
 +            [self keyboardSelectionDidChange:NO];
@@ -1554,7 +1624,7 @@ index ce6a702..5b8cdce 100644
  
          // The cursor probably moved while we were inactive.  Accumulated mouse
          // movement deltas are invalidated.  Make sure the next mouse move event
-@@ -3257,11 +4389,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3257,11 +4452,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          forceNextMouseMoveAbsolute = TRUE;
  
          [self updateMouselook];
@@ -1568,7 +1638,7 @@ index ce6a702..5b8cdce 100644
          [self sendDisplaysChanged:FALSE];
          [self adjustWindowLevels];
  
-@@ -3276,6 +4410,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
+@@ -3276,6 +4473,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
          macdrv_event* event;
          WineEventQueue* queue;
  
@@ -1578,7 +1648,7 @@ index ce6a702..5b8cdce 100644
          [self updateMouselook];
          [self invalidateGotFocusEvents];
          [self releasePressedKeys];
-@@ -3791,10 +4928,38 @@ void macdrv_quit_reply(int reply)
+@@ -3791,10 +4991,38 @@ void macdrv_quit_reply(int reply)
  bool macdrv_using_input_method(void)
  {
      __block bool ret;
