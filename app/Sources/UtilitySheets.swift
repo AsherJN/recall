@@ -48,8 +48,8 @@ struct SettingsSheet:View {
     @State private var microphoneAccess=Microphone.access
     /// The high-precision mouse explains itself before it's chosen (Input Monitoring is the model's).
     @State private var explainHighPrecision=false
-    /// Mouse › Advanced (REC-63): closed each time Settings opens.
-    @State private var mouseAdvanced=false
+    /// Mouse's info button.
+    @State private var aboutMouse=false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body:some View {
         VStack(spacing:16) {
@@ -96,7 +96,7 @@ struct SettingsSheet:View {
             } message: { Text(L("Overwatch and Battle.net must be closed. This reinstalls the files this app adds and refreshes the Windows environment. Overwatch, its settings and your Battle.net sign-in are kept.")) }
             .sheet(isPresented:$confirmKorean) { KoreanSupportSheet { model.chooseRegion(.korea) } }
             .sheet(isPresented:$explainHighPrecision) {
-                HighPrecisionMouseSheet(access:model.inputMonitoring,discord:model.showsDiscord,confirm:model.turnOnHighPrecision)
+                HighPrecisionMouseSheet(access:model.inputMonitoring,confirm:model.turnOnHighPrecision)
             }
             .alert(L("Reset display settings?"),isPresented:$confirmResetDisplay) {
                 Button(L("Cancel"),role:.cancel) {}
@@ -199,107 +199,79 @@ struct SettingsSheet:View {
             }
         }
     }
-    /// How Overwatch gets the mouse (AppModel.MouseInput; REC-52, REC-57): one of three. Overwatch's
-    /// window driver reads it as Battle.net opens, so like the HUD it changes while Battle.net is
-    /// closed. High-precision, recommended, first explains itself and why macOS will ask for Input
-    /// Monitoring (HighPrecisionMouseSheet), whose Turn On chooses it and shows macOS's prompt the
-    /// first time (AppModel.turnOnHighPrecision). Until the player allows it in System Settings,
-    /// the mouse works as Standard does and the panel says what to do; while it's chosen, the panel
-    /// asks for feedback.
+    /// How Overwatch gets the mouse (AppModel.MouseInput; REC-52, REC-57): one of three tiles, and
+    /// under them what the chosen one does. Overwatch's window driver reads it as Battle.net opens,
+    /// so like the HUD it changes while Battle.net is closed. High-precision, recommended while a
+    /// mouse is connected, first explains itself and why macOS will ask for Input Monitoring
+    /// (HighPrecisionMouseSheet), whose Turn On chooses it and shows macOS's prompt the first time
+    /// (AppModel.turnOnHighPrecision); once Input Monitoring is allowed, it's chosen at once. Until
+    /// then the mouse works as Standard does and the panel says what to do; after, its title says so.
     private var mouse:some View {
-        LauncherPanel(inset:16) {
-            VStack(alignment:.leading,spacing:6) {
-                VStack(alignment:.leading,spacing:2) {
+        let input=model.mouseInput,allowed=model.inputMonitoring == .allowed
+        let needs=L("Needs Input Monitoring."),until=L("Until then, your mouse works as Standard does.")
+        return LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:8) {
+                HStack(spacing:6) {
                     Text(L("Mouse")).font(LauncherStyle.font(14,.semibold))
-                    Text(L("How Overwatch gets your mouse’s movement and clicks.")).font(LauncherStyle.font(12))
-                        .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                }
-                VStack(alignment:.leading,spacing:10) {
-                    MouseChoice(title:L("Standard"),detail:L("Overwatch gets your mouse from macOS. No permission needed."),
-                                selected:model.mouseInput == .standard,disabled:model.running != nil) { model.mouseInput = .standard }
-                    MouseChoice(title:L("Classic"),detail:L("The mouse as it worked in {0} 1.4. Try it if your mouse feels different since 1.5.",Brand.name),
-                                selected:model.mouseInput == .classic,disabled:model.running != nil) { model.mouseInput = .classic }
-                    MouseChoice(title:L("High-precision"),detail:L("Overwatch reads your mouse directly, skipping macOS’s mouse layer. Needs Input Monitoring."),
-                                recommended:true,selected:model.mouseInput == .highPrecision,disabled:model.running != nil) {
-                        if model.mouseInput != .highPrecision { explainHighPrecision=true }
+                    Button { aboutMouse=true } label: { Image(systemName:"info.circle").font(.system(size:14)) }
+                        .buttonStyle(.borderless).foregroundStyle(.secondary)
+                        .help(L("About the mouse settings")).accessibilityLabel(L("About the mouse settings"))
+                        .infoPopover(isPresented:$aboutMouse) { MouseInfo() }
+                    Spacer(minLength:8)
+                    if input == .highPrecision && allowed {
+                        Label { Text(L("Input Monitoring is on")) } icon: { Circle().fill(.green).frame(width:7,height:7) }
+                            .font(LauncherStyle.font(11,.medium)).foregroundStyle(.secondary).transition(.opacity)
                     }
-                }.padding(.top,8)
-                if model.mouseInput == .highPrecision {
-                    if model.inputMonitoring != .allowed {
-                        HStack(spacing:12) {
-                            Text(L("Needs Input Monitoring: turn on {0} in System Settings › Privacy & Security › Input Monitoring. Until then, the mouse works as Standard does.",Brand.name))
-                                .font(LauncherStyle.font(12,.medium)).fixedSize(horizontal:false,vertical:true)
-                            Spacer(minLength:8)
-                            Button(L("Open System Settings")) { NSWorkspace.shared.open(InputMonitoring.privacySettings) }
-                                .buttonStyle(.bordered).buttonBorderShape(.capsule)
-                        }.padding(.top,6)
-                    }
-                    HStack(spacing:16) {
-                        Text(L("How does it feel?")).font(LauncherStyle.font(12)).foregroundStyle(.secondary)
-                        MouseFeedbackLinks(discord:model.showsDiscord)
-                    }.padding(.top,6)
                 }
-                mouseRate
+                HStack(spacing:4) {
+                    MouseTile(title:L("Standard"),symbol:"cursorarrow",selected:input == .standard) { model.mouseInput = .standard }
+                    MouseTile(title:L("Classic"),symbol:"clock.arrow.circlepath",selected:input == .classic) { model.mouseInput = .classic }
+                    MouseTile(title:L("High-precision"),symbol:"cursorarrow.motionlines",recommended:model.mouseConnected,selected:input == .highPrecision) {
+                        if input != .highPrecision { if allowed { model.mouseInput = .highPrecision } else { explainHighPrecision=true } }
+                    }
+                }.padding(3).background(.primary.opacity(0.06),in:RoundedRectangle(cornerRadius:15,style:.continuous))
+                    .disabled(model.running != nil).opacity(model.running != nil ? 0.6 : 1)
+                if input == .highPrecision && !allowed {
+                    HStack(spacing:10) {
+                        Text("\(Text(needs).fontWeight(.semibold))\(AppLanguage.gap)\(Text(until).foregroundStyle(.secondary))")
+                            .font(LauncherStyle.font(12)).fixedSize(horizontal:false,vertical:true)
+                        Spacer(minLength:8)
+                        Button(L("Open System Settings")) { NSWorkspace.shared.open(InputMonitoring.privacySettings) }.buttonStyle(AccentButtonStyle())
+                    }.padding(.vertical,8).padding(.leading,12).padding(.trailing,8)
+                        .background(LauncherStyle.accent.opacity(0.1),in:RoundedRectangle(cornerRadius:12,style:.continuous))
+                        .overlay { RoundedRectangle(cornerRadius:12,style:.continuous).strokeBorder(LauncherStyle.accent.opacity(0.25),lineWidth:1) }
+                } else {
+                    Text(input == .standard ? L("Overwatch gets your mouse from macOS. No permission needed.")
+                         : input == .classic ? L("The mouse from earlier versions of {0}. Try it if the others feel different to you.",Brand.name)
+                         : L("Overwatch reads your mouse directly, skipping macOS’s mouse layer."))
+                        .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                }
+                // Classic keeps 1.4's timing, so the rate goes while it's chosen.
+                if input != .classic { mouseRate.transition(.opacity) }
                 if let running=model.running { closeFirst(running,several:false) }
-            }
+            }.animation(reduceMotion ? nil : .easeOut(duration:0.3),value:input)
         }
     }
-    /// Mouse › Advanced (AppModel.MouseRate, REC-63), closed until the player opens it, since most
-    /// never need it: how many times a second Overwatch gets the mouse's movement, on a slider like
-    /// Shader memory's with All at its right end. Closed, it still names a lowered rate. Classic
-    /// keeps 1.4's timing, so with Classic chosen it says so in place of the slider.
+    /// How many times a second Overwatch gets the mouse's movement (AppModel.MouseRate, REC-63), one
+    /// row of choices, fewest first with All at the right end as Shader memory's slider has. Each
+    /// choice's tooltip says what it does; the panel's info button says when to change it.
     private var mouseRate:some View {
-        let stops=AppModel.MouseRate.stops,rate=model.mouseRate
-        let classic=model.mouseInput == .classic
-        let caption=rate == .all ? L("Overwatch gets every update your mouse sends, at its full polling rate, as on a Windows PC.")
-            : L("Overwatch gets up to {0} updates a second. Movement in between is added to the next one, so none is lost.",(rate.perSecond ?? 0).formatted())
-        return VStack(alignment:.leading,spacing:10) {
-            Divider().padding(.bottom,-2)
-            Button { withAnimation(reduceMotion ? nil : .easeOut(duration:0.15)) { mouseAdvanced.toggle() } } label: {
-                HStack(spacing:6) {
-                    Text(L("Advanced")).font(LauncherStyle.font(12,.medium))
-                    Image(systemName:"chevron.down").font(.system(size:10,weight:.semibold)).rotationEffect(.degrees(mouseAdvanced ? 180 : 0))
-                    if !mouseAdvanced && !classic && rate != .all {
-                        Text(verbatim:"·").font(LauncherStyle.font(12))
-                        Text(mouseRateLabel(rate)).font(LauncherStyle.font(12)).monospacedDigit()
-                    }
-                }.foregroundStyle(.secondary).contentShape(Rectangle())
-            }.buttonStyle(.plain)
-                .accessibilityHint(mouseAdvanced ? L("Hides the advanced mouse setting") : L("Shows how often Overwatch gets your mouse’s movement"))
-            if mouseAdvanced {
-                if classic {
-                    Text(L("Classic keeps the timing of {0} 1.4, so this setting doesn’t change it.",Brand.name))
-                        .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                } else {
-                    VStack(alignment:.leading,spacing:8) {
-                        HStack(alignment:.center,spacing:12) {
-                            VStack(alignment:.leading,spacing:2) {
-                                Text(L("Mouse updates")).font(LauncherStyle.font(13,.semibold))
-                                Text(L("How many times a second Overwatch gets your mouse’s movement.")).font(LauncherStyle.font(12))
-                                    .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                            }
-                            Spacer(minLength:12)
-                            Text(mouseRateLabel(rate)).font(LauncherStyle.font(13,.medium)).monospacedDigit()
-                        }.accessibilityElement(children:.combine)
-                        HStack(spacing:10) {
-                            Text(L("Fewer")).font(LauncherStyle.font(12)).foregroundStyle(.secondary).accessibilityHidden(true)
-                            Slider(value:Binding(get:{ Double(stops.firstIndex(of:model.mouseRate) ?? stops.count-1) },
-                                                 set:{ model.mouseRate=stops[min(stops.count-1,max(0,Int($0.rounded())))] }),
-                                   in:0...Double(stops.count-1),step:1) {
-                                Text(L("Mouse updates"))
-                            }.labelsHidden().tint(LauncherStyle.accent).accessibilityValue(mouseRateLabel(rate))
-                            Text(L("All")).font(LauncherStyle.font(12)).foregroundStyle(.secondary).accessibilityHidden(true)
-                        }.disabled(model.running != nil)
-                        Text(caption).font(LauncherStyle.font(13)).lineSpacing(3).fixedSize(horizontal:false,vertical:true)
-                        Text(L("Lower this only if Overwatch runs slower while you move your mouse."))
-                            .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                    }
+        VStack(alignment:.leading,spacing:6) {
+            Divider().padding(.bottom,2)
+            HStack(spacing:2) {
+                Text(L("Mouse updates per second")).font(LauncherStyle.font(12,.semibold))
+                Spacer(minLength:8)
+                ForEach(AppModel.MouseRate.stops,id:\.self) { stop in
+                    let on=stop == model.mouseRate
+                    Button(stop.perSecond?.formatted() ?? L("All")) { model.mouseRate=stop }.buttonStyle(.plain)
+                        .font(LauncherStyle.font(11,on ? .semibold : .medium)).monospacedDigit().foregroundStyle(on ? .primary : .secondary)
+                        .padding(.horizontal,9).padding(.vertical,4).background(on ? LauncherStyle.accent.opacity(0.26) : .clear,in:Capsule())
+                        .contentShape(Capsule()).accessibilityAddTraits(on ? .isSelected : [])
+                        .help(stop.perSecond.map { L("Overwatch gets up to {0} updates a second. Movement in between is added to the next one, so none is lost.",$0.formatted()) }
+                              ?? L("Overwatch gets every update your mouse sends, at its full polling rate, as on a Windows PC."))
                 }
-            }
-        }.padding(.top,8)
-    }
-    private func mouseRateLabel(_ rate:AppModel.MouseRate) -> String {
-        rate.perSecond.map { L("{0} a second",$0.formatted()) } ?? L("Every update")
+            }.disabled(model.running != nil)
+        }
     }
     /// REC-44: the installation the player moved away from, after setup here has gone past the
     /// setup screens that offer it.
@@ -763,68 +735,46 @@ extension SettingSwitch where Accessory == EmptyView {
         self.init(title:title,detail:detail,isOn:isOn,disabled:disabled) { EmptyView() }
     }
 }
-/// One of Settings › General › Mouse's choices: a radio button, its name (and Recommended) over
-/// what it does. The whole row chooses.
-private struct MouseChoice:View {
+/// One of Settings › General › Mouse's choices, as a tile: its symbol beside its name (and
+/// Recommended under it), the chosen one raised as Settings' tabs are. The whole tile chooses.
+private struct MouseTile:View {
     let title:String
-    let detail:String
+    let symbol:String
     var recommended=false
     let selected:Bool
-    let disabled:Bool
     let choose:()->Void
+    @Environment(\.colorScheme) private var scheme
     var body:some View {
+        let shape=RoundedRectangle(cornerRadius:12,style:.continuous)
         Button(action:choose) {
-            HStack(alignment:.firstTextBaseline,spacing:10) {
-                Image(systemName:selected ? "largecircle.fill.circle" : "circle").font(.system(size:14))
-                    .foregroundStyle(selected ? LauncherStyle.accent : .secondary).accessibilityHidden(true)
-                VStack(alignment:.leading,spacing:2) {
-                    HStack(spacing:8) {
-                        Text(title).font(LauncherStyle.font(13,.semibold))
-                        if recommended { RecommendedLabel() }
+            HStack(spacing:7) {
+                Image(systemName:symbol).font(.system(size:14,weight:.medium)).frame(width:18)
+                    .foregroundStyle(selected ? AnyShapeStyle(LauncherStyle.accent) : AnyShapeStyle(.secondary))
+                VStack(alignment:.leading,spacing:1) {
+                    Text(title).font(LauncherStyle.font(12,selected ? .semibold : .medium)).foregroundStyle(selected ? .primary : .secondary)
+                    // The accent is too light to read on white, so light mode darkens it.
+                    if recommended {
+                        Text(L("Recommended")).font(LauncherStyle.font(10,.semibold))
+                            .foregroundStyle(scheme == .dark ? LauncherStyle.accent : Color(red:0.64,green:0.34,blue:0))
                     }
-                    Text(detail).font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                 }
-                Spacer(minLength:0)
-            }.contentShape(Rectangle())
-        }.buttonStyle(.plain).disabled(disabled).opacity(disabled ? 0.6 : 1)
-            .accessibilityElement(children:.combine).accessibilityAddTraits(selected ? .isSelected : [])
-    }
-}
-/// Marks High-precision as the choice Recall recommends (REC-64), beside its name: a small label in
-/// the accent colour.
-private struct RecommendedLabel:View {
-    var body:some View {
-        Text(L("Recommended")).font(LauncherStyle.font(11,.semibold)).foregroundStyle(.primary)
-            .padding(.horizontal,7).padding(.vertical,2).background(LauncherStyle.accent.opacity(0.22),in:Capsule())
-    }
-}
-/// High-precision's feedback, in its explanation and in Settings while it's chosen: the Discord post
-/// for it, and the invite for players not yet in the server. On China's Battle.net, where Discord is
-/// blocked, GitHub instead (AppModel.showsDiscord).
-private struct MouseFeedbackLinks:View {
-    let discord:Bool
-    @Environment(\.openURL) private var openURL
-    var body:some View {
-        HStack(spacing:14) {
-            Button { openURL(discord ? Brand.mouseFeedback : Brand.issues) } label: {
-                Label(discord ? L("Share Feedback") : L("Share Feedback on GitHub"),systemImage:"bubble.left")
-            }.buttonStyle(.bordered).buttonBorderShape(.capsule)
-                .help(discord ? L("Open the High-precision mouse feedback post in Discord") : L("Open a new issue on GitHub in your browser"))
-            if discord {
-                Link(L("Join the Discord"),destination:Brand.discord).buttonStyle(.borderless).foregroundStyle(.secondary)
-                    .help(L("Open the {0} Discord invite in your browser",Brand.name))
-            }
-        }.font(LauncherStyle.font(12,.medium))
+            }.lineLimit(1).frame(maxWidth:.infinity,minHeight:50)
+                .background {
+                    if selected {
+                        shape.fill(scheme == .dark ? Color.white.opacity(0.1) : .white).shadow(color:.black.opacity(0.12),radius:1.5,y:1)
+                            .overlay { shape.strokeBorder(.primary.opacity(0.1),lineWidth:1) }
+                    }
+                }.contentShape(shape)
+        }.buttonStyle(.plain).accessibilityElement(children:.combine).accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 /// High-precision's explanation, before macOS's prompt (REC-52; rewritten for everyday players in
 /// REC-64, owner, October 25), from Settings › General › Mouse or the home screen's card: what it
 /// does for their aim, why macOS asks to let Recall "receive keystrokes", that it's easy to undo,
-/// and what macOS shows next for the player's Input Monitoring answer so far; then where to say
-/// how it feels. Turn On chooses it (AppModel.turnOnHighPrecision); Return doesn't.
+/// and what macOS shows next for the player's Input Monitoring answer so far. Turn On chooses it
+/// (AppModel.turnOnHighPrecision); Return doesn't.
 struct HighPrecisionMouseSheet:View {
     let access:InputMonitoring.Access
-    let discord:Bool
     let confirm:()->Void
     @Environment(\.dismiss) private var dismiss
     var body:some View {
@@ -838,11 +788,6 @@ struct HighPrecisionMouseSheet:View {
                 }
             }
             if !steps.isEmpty { next }
-            HStack(spacing:10) {
-                Text(L("How does it feel?")).font(LauncherStyle.font(12)).foregroundStyle(.secondary)
-                MouseFeedbackLinks(discord:discord)
-                Spacer(minLength:0)
-            }
             HStack(spacing:16) {
                 Button(L("Not Now")) { dismiss() }.buttonStyle(.bordered).buttonBorderShape(.capsule)
                     .controlSize(.large).keyboardShortcut(.cancelAction)
@@ -886,6 +831,27 @@ struct HighPrecisionMouseSheet:View {
             }
             Spacer(minLength:0)
         }.accessibilityElement(children:.combine)
+    }
+}
+/// Settings › General › Mouse's info button: what each of the three does and what Mouse updates
+/// per second does, which the panel itself leaves out.
+struct MouseInfo:View {
+    var body:some View {
+        VStack(alignment:.leading,spacing:11) {
+            Text(L("How Overwatch gets your mouse")).font(LauncherStyle.font(14,.semibold)).accessibilityAddTraits(.isHeader)
+            section(L("Standard"),L("Your mouse goes through macOS’s mouse layer, as in any other app. No permission needed."))
+            section(L("Classic"),L("{0} 1.4’s clicks and timing. Try it if the other two feel different to you.",Brand.name))
+            section(L("High-precision"),L("Overwatch reads your mouse directly, skipping macOS’s mouse layer, for the most precise aim. It needs Input Monitoring, which macOS calls “receive keystrokes” because one permission covers mice and keyboards. {0} reads only your mouse, never your keyboard. Until it’s on, your mouse works like **Standard**.",Brand.name))
+            section(L("Mouse updates per second"),L("**“All”** sends every update at your mouse’s full polling rate, as on a Windows PC. Pick **“250”** to **“2,000”** only if Overwatch slows down while you move your mouse. Movement in between is added to the next update, so none is lost."))
+            Text(L("Change these while Battle.net is closed. You can switch back any time.")).font(LauncherStyle.font(11)).foregroundStyle(.secondary)
+        }.font(LauncherStyle.font(12)).lineSpacing(2).padding(20).frame(width:400,alignment:.leading)
+    }
+    /// A name over what it does, whose **bold** names a choice in the panel.
+    private func section(_ title:String,_ text:String) -> some View {
+        VStack(alignment:.leading,spacing:2) {
+            Text(title).font(LauncherStyle.font(12,.semibold))
+            Text((try? AttributedString(markdown:text)) ?? AttributedString(text)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+        }
     }
 }
 /// Settings › Graphics' info button: what MetalFX upscaling is, how Recall provides it, and

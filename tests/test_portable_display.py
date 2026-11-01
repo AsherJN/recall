@@ -378,7 +378,7 @@ class DisplaySetup(setup.NativeSetup):
         self.assertEqual((precise['WINEMAC_INPUT_VARIANT'],precise['WINEMAC_RAW_SOURCE']),('precise','hid'))
         other=launched('--mouse','legacy')
         self.assertEqual((other['WINEMAC_INPUT_VARIANT'],'WINEMAC_RAW_SOURCE' in other),('precise',False))
-        # Mouse › Advanced (REC-63): Overwatch gets every report unless the player lowers it, then at
+        # Mouse updates per second (REC-63): Overwatch gets every report unless the player lowers it, then at
         # most that many a second (the driver's interval in microseconds). Classic keeps the driver's
         # own 1 ms, its 1.4 timing; a rate the app doesn't offer is every report.
         rate='WINEMAC_MOUSELOOK_RAW_INTERVAL_US'

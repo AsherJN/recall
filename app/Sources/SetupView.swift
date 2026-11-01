@@ -61,7 +61,7 @@ struct SetupView: View {
             case .korea: KoreanSupportSheet(confirm:model.confirmBattleNet)
             case .changeRegion: ChangeRegionSheet(model:model).interactiveDismissDisabled(model.regionChange == .working)
             case .otherInstallation: OtherInstallationSheet(model:model)
-            case .highPrecision: HighPrecisionMouseSheet(access:model.inputMonitoring,discord:model.showsDiscord,confirm:model.turnOnHighPrecision)
+            case .highPrecision: HighPrecisionMouseSheet(access:model.inputMonitoring,confirm:model.turnOnHighPrecision)
             }
         }
         .task { model.startup() }

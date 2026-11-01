@@ -625,7 +625,7 @@ static NSMutableDictionary *battleNetSize(NSMutableDictionary *env, NSString *in
  * clicks and timing with 1.5's stand-in. High-precision sets WINEMAC_RAW_SOURCE=hid: the driver
  * reads the mouse's own reports through IOHID instead of GCMouse, with Recall's Input Monitoring
  * permission; without it the driver keeps GCMouse.
- * With Standard and High-precision, launch --mouse-rate (Mouse › Advanced; REC-63) sets the most
+ * With Standard and High-precision, launch --mouse-rate (Mouse updates per second; REC-63) sets the most
  * deliveries a second: the driver's WINEMAC_MOUSELOOK_RAW_INTERVAL_US, 0 for every report (the
  * default, and anything unknown) or a million over 2000, 1000, 500 or 250. Classic leaves the
  * driver's own 1 ms, its 1.4 timing. */
