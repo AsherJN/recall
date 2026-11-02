@@ -66,7 +66,11 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               fullscreen: the game's request to leave it and its minimize are held, and a
               return restores the game and makes it the foreground window, without the
               fullscreen and Dock animations; the exit is applied 3 s after the return if
-              the game has not asked for fullscreen again. A minimize asked for while the
+              the game has not asked for fullscreen again. Coming back re-synchronises the
+              display list only when the displays changed while the player was away: the
+              re-sync made the game's thread broadcast WM_DISPLAYCHANGE (2 s per window)
+              while explorer rebuilt the display devices, and the game drew nothing for
+              8-13 s after about one return in seven. A minimize asked for while the
               window does leave fullscreen in the background waits for the animation to
               end (macOS brought the window back when it ended), at most 3 s, and a window
               minimized for Wine but still on screen is restored when it becomes key

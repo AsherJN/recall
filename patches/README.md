@@ -117,6 +117,13 @@ patches above:
 - macOS announces the game as active again on every left click; the driver
   re-reads the display list only after the game had actually been inactive, so
   clicks no longer cost a frame;
+- coming back to the game re-reads the display list only when a display, its
+  arrangement or its mode changed while you were away. Each re-read made the
+  game's window thread send every window a display change, one at a time with up
+  to 2 s each, while Wine's desktop rebuilt its display list; after about one
+  return in seven to the fullscreen game (Cmd-Tab or a Spaces swipe) the game drew
+  nothing for 8–13 s, and the held exit from fullscreen (below) was then applied
+  as well. Changes macOS announces while you are away still reach Wine at once;
 - the fullscreen letterbox bars stay black, and on a 1x external monitor the
   drawable is capped at the monitor's own pixels;
 - when the game moves or resizes its window in fullscreen, the driver answers
