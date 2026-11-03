@@ -57,7 +57,7 @@ final class AppModel {
         }
     }
     /// At most how many times a second Overwatch is sent the mouse's movement (Settings › General ›
-    /// Mouse › Advanced; worker: launch --mouse-rate; REC-63). The window driver adds up what comes in
+    /// Mouse updates per second; worker: launch --mouse-rate; REC-63). The window driver adds up what comes in
     /// between, so none is lost, only later. Every report unless the player lowers it (owner, October
     /// 25: at 4,000 Hz it brought movement 1.6 ms sooner than 1.6.0's 1,000 a second, at no FPS cost).
     /// Standard and High-precision only: Classic keeps 1.4's timing.
