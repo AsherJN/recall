@@ -11,7 +11,8 @@
  * Each Battle.net start has its own folder, logs/sessions/<UTC start>: session.json, what it
  * started with (account-free; the monitor adds when Overwatch ran and when the session ended), and
  * battlenet.log, what Battle.net, Wine and the game print (logs/battlenet.log before 1.5, replaced
- * at every start). Old folders go, oldest first, only while the logs would take more room than the
+ * at every start), and from 1.6.3 the graphics engine's record of each process's GPU errors,
+ * gpu-<exe>-<pid>.json (REC-76). Old folders go, oldest first, only while the logs would take more room than the
  * disk has left (pruneSessionLogs). The app's Save Logs reads them (LogBundle.swift). */
 #include <mach/mach_time.h>
 // Tests stand in the room the disk has left.

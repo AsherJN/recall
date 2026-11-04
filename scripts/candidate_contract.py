@@ -20,7 +20,11 @@ def load():
         raise ValueError('Unsupported candidate contract')
     # MetalFX upscaling (1.3): its environment turns on what the contract's own leaves off (DXMT's
     # NVIDIA identity; the d3d12, DLSS and NVAPI stand-ins); sharpening is DXMT's amount per choice.
-    if (set(value['metalfx_environment']) != {'DXMT_ENABLE_NVEXT', 'WINEDLLOVERRIDES'}
+    # From 1.6.3 (REC-76) MetalFX starts on the Neural Engine with a one-character MTLFX_FORCE_GPU
+    # that DXMT turns to 1 in place after a GPU hang.
+    if (set(value['metalfx_environment']) != {'DXMT_ENABLE_NVEXT', 'WINEDLLOVERRIDES', 'DXMT_METALFX_GPU_AFTER_HANG',
+                                              'MTLFX_FORCE_GPU'}
+            or value['metalfx_environment']['MTLFX_FORCE_GPU'] != '0'
             or set(value['metalfx_sharpening']) != {'low', 'high'}
             or not all(0 < float(amount) <= 1 for amount in value['metalfx_sharpening'].values())):
         raise ValueError('Unsupported candidate contract')

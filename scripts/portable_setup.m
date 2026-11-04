@@ -405,11 +405,13 @@ static void prepare(void) {
     if(![fm fileExistsAtPath:join(prefix,@"system.reg")])fail(@"environment_registry_missing");
     configureRetina();
     // The player's network and Korean account choices (portable_network.h, portable_korea.h),
-    // the fonts for Chinese or Korean (portable_region.h) and Overwatch's left Option key
-    // (portable_network.h), before Battle.net's installer first goes online. The Korean
-    // certificate is required when chosen: stop here if it cannot be installed.
+    // the fonts for Chinese or Korean (portable_region.h), Overwatch's left Option key and
+    // Battle.net's room in memory (portable_network.h), before Battle.net's installer first goes
+    // online and opens Battle.net. The Korean certificate is required when chosen: stop here if
+    // it cannot be installed.
     configureProxy(engine,proxyDetectionChosen());
     configureOptionKey(engine);
+    configureBattleNetMemory(engine);
     if(koreanSupportChosen() && !configureKoreanCertificate(engine,YES,YES))fail(@"korean_support_failed");
     if(cjkFontsChosen())configureFonts(engine,YES);
     if(!registrySaved(engine,60))fail(@"environment_initialization_busy");
@@ -625,7 +627,7 @@ static NSMutableDictionary *battleNetSize(NSMutableDictionary *env, NSString *in
  * clicks and timing with 1.5's stand-in. High-precision sets WINEMAC_RAW_SOURCE=hid: the driver
  * reads the mouse's own reports through IOHID instead of GCMouse, with Recall's Input Monitoring
  * permission; without it the driver keeps GCMouse.
- * With Standard and High-precision, launch --mouse-rate (Mouse updates per second; REC-63) sets the most
+ * With Standard and High-precision, launch --mouse-rate (Mouse › Advanced; REC-63) sets the most
  * deliveries a second: the driver's WINEMAC_MOUSELOOK_RAW_INTERVAL_US, 0 for every report (the
  * default, and anything unknown) or a million over 2000, 1000, 500 or 250. Classic leaves the
  * driver's own 1 ms, its 1.4 timing. */
@@ -736,7 +738,7 @@ static void deleteShaders(void) {
         if(([fm fileExistsAtPath:path] || [fm destinationOfSymbolicLinkAtPath:path error:nil]) &&
            ![fm moveItemAtPath:path toPath:join(aside,name) error:nil])fail(@"shader_delete_failed");
     }
-    for(NSString *name in @[@"pack.json",@"prepared.json",@"preparing.json",@"warmed.json",@"shader-update"])
+    for(NSString *name in @[@"pack.json",@"prepared.json",@"preparing.json",@"warmed.json",@"optimized.json",@"shader-update",@"rebuild-shaders"])
         [fm removeItemAtPath:join(cache,name) error:nil];
     NSString *metal=gameAppShaderCache();
     if(metal && [fm fileExistsAtPath:metal] && ![fm removeItemAtPath:metal error:nil])fail(@"shader_delete_failed");
@@ -817,6 +819,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     // only then). The voice step below waits for Wine's server, as Battle.net needs.
     configureProxy(engine,proxyDetectionChosen());
     configureOptionKey(engine);
+    configureBattleNetMemory(engine);
     if(koreanSupportChosen() && !configureKoreanCertificate(engine,YES,YES))fail(@"korean_support_failed");
     if(cjkFontsChosen())configureFonts(engine,YES);
     configureVoiceMicrophone(engine,nil,YES,YES);
@@ -833,6 +836,10 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     // Mouse (REC-51): the window driver writes its report beside the session's record, one file per
     // process (input-<pid>.jsonl).
     if([chosen containsObject:@"mouse"])env[@"WINEMAC_INPUT_STATS"]=join(join(sessionsFolder(),session),@"input");
+    // Graphics errors (REC-76): the engine keeps each process's record of GPU hangs and faults
+    // beside the session's record (gpu-<exe>-<pid>.json), whatever the logging setting. The app
+    // reads Overwatch's when the game ends: macOS had cut it off from the GPU if it says so.
+    env[@"DXMT_GPU_REPORT"]=join(sessionsFolder(),session);
     NSTask *p=task(join(engine,@"bin/wine"),client,env,[NSString stringWithFormat:@"sessions/%@/battlenet.log",session]);
     saveStage(@"battlenet_started");event(@"battlenet_open",@{@"pid":@(p.processIdentifier),@"session":session});
     task(NSProcessInfo.processInfo.arguments[0],watchArguments(engine,gameMode,session),nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
@@ -938,6 +945,8 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         else if([command isEqual:@"fonts"])configureFonts([options[@"apply"] isEqual:@"0"] ? nil : runtime(),cjkFontsChosen());
         // Support and tests: Overwatch's left Option key as Alt, which setup and launches set.
         else if([command isEqual:@"keyboard"])configureOptionKey([options[@"apply"] isEqual:@"0"] ? nil : runtime());
+        // Support and tests: Battle.net's 4 GB of room (portable_network.h), which setup and launches set.
+        else if([command isEqual:@"battlenet-memory"])configureBattleNetMemory([options[@"apply"] isEqual:@"0"] ? nil : runtime());
         else if([command isEqual:@"onboarded"]) { NSMutableDictionary *s=state();s[@"onboarding_complete"]=@YES;writeJSON(s,join(root,@"state.json"));event(@"onboarding_complete",nil); }
         else if([command isEqual:@"session"])event(@"session",@{@"processes":sessionProcesses()});
         else if([command isEqual:@"watch"])watchClient();
@@ -968,11 +977,20 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         // The one-time shader cache update offered after updating to 1.4: what the monitor does
         // after a match, now, in a monitor of its own that a launch stops like any other (keeping
         // what it finished) and that then watches the session. --game-mode 0 as for launch.
+        // Settings › Graphics › Rebuild Shaders (--rebuild 1): the same, after the request
+        // cache/rebuild-shaders, which has the helper remove the pack first and prepare every
+        // learned pipeline again; nothing learned is forgotten.
         else if([command isEqual:@"prepare-shaders"]) {
+            NSString *rebuild=options[@"rebuild"];
+            if(rebuild && ![rebuild isEqual:@"0"] && ![rebuild isEqual:@"1"])fail(@"invalid_arguments");
             NSString *engine=runtime();
             for(NSDictionary *p in sessionProcesses())if([p[@"kind"] isEqual:@"game"])fail(@"close_game_before_maintenance");
             if(!stopMonitor()) {event(@"shader_preparation_running",nil);}
             else {
+                if([rebuild isEqual:@"1"]) {
+                    mkdirs(join(root,@"cache"));
+                    if(![@"" writeToFile:join(root,@"cache/rebuild-shaders") atomically:YES encoding:NSUTF8StringEncoding error:nil])fail(@"shader_rebuild_failed");
+                }
                 NSArray *arguments=[watchArguments(engine,![options[@"game-mode"] isEqual:@"0"],nil) arrayByAddingObjectsFromArray:@[@"--prepare-now",@"1"]];
                 task(NSProcessInfo.processInfo.arguments[0],arguments,nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
                 event(@"shader_preparation_started",nil);

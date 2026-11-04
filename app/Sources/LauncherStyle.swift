@@ -11,12 +11,8 @@ enum LauncherStyle {
     /// Every pop-up (sheet) is this wide. The large ones (Settings, Help & FAQ, About, Licenses)
     /// are also all this tall, so switching between them, or between tabs, moves nothing.
     static let sheetWidth:CGFloat=540
-    static let largeSheetHeight:CGFloat=760
-    /// 760 fits every Settings tab at its tallest (Graphics while Battle.net is open, 745;
-    /// Display with two monitors, 714); only a notice on top of that scrolls (owner, 2026-10-14).
-    /// The main window's smallest size (Main.swift): tall enough for a large pop-up under the
-    /// title bar, and the window's starting height.
-    static let windowMinimum=CGSize(width:540,height:800)
+    /// 760 where the screen has room, shorter on a short screen (WindowFit).
+    @MainActor static var largeSheetHeight:CGFloat { WindowFit.shared.sheetHeight }
     static func font(_ size:CGFloat, _ weight:Font.Weight = .regular) -> Font {
         .system(size:size,weight:weight)
     }
@@ -25,6 +21,11 @@ enum LauncherStyle {
     }
     static func surface(_ scheme:ColorScheme) -> Color {
         scheme == .dark ? Color(red:0.14,green:0.145,blue:0.16) : .white
+    }
+    /// The accent as small text. It is too light to read on white, so light mode uses a darker
+    /// orange (#A35700, 5.4:1 on white).
+    static func accentText(_ scheme:ColorScheme) -> Color {
+        scheme == .dark ? accent : Color(red:0.64,green:0.34,blue:0)
     }
 }
 struct LauncherBackground: View {
@@ -248,5 +249,30 @@ struct SheetHero: View {
                 .accessibilityHidden(true)
             LauncherHeading(title:title,subtitle:subtitle,compact:true)
         }
+    }
+}
+/// A small pop-up: its content, then its buttons, `spacing` apart in the pop-up's width. It takes
+/// its content's height, as a plain stack of the two would, up to a large pop-up's height
+/// (WindowFit.sheetHeight); on a screen too short for that, the content scrolls and the buttons
+/// stay in view, as in the large pop-ups (REC-73). `actions` may be empty (a step in progress).
+struct FittedSheet<Content:View,Actions:View>:View {
+    var spacing:CGFloat=24
+    @ViewBuilder var content:Content
+    @ViewBuilder var actions:Actions
+    /// The content's own height, the height it is given (less while it scrolls), and the pop-up's:
+    /// the pop-up less the content is what stays put (padding, buttons, the space between).
+    @State private var natural:CGFloat=0
+    @State private var shown:CGFloat=0
+    @State private var whole:CGFloat=0
+    var body:some View {
+        let room=WindowFit.shared.sheetHeight-(whole-shown)
+        let measured=VStack(spacing:spacing) { content }.onGeometryChange(for:CGFloat.self) { $0.size.height } action: { natural=$0 }
+        VStack(spacing:spacing) {
+            Group {
+                if natural > room { ScrollView { measured }.scrollBounceBehavior(.basedOnSize).frame(height:max(0,room)) } else { measured }
+            }.onGeometryChange(for:CGFloat.self) { $0.size.height } action: { shown=$0 }
+            actions
+        }.padding(32).frame(width:LauncherStyle.sheetWidth)
+            .onGeometryChange(for:CGFloat.self) { $0.size.height } action: { whole=$0 }
     }
 }

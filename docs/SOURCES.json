@@ -29,6 +29,11 @@
      "patch": "patches/dxmt-shader-pack.patch",
      "sha256": "26b64c19f499e4e7fbccfa9402ab0bdd5a0e383af2d5098aa00c9abcd7182773",
      "applies_after": "patches/dxmt-metalfx-upscaling.patch"
+    },
+    {
+     "patch": "patches/dxmt-gpu-errors.patch",
+     "sha256": "384d8d252ae9bf9baa0b37f9cf9d1617665b4fdbcb9d2f0801cc138694aee207",
+     "applies_after": "patches/dxmt-shader-pack.patch"
     }
    ],
    "nvapi_headers_commit": "d08488fcc82eef313b0464db37d2955709691e94",
@@ -57,7 +62,7 @@
     },
     {
      "patch": "patches/wine-winemac-activation.patch",
-     "sha256": "b29cfbe52cac34917298aec7daf5df52b6c9528b5291404f5a358d5e749eb070"
+     "sha256": "84d5a67ff6720e8758a62a15494f4b62d2d2092ab8498e059207d5f0987578ad"
     },
     {
      "patch": "patches/wine-audio-devices.patch",
@@ -177,7 +182,7 @@
   },
   {
    "path": "patches/wine-winemac-activation.patch",
-   "sha256": "b29cfbe52cac34917298aec7daf5df52b6c9528b5291404f5a358d5e749eb070"
+   "sha256": "84d5a67ff6720e8758a62a15494f4b62d2d2092ab8498e059207d5f0987578ad"
   },
   {
    "path": "patches/wine-audio-devices.patch",

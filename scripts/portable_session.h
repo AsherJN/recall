@@ -66,9 +66,11 @@ static void watchClient(void) {
     BOOL locked=NO;for(int i=0;i<(monitorPrepareNow ? 1800 : 200) && !cancelRequested && !(locked=flock(fd,LOCK_EX|LOCK_NB)==0);i++)[NSThread sleepForTimeInterval:0.1];
     if(!locked){close(fd);return;}
     [[NSString stringWithFormat:@"%d",getpid()] writeToFile:monitorPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    // The app names this preparation the one-time shader cache update while the marker is there.
+    // The app names this preparation the shader cache update while the marker is there, or
+    // Rebuild Shaders when it says "rebuild" (the request is still there until the helper runs).
     if(monitorPrepareNow && !cancelRequested) {
-        [@"" writeToFile:join(root,@"cache/shader-update") atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        BOOL rebuild=[fm fileExistsAtPath:join(root,@"cache/rebuild-shaders")];
+        [(rebuild ? @"rebuild" : @"") writeToFile:join(root,@"cache/shader-update") atomically:YES encoding:NSUTF8StringEncoding error:nil];
         prepareAfterSession();
     }
     // It waits for a match as long as Battle.net stays open (until two minutes after it

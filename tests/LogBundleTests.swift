@@ -96,6 +96,11 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
             #"{"schema":1,"unix_ms":1792440300000,"pid":4242,"exe":"Overwatch.exe","mac_dx":80.5,"mac_dy":12.0,"raw_dx":122.0,"raw_dy":18.0,"key_checks":6,"key_checks_cached":0,"key_check_ms":0.120,"key_check_max_ms":0.040,"key_query_ms":0.010,"counts_per_point":1.5150}"#,
             #"{"schema":1,"unix_ms":1792440301000,"pid":4242,"exe":"Overwatch.exe","mac_dx":0.0,"mac_dy":0.0,"raw_dx":0.0,"raw_dy":0.0,"key_checks":0,"key_checks_cached":0,"key_check_ms":0.000,"key_check_max_ms":0.000,"key_query_ms":0.000,"counts_per_point":1.5150}"#,
         ].joined(separator:"\n")+"\n")
+        // As the graphics engine logs GPU errors with logging off (no Wine prefix): two hangs, then
+        // every command buffer ignored, one line each with its own frame number (#58: 6,946 lines).
+        let hang=#"Error Domain=MTLCommandBufferErrorDomain Code=2 "Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)" UserInfo={NSUnderlyingError=0x60000fb32a90 {Error Domain=IOGPUCommandQueueErrorDomain Code=3 "(null)"}}"#
+        let ignored=#"Error Domain=MTLCommandBufferErrorDomain Code=4 "Ignored (for causing prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)" UserInfo={NSUnderlyingError=0x60000f83d020 {Error Domain=IOGPUCommandQueueErrorDomain Code=4 "(null)"}}"#
+        let gpuLines=["err:   Device error at frame 115241: "+hang,"err:   Device error at frame 121956: "+hang]+(121957..<122017).map { "err:   Device error at frame \($0): "+ignored }
         try write(root,"logs/sessions/20261019T190000Z/battlenet.log",([
             "msync: up and running.",
             "1010.000:0024:0028:trace:winsock:gethostname <- \"Testers-MacBook-Pro.local\"",
@@ -108,7 +113,11 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         ]+run+[
             "wine: Unhandled page fault on read access to 0000000000000040 at address 0000000140001000 (thread 0034), starting debugger...",
             "1500.000:0030:0034:err:seh:dispatch_exception unhandled exception code c0000005",
-        ]).joined(separator:"\n")+"\n")
+        ]+gpuLines).joined(separator:"\n")+"\n")
+        // The graphics engine's record of the game's GPU errors (REC-76): five hangs, then macOS
+        // stopped running its graphics and the engine ended it.
+        try write(root,"logs/sessions/20261019T190000Z/gpu-Overwatch.exe-4242.json",
+                  #"{"schema":1,"process":"Overwatch.exe","windows_pid":32,"started":"2026-10-19T19:05:00Z","updated":"2026-10-19T19:14:00Z","encoder_status":true,"metalfx":true,"metalfx_gpu_mode":true,"errors":{"hang":5,"timeout":0,"page_fault":0,"victim":0,"internal":0,"other":0},"first_error":{"frame":115241,"time":"2026-10-19T19:10:00Z"},"last_error":{"frame":121956,"time":"2026-10-19T19:13:59Z","kind":"hang","detail":"faulted #41 'MetalFX_Temporal_PostProcessing'; first unfinished #41 'MetalFX_Temporal_PostProcessing' (faulted), after #40 'BeginScaler'"},"access_revoked":{"frame":121957,"time":"2026-10-19T19:14:00Z"},"ended_process":true}"#)
         try write(root,"\(user)/AppData/Local/Battle.net/Logs/battle.net-20261019T185958.000001.log",[
             "I 2026-10-19 18:59:58.000001 [Main] {Main} Running from: Z:\\Users\\tester\\Library\\Application Support\\Overwatch2Mac\\downloads\\x",
             "I 2026-10-19 19:00:01.000000 [GSAccountProvider] {Main} Received AccountLevelInfo for account. entityId=1:0:3a9882ed accountLevelInfo=|country=USA|preferred_region=1|",
@@ -214,12 +223,30 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         precondition((index["left_out"] as! [String:Any])["crash_dumps"] as? Int == 1)
         precondition((index["removed"] as! [String:Int]).keys.contains("account_id"))
         precondition((index["logging"] as! [String:Any])["setting"] as? String == "crashes,mouse")
+        // GPU errors (REC-76): the engine's record and its log lines are moments; the 60 ignored command
+        // buffers are one kind of error line, not 60 that push the hangs out of the 40 kept.
+        let gpu=moment("gpu_errors")!
+        precondition(gpu["time"] as? String == "2026-10-19T19:10:00Z" && (gpu["errors"] as? [String:Int])?["hang"] == 5 && gpu["metalfx"] as? Bool == true,"\(gpu)")
+        precondition(moment("gpu_access_revoked")?["time"] as? String == "2026-10-19T19:14:00Z" && moment("gpu_access_revoked")?["ended_process"] as? Bool == true)
+        precondition(moments.filter { $0["kind"] as? String == "gpu_hang" }.count == 2 && moments.filter { $0["kind"] as? String == "gpu_revoked" }.count == 1,"\(moments.map { $0["kind"]! })")
+        let errorLines=index["errors"] as! [[String:Any]]
+        func errorCount(_ text:String)->[Int] { errorLines.filter { ($0["text"] as? String)?.contains(text) == true }.compactMap { $0["count"] as? Int } }
+        precondition(errorCount("SubmissionsIgnored") == [60] && errorCount("CallbackErrorHang") == [2],"\(errorCount("SubmissionsIgnored")) \(errorCount("CallbackErrorHang"))")
+        precondition(files["recall/sessions/20261019T190000Z/gpu-Overwatch.exe-4242.json"] != nil)
+        // The app's check when Overwatch ends: that game's record, by its process ID.
+        let lost=GPUReport.forGame(root:root,session:"20261019T190000Z",pid:4242)
+        precondition(lost?.accessRevoked != nil && lost?.endedProcess == true && lost?.hangs == 5 && lost?.isGame == true)
+        precondition(GPUReport.forGame(root:root,session:"20261019T190000Z",pid:1) == nil && GPUReport.forGame(root:root,session:"../x",pid:4242) == nil)
+        precondition(GPUReport(data:Data(#"{"schema":2,"process":"Overwatch.exe"}"#.utf8)) == nil)
 
         let summary=files["Summary.txt"]!
         for line in ["Logging: Crashes and freezes · Mouse","Battle.net opened. Logging: Crashes and freezes · Mouse.","Battle.net updated Overwatch (1 min).",
                      "Battle.net marked Overwatch not playable (code 2123).","Overwatch started.","Overwatch closed.","Battle.net closed.",
                      "Overwatch crashed: Overwatch - 2.25.0.0: EXCEPTION_ACCESS_VIOLATION reading from 0x0000000000000040",
                      "Just before, it couldn’t read one of its game files.","Battle.net stopped updating Overwatch after 40 sec.",
+                     "Overwatch’s graphics stopped responding 5 times.","MetalFX upscaling moved to the graphics chip for the rest of the game.",
+                     "After repeated graphics errors, macOS stopped Overwatch’s graphics and its picture froze.",
+                     "Recall closed Overwatch so it could be started again.",
                      "Removed before saving:","For an AI assistant, start with README.md."] {
             precondition(summary.contains(line),"summary lacks \(line):\n\(summary)")
         }
@@ -237,6 +264,6 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         let smaller=contents(unzip(zip))
         precondition(smaller["battlenet/client/battle.net-20261018T100000.000001.log"] == nil)
         precondition(smaller["Summary.txt"]!.contains("Older sessions left out: 2.") && smaller["Summary.txt"]!.contains("larger than GitHub’s 25 MB limit"))
-        print("PASS: Custom text as Wine reads it; presets combined; the mouse report without key counts; repeats collapsed; every personal detail found in real logs removed, helpful details kept; crash dumps and process lists left out; moments with files, lines and Wine's clock; the summary; the GitHub limit")
+        print("PASS: Custom text as Wine reads it; presets combined; the mouse report without key counts; repeats collapsed; every personal detail found in real logs removed, helpful details kept; crash dumps and process lists left out; moments with files, lines and Wine's clock; GPU errors from the engine's record and its lines; the summary; the GitHub limit")
     }
 }

@@ -16,8 +16,9 @@ Read `index.json` first. It has:
   count as grep and sed count them). Battle.net opening, updating (`cancelled` when Battle.net
   stopped it), holding Play (`battlenet_launch_wait`) or marking something not playable; Overwatch
   starting and closing (from Recall's record, or `overwatch_log_*` from Overwatch's own log, which
-  covers its latest run only); and crashes, with the crash report's `top_frames`, `running_time`
-  and `last_log_line`.
+  covers its latest run only); crashes, with the crash report's `top_frames`, `running_time`
+  and `last_log_line`; and graphics errors: `gpu_errors` and `gpu_access_revoked` from the
+  graphics engine's record of a game (below), `gpu_hang` and `gpu_revoked` from its log lines.
 - `errors`: the error lines each log repeats most, with a count and the first line.
 - `left_out`: older sessions left out to fit GitHub's 25 MB limit, and crash dumps, which are
   never included.
@@ -31,6 +32,17 @@ Read `index.json` first. It has:
 - `recall/sessions/<start>/session.json`: what the session started with (`logging`, `winedebug`,
   `dxmt_log_level`, MetalFX, Game Mode, the mouse's `mouse_input` and `mouse_rate`), when Overwatch
   ran (`games`) and when it `ended`.
+- `recall/sessions/<start>/gpu-<program>-<pid>.json` (Recall 1.6.3 and later, whatever the logging
+  setting): the graphics engine's record of a program's GPU errors, written when the Mac's
+  graphics chip hangs (`hang`, `timeout`) or faults (`page_fault`, `internal`) or discards a
+  program's work while it recovers from another's (`victim`). `first_error` and `last_error` give
+  the frame and time; `last_error.detail` names the encoders that were running (`encoder_status`),
+  by index and label (Recall's `RenderPass`, `ComputePass`, `BlitPass`, `ClearPass`; MetalFX's
+  between `BeginScaler` and `EndScaler`). `metalfx` says whether MetalFX upscaling ran, and
+  `metalfx_gpu_mode` whether it moved from the Neural Engine to the graphics chip after a hang.
+  After repeated hangs macOS ignores all of a program's graphics work (`access_revoked`): its
+  picture can't change again, so the engine ends Overwatch (`ended_process`). In `battlenet.log`
+  each error is a `Device error at frame` line, with a `GPU error at frame` line for the encoders.
 - `recall/sessions/<start>/input-<pid>.jsonl` (logging's Mouse preset): the mouse report, one JSON
   line a second for each Wine process that was frontmost or had input. `unix_ms` is the time, `exe`
   the program, `app_active` whether it was frontmost and `mode` whether mouselook was on.
@@ -48,7 +60,7 @@ Read `index.json` first. It has:
   - `variant` is how clicks and timing work: `precise` for Standard and High-precision, `classic`
     for Classic (Recall 1.4's).
   - `raw_interval_us`: the least time between deliveries to Overwatch, in microseconds, from
-    Settings › General › Mouse updates per second. 0 is every report (the default from Recall 1.6.1);
+    Settings › General › Mouse › Advanced. 0 is every report (the default from Recall 1.6.1);
     1000 is 1,000 a second, as in 1.6.0 and always with Classic. Movement in between is added to
     the next delivery.
   - `mac_dx`, `mac_dy`: how far the macOS pointer moved in points, which follows the pointer's speed

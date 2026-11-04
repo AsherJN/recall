@@ -154,7 +154,7 @@ class DisplaySetup(setup.NativeSetup):
         pack=cache/'pipelines/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
         pack.mkdir(parents=True);(pack/'archive.json').write_text('{"archives":[]}')
         (cache/'shaders').mkdir();(cache/'shaders/shaders_320.db').write_text('db')
-        records=('pack.json','prepared.json','preparing.json','warmed.json','shader-update')
+        records=('pack.json','prepared.json','preparing.json','warmed.json','optimized.json','shader-update')
         for name in records:(cache/name).write_text('{}')
         caches=setup.Path(subprocess.run(['/usr/bin/getconf','DARWIN_USER_CACHE_DIR'],capture_output=True,text=True,check=True).stdout.strip())
         tag=self.base.name.replace('_','-')
@@ -262,6 +262,36 @@ class DisplaySetup(setup.NativeSetup):
         self.assertFalse((self.root/'cache/after-session.pid').exists())
         self.assertFalse((self.root/'cache/shader-update').exists())
         self.assertTrue((self.root/'cache/monitor.pid').exists())
+    def test_rebuild_shaders_asks_the_helper_to_prepare_everything_again(self):
+        # Settings › Graphics › Rebuild Shaders: prepare-shaders --rebuild 1 leaves the request
+        # (cache/rebuild-shaders) for the helper and marks the preparation "rebuild" for the app.
+        self.launchable_fixture()
+        (self.root/'cache').mkdir(exist_ok=True)
+        seen=self.base/'pipeline-seen'
+        helper=self.binary.parent/'ow2-pipeline'
+        helper.write_text(f'#!/bin/sh\n{{ [ -e "{self.root}/cache/rebuild-shaders" ] && echo request; cat "{self.root}/cache/shader-update"; echo; }} > "{seen}"\n'
+                          f'rm -f "{self.root}/cache/rebuild-shaders"\nsleep 1\n');helper.chmod(0o755)
+        self.addCleanup(helper.unlink)
+        def stop_monitors():
+            for name in ('monitor.pid','after-session.pid'):
+                try:pid=int((self.root/'cache'/name).read_text())
+                except (OSError,ValueError):continue
+                subprocess.run(['/bin/kill',str(pid)],capture_output=True)
+        self.addCleanup(stop_monitors)
+        self.assertEqual(self.call('prepare-shaders','--rebuild','2',success=False)[-1]['code'],'invalid_arguments')
+        self.assertFalse((self.root/'cache/rebuild-shaders').exists())
+        self.assertEqual(self.call('prepare-shaders','--rebuild','1')[-1],{'stage':'shader_preparation_started'})
+        deadline=time.monotonic()+30
+        while not seen.exists() and time.monotonic()<deadline:time.sleep(.05)
+        self.assertEqual(seen.read_text().split(),['request','rebuild'])
+        deadline=time.monotonic()+30
+        while (self.root/'cache/after-session.pid').exists() and time.monotonic()<deadline:time.sleep(.1)
+        self.assertFalse((self.root/'cache/shader-update').exists())
+        # Clear Shader Cache removes a request left behind.
+        (self.root/'cache/rebuild-shaders').write_text('')
+        stop_monitors()
+        self.assertEqual(self.call('delete-shaders')[-1],{'stage':'shaders_deleted'})
+        self.assertFalse((self.root/'cache/rebuild-shaders').exists())
     def test_launch_writes_the_canvas_size_with_dxmt_option_names(self):
         # DXMT matches option names exactly; a case-insensitive edit once wrote
         # "fullScreenCanvasHeight", which turned the canvas off for 1080.
@@ -378,7 +408,7 @@ class DisplaySetup(setup.NativeSetup):
         self.assertEqual((precise['WINEMAC_INPUT_VARIANT'],precise['WINEMAC_RAW_SOURCE']),('precise','hid'))
         other=launched('--mouse','legacy')
         self.assertEqual((other['WINEMAC_INPUT_VARIANT'],'WINEMAC_RAW_SOURCE' in other),('precise',False))
-        # Mouse updates per second (REC-63): Overwatch gets every report unless the player lowers it, then at
+        # Mouse › Advanced (REC-63): Overwatch gets every report unless the player lowers it, then at
         # most that many a second (the driver's interval in microseconds). Classic keeps the driver's
         # own 1 ms, its 1.4 timing; a rate the app doesn't offer is every report.
         rate='WINEMAC_MOUSELOOK_RAW_INTERVAL_US'
@@ -432,8 +462,13 @@ class DisplaySetup(setup.NativeSetup):
                 if seen.exists():break
                 time.sleep(0.05)
             return events[-1]['session'],dict(line.split('=',1) for line in seen.read_text().splitlines() if '=' in line)
-        _,quiet=launched()
+        quiet_session,quiet=launched()
         self.assertNotIn('WINEMAC_INPUT_STATS',quiet)
+        # Whatever the logging setting, the graphics engine records GPU errors beside the session's
+        # record, ends a game macOS has cut off from the GPU, and asks for each encoder's status (REC-76).
+        self.assertEqual(setup.Path(quiet['DXMT_GPU_REPORT']).resolve(),(self.root/'logs/sessions'/quiet_session).resolve())
+        self.assertEqual((quiet['DXMT_GPU_LOST_EXIT'],quiet['DXMT_GPU_ERROR_DETAIL']),('Overwatch.exe','1'))
+        self.assertNotIn('DXMT_METALFX_GPU_AFTER_HANG',quiet)  # MetalFX off
         session,mouse=launched('--logging','mouse')
         report=lambda env:(str(setup.Path(env['WINEMAC_INPUT_STATS']).parent.resolve()),setup.Path(env['WINEMAC_INPUT_STATS']).name)
         self.assertEqual(report(mouse),(str((self.root/'logs/sessions'/session).resolve()),'input'))

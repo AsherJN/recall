@@ -50,6 +50,8 @@ NOT_SCREEN_TEXT = {
     'wine: Unhandled', 'Unhandled exception', 'File read failed', 'Failed to read data from TACT',
     '**Crashing Thread**', 'Running Time:', 'Most Recent Logs:', 'Launch timer expired',
     'Cancel requested for active operation - OP_UPDATE', "OP_UPDATE for '' done Canceling", 'done Canceling',
+    # The graphics engine's GPU error lines (REC-76), which Save Logs puts on its timeline.
+    'Device error at frame', 'MTLCommandBufferError code 4', '0x[0-9a-fA-F]+|[0-9a-fA-F]{8,}|(?<=frame )[0-9]+',
 }
 # Text in Hangul or Han is shown as written (the Korean notice, 국服-style names).
 OWN_SCRIPT = re.compile(r'[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af\u4e00-\u9fff]')

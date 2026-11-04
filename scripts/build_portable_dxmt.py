@@ -69,13 +69,24 @@ def prepare_source(work):
     check=subprocess.run(['git','apply','--check',str(shader_pack)],cwd=source,capture_output=True)
     if check.returncode==0:run('git','apply',shader_pack,cwd=source)
     else:run('git','apply','--reverse','--check',shader_pack,cwd=source)
-    return source,{'patch':patch,'performance':performance,'portable':portable_patch,'metalfx':metalfx,'shader_pack':shader_pack}
+    # 1.6.3 (REC-76): GPU errors. Each GPU error is sorted (hang, fault, a bystander discarded), logged
+    # with the encoder that was running (DXMT_GPU_ERROR_DETAIL) and recorded beside the session's logs
+    # (DXMT_GPU_REPORT); MetalFX starts its history again after one and, after a hang, can move from
+    # the Neural Engine to the GPU (DXMT_METALFX_GPU_AFTER_HANG); once macOS has revoked the game's GPU
+    # access nothing can be drawn again, so the game ends (DXMT_GPU_LOST_EXIT).
+    gpu_errors=ROOT/'patches/dxmt-gpu-errors.patch'
+    if hashlib.sha256(gpu_errors.read_bytes()).hexdigest()!='384d8d252ae9bf9baa0b37f9cf9d1617665b4fdbcb9d2f0801cc138694aee207':raise ValueError('Accepted GPU errors patch changed')
+    check=subprocess.run(['git','apply','--check',str(gpu_errors)],cwd=source,capture_output=True)
+    if check.returncode==0:run('git','apply',gpu_errors,cwd=source)
+    else:run('git','apply','--reverse','--check',gpu_errors,cwd=source)
+    return source,{'patch':patch,'performance':performance,'portable':portable_patch,'metalfx':metalfx,'shader_pack':shader_pack,
+                   'gpu_errors':gpu_errors}
 
 
 def build(work,tools,jobs,signing=SIGNING):
     if not (signing/sign_pe.KEY).is_file():raise ValueError(f'No signing certificate in {signing} (scripts/sign_pe.py create-certificate)')
     source,patches=prepare_source(work);builddir=work/'dxmt-build';install=work/'dxmt-install'
-    patch,performance,portable_patch,metalfx,shader_pack=(patches[k] for k in ('patch','performance','portable','metalfx','shader_pack'))
+    patch,performance,portable_patch,metalfx,shader_pack,gpu_errors=(patches[k] for k in ('patch','performance','portable','metalfx','shader_pack','gpu_errors'))
     wrapper=source/'portable_metal.py'
     shutil.copy2(ROOT/'scripts/portable_metal.py',wrapper);wrapper.chmod(0o755)
     env=os.environ.copy();env.pop('DESTDIR',None)
@@ -100,6 +111,7 @@ def build(work,tools,jobs,signing=SIGNING):
         'performance_patch_sha256':hashlib.sha256(performance.read_bytes()).hexdigest(),
         'metalfx_patch_sha256':hashlib.sha256(metalfx.read_bytes()).hexdigest(),'nvapi':NVAPI,
         'shader_pack_patch_sha256':hashlib.sha256(shader_pack.read_bytes()).hexdigest(),
+        'gpu_errors_patch_sha256':hashlib.sha256(gpu_errors.read_bytes()).hexdigest(),
         'nvngx_certificate_sha256':hashlib.sha256((signing/sign_pe.LEAF).read_bytes()).hexdigest(),
         'portable_metal_patch_sha256':hashlib.sha256(portable_patch.read_bytes()).hexdigest(),
         'portable_metal_wrapper_sha256':hashlib.sha256(wrapper.read_bytes()).hexdigest(),

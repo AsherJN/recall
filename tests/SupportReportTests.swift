@@ -92,7 +92,7 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
             // The mouse (REC-52, REC-57): Standard unless the player chose another, with Input
             // Monitoring as macOS has it for this process.
             precondition(fields["mouse_input"] as? String == "standard","\(fields)")
-            // Mouse updates per second (REC-63): every report unless the player lowers it.
+            // Mouse › Advanced (REC-63): every report unless the player lowers it.
             precondition(fields["mouse_rate"] as? String == "all","\(fields)")
             precondition(["allowed","denied","undecided"].contains(fields["input_monitoring"] as? String ?? ""),"\(fields)")
             // Other apps (REC-5): nothing launched from this copy, and its busy note never looked.

@@ -1,0 +1,794 @@
+diff --git a/src/d3d11/d3d11_context_impl.cpp b/src/d3d11/d3d11_context_impl.cpp
+index b39df41..b203443 100644
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -5325,6 +5325,19 @@ public:
+     Rc<Texture> mv_offset_texture;
+     Rc<Texture> sharpen_texture;
+ 
++    // After a GPU hang (DXMT_METALFX_GPU_AFTER_HANG, REC-76), MetalFX runs its network on the GPU
++    // instead of the Neural Engine for the rest of the process: MetalFX reads MTLFX_FORCE_GPU when
++    // it makes a scaler, so the cached ones are dropped and made again.
++    auto &queue = ctx_->device->GetDXMTDevice().queue();
++    if (unlikely(!metalfx_gpu_mode_ && queue.MetalFXGpuModeWanted())) {
++      metalfx_gpu_mode_ = true;
++      WMTSetMetalFXForceGPU(1);
++      queue.NoteMetalFXGpuMode();
++      ERR("TemporalUpscale: after a GPU hang, MetalFX upscaling runs on the GPU (MTLFX_FORCE_GPU) from now on; ",
++          scaler_cache_.size(), " scalers made again");
++      scaler_cache_.clear();
++    }
++
+     for(CachedTemporalScaler& entry: scaler_cache_) {
+       if(pDesc->AutoExposure != entry.auto_exposure) continue;
+       if(input->width() != entry.input_width) continue;
+@@ -5373,6 +5386,7 @@ public:
+       info.input_content_max_scale =  3.0f;
+       info.requires_synchronous_initialization = true;
+       scaler_entry.scaler = new TemporalScaler(ctx_->device->GetMTLDevice(), info);
++      queue.NoteMetalFXInUse();
+       WARN("TemporalUpscale: MetalFX scaler ", info.input_width, "x", info.input_height, " -> ", info.output_width, "x",
+            info.output_height, scaler_entry.scaler->scaler() ? "" : " (MetalFX refused it)", "; color format ",
+            info.color_format, " mips ", input->miplevelCount(), " samples ", input->sampleCount(), "; depth ",
+@@ -5542,6 +5556,7 @@ private:
+ 
+   MTLD3D11DeviceContextImplBase<ContextInternalState> *ctx_;
+   std::vector<CachedTemporalScaler> scaler_cache_;
++  bool metalfx_gpu_mode_ = false;
+ };
+ 
+ struct used_dynamic_buffer {
+diff --git a/src/dxmt/dxmt_command_queue.cpp b/src/dxmt/dxmt_command_queue.cpp
+index 13337de..57a292b 100644
+--- a/src/dxmt/dxmt_command_queue.cpp
++++ b/src/dxmt/dxmt_command_queue.cpp
+@@ -68,6 +68,7 @@ CommandQueue::CommandQueue(WMT::Device device) :
+   if (pacing_enabled_ && pacing_mode_ == 2 && !gpu_timing_)
+     gpu_timing_.reset(new FrameGpuTiming[kGpuTimingRing]);
+   SetMaxLatency(3);
++  InitGpuErrorHandling();
+   for (unsigned i = 0; i < kCommandChunkCount; i++) {
+     auto &chunk = chunks[i];
+     chunk.queue = this;
+@@ -171,7 +172,7 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
+   }
+ 
+   auto buffer_start = frame_trace_ ? FrameTelemetry::stamp() : FrameTelemetry::Stamp{};
+-  auto cmdbuf = commandQueue.commandBuffer();
++  auto cmdbuf = commandQueue.commandBuffer(error_options_);
+   if (frame_trace_) frame_trace_->span(FrameTelemetry::CommandBuffer, frame_trace_owner_, chunk.frame_, seq, buffer_start);
+   chunk.attached_cmdbuf = cmdbuf;
+   if (chunk.resource_initializer_event_id) {
+@@ -250,8 +251,17 @@ CommandQueue::WaitForFinishThread() {
+       }
+       entry.command_buffers++;
+     }
+-    if (chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError) {
+-      ERR("Device error at frame ", chunk.frame_, ": ", chunk.attached_cmdbuf.error().description().getUTF8String());
++    {
++      WMTCommandBufferErrorInfo info;
++      if (chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError) {
++        if (!chunk.attached_cmdbuf.errorInfo(info)) {
++          info = {};
++          info.code = ~0ull;
++        }
++        HandleGpuError(chunk, info, false);
++      } else if (unlikely(!simulated_errors_.empty() || simulating_revoked_) && SimulatedGpuError(chunk.frame_, info)) {
++        HandleGpuError(chunk, info, true);
++      }
+     }
+     if (auto logs = chunk.attached_cmdbuf.logs()) {
+       for (auto &log : logs.elements()) {
+@@ -280,6 +290,218 @@ CommandQueue::WaitForFinishThread() {
+   return 0;
+ }
+ 
++namespace {
++
++// UTC now, as 2026-11-02T15:52:51Z.
++std::string
++gpu_error_time() {
++  SYSTEMTIME t;
++  GetSystemTime(&t);
++  char text[32];
++  std::snprintf(text, sizeof(text), "%04u-%02u-%02uT%02u:%02u:%02uZ", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
++                t.wSecond);
++  return text;
++}
++
++std::string
++json_string(const std::string &text) {
++  std::string out = "\"";
++  for (unsigned char c : text) {
++    if (c == '"' || c == '\\') {
++      out += '\\';
++      out += (char)c;
++    } else if (c < 0x20) {
++      char escaped[8];
++      std::snprintf(escaped, sizeof(escaped), "\\u%04x", c);
++      out += escaped;
++    } else {
++      out += (char)c;
++    }
++  }
++  return out + "\"";
++}
++
++constexpr const char *kGpuErrorNames[] = {"hang", "timeout", "page_fault", "victim", "internal", "revoked", "other"};
++
++} // namespace
++
++void
++CommandQueue::InitGpuErrorHandling() {
++  started_time_ = gpu_error_time();
++  if (env::getEnvVar("DXMT_GPU_ERROR_DETAIL") == "1") {
++    error_options_ = WMTCommandBufferErrorOptionEncoderExecutionStatus;
++    argument_encoding_ctx.pass_labels = true;
++  }
++  metalfx_gpu_after_hang_ = env::getEnvVar("DXMT_METALFX_GPU_AFTER_HANG") == "1";
++  auto exit_on = env::getEnvVar("DXMT_GPU_LOST_EXIT");
++  auto exe = env::getExeName();
++  exit_on_revoked_ = exit_on == "1" || (!exit_on.empty() && _stricmp(exit_on.c_str(), exe.c_str()) == 0);
++  auto report_dir = env::getEnvVar("DXMT_GPU_REPORT");
++  if (!report_dir.empty()) {
++    if (report_dir.back() != '/')
++      report_dir += '/';
++    // {pid} becomes the Mac process ID (WMTWriteHostFile): the app knows the game by it.
++    report_path_ = report_dir + "gpu-" + exe + "-{pid}.json";
++  }
++  auto simulate = env::getEnvVar("DXMT_SIMULATE_GPU_ERROR");
++  size_t at = 0;
++  while (at < simulate.size()) {
++    size_t end = simulate.find(',', at);
++    if (end == std::string::npos)
++      end = simulate.size();
++    auto item = simulate.substr(at, end - at);
++    auto sign = item.find('@');
++    if (sign != std::string::npos) {
++      try {
++        simulated_errors_.emplace_back(std::stoull(item.substr(sign + 1)), std::stoull(item.substr(0, sign)));
++      } catch (const std::exception &) {
++      }
++    }
++    at = end + 1;
++  }
++  std::sort(simulated_errors_.begin(), simulated_errors_.end());
++  if (!simulated_errors_.empty())
++    WARN("DXMT_SIMULATE_GPU_ERROR: ", simulated_errors_.size(), " simulated GPU errors");
++}
++
++bool
++CommandQueue::SimulatedGpuError(uint64_t frame, WMTCommandBufferErrorInfo &info) {
++  uint64_t code;
++  if (simulating_revoked_) {
++    code = 4;
++  } else if (!simulated_errors_.empty() && simulated_errors_.front().first <= frame) {
++    code = simulated_errors_.front().second;
++    simulated_errors_.erase(simulated_errors_.begin());
++    simulating_revoked_ = code == 4;
++  } else {
++    return false;
++  }
++  info = {};
++  info.code = code;
++  // The IOGPU reasons macOS gives under these codes (kIOGPUCommandBufferCallbackError...).
++  info.gpu_code = code == 2 ? 3 : code == 3 ? 11 : code == 4 ? 4 : 0;
++  std::snprintf(info.detail, sizeof(info.detail), "simulated (DXMT_SIMULATE_GPU_ERROR)");
++  return true;
++}
++
++void
++CommandQueue::HandleGpuError(CommandChunk &chunk, const WMTCommandBufferErrorInfo &info, bool simulated) {
++  // The reason under the Metal code tells a hang from a discarded bystander (both can be Metal's
++  // code 1 or 2); without one, the Metal code alone.
++  GpuErrorKind kind = GpuErrorKind::Other;
++  if (info.code == 4 || info.gpu_code == 4)
++    kind = GpuErrorKind::Revoked;
++  else if (info.gpu_code == 3)
++    kind = GpuErrorKind::Hang;
++  else if (info.gpu_code == 2)
++    kind = GpuErrorKind::Timeout;
++  else if (info.gpu_code == 5)
++    kind = GpuErrorKind::Victim;
++  else if (info.gpu_code == 11)
++    kind = GpuErrorKind::PageFault;
++  else if (info.gpu_code == 1)
++    kind = GpuErrorKind::Internal;
++  else if (!info.gpu_code && info.code == 2)
++    kind = GpuErrorKind::Timeout;
++  else if (!info.gpu_code && info.code == 3)
++    kind = GpuErrorKind::PageFault;
++  else if (!info.gpu_code && info.code == 1)
++    kind = GpuErrorKind::Internal;
++  const char *name = kGpuErrorNames[(unsigned)kind];
++
++  if (kind == GpuErrorKind::Revoked && access_revoked_) {
++    // Every later command buffer is ignored too: count them, and log at 10, 100, 1000, ...
++    ignored_after_revoked_++;
++    uint64_t power = 10;
++    while (power < ignored_after_revoked_)
++      power *= 10;
++    if (power == ignored_after_revoked_)
++      ERR("GPU access still revoked at frame ", chunk.frame_, ": ", ignored_after_revoked_,
++          " more command buffers ignored");
++    return;
++  }
++
++  // The full description can be long (with encoder status it lists every encoder); Wine's debug
++  // output takes lines of about 1000 bytes, and a longer one raises an exception in the game.
++  std::string description;
++  if (simulated) {
++    description = std::string("simulated MTLCommandBufferError code ") + std::to_string(info.code);
++  } else if (auto error = chunk.attached_cmdbuf.error()) {
++    description = error.description().getUTF8String();
++    if (description.size() > 600)
++      description = description.substr(0, 600) + "...";
++  }
++  ERR("Device error at frame ", chunk.frame_, ": ", description);
++  if (info.encoders)
++    ERR("GPU error at frame ", chunk.frame_, ": ", name, "; ", info.encoders, " encoders: ", info.completed,
++        " completed, ", info.faulted, " faulted, ", info.affected, " affected, ", info.pending, " not run; ",
++        info.detail);
++
++  auto now = gpu_error_time();
++  if (kind == GpuErrorKind::Revoked) {
++    access_revoked_ = true;
++    revoked_frame_ = chunk.frame_;
++    revoked_time_ = now;
++    uint64_t total = 0;
++    for (unsigned i = 0; i < gpu_errors_.size(); i++)
++      if (i != (unsigned)GpuErrorKind::Revoked)
++        total += gpu_errors_[i];
++    ERR("GPU access revoked at frame ", chunk.frame_, ": macOS ignores this process's GPU work after repeated GPU "
++        "errors (before this: ", total, " GPU errors, hangs ", gpu_errors_[(unsigned)GpuErrorKind::Hang],
++        "); nothing can be drawn again until it restarts");
++    gpu_errors_[(unsigned)kind]++;
++    WriteGpuReport();
++    if (exit_on_revoked_) {
++      ERR("Ending ", env::getExeName(), " (DXMT_GPU_LOST_EXIT): its picture can't change any more");
++      // DXGI_ERROR_DEVICE_HUNG: what Windows reports for a device that stopped responding.
++      TerminateProcess(GetCurrentProcess(), 0x887A0006);
++    }
++    return;
++  }
++
++  gpu_errors_[(unsigned)kind]++;
++  if (first_error_time_.empty()) {
++    first_error_frame_ = chunk.frame_;
++    first_error_time_ = now;
++  }
++  last_error_frame_ = chunk.frame_;
++  last_error_time_ = now;
++  last_error_kind_ = name;
++  last_error_detail_ = info.detail;
++  // The work that failed never finished: whatever it drew, MetalFX must not build on.
++  gpu_error_epoch_.fetch_add(1, std::memory_order_acq_rel);
++  if ((kind == GpuErrorKind::Hang || kind == GpuErrorKind::Timeout) && metalfx_gpu_after_hang_)
++    metalfx_gpu_wanted_.store(true, std::memory_order_release);
++  WriteGpuReport();
++}
++
++void
++CommandQueue::WriteGpuReport() {
++  if (report_path_.empty())
++    return;
++  std::string json = "{\"schema\":1,\"process\":" + json_string(env::getExeName()) +
++                     ",\"windows_pid\":" + std::to_string(GetCurrentProcessId()) +
++                     ",\"started\":" + json_string(started_time_) + ",\"updated\":" + json_string(gpu_error_time()) +
++                     ",\"encoder_status\":" + (error_options_ ? "true" : "false") +
++                     ",\"metalfx\":" + (metalfx_used_.load() ? "true" : "false") +
++                     ",\"metalfx_gpu_mode\":" + (metalfx_gpu_mode_.load() ? "true" : "false") + ",\"errors\":{";
++  for (unsigned i = 0; i < gpu_errors_.size(); i++)
++    if (i != (unsigned)GpuErrorKind::Revoked)
++      json += std::string(i ? "," : "") + "\"" + kGpuErrorNames[i] + "\":" + std::to_string(gpu_errors_[i]);
++  json += "}";
++  if (!first_error_time_.empty())
++    json += ",\"first_error\":{\"frame\":" + std::to_string(first_error_frame_) +
++            ",\"time\":" + json_string(first_error_time_) + "},\"last_error\":{\"frame\":" +
++            std::to_string(last_error_frame_) + ",\"time\":" + json_string(last_error_time_) +
++            ",\"kind\":" + json_string(last_error_kind_) + ",\"detail\":" + json_string(last_error_detail_) + "}";
++  if (access_revoked_)
++    json += ",\"access_revoked\":{\"frame\":" + std::to_string(revoked_frame_) +
++            ",\"time\":" + json_string(revoked_time_) + "},\"ended_process\":" + (exit_on_revoked_ ? "true" : "false");
++  json += "}\n";
++  if (!WMTWriteHostFile(report_path_.c_str(), json.c_str(), json.size()))
++    WARN("GPU error report not written: ", report_path_);
++}
++
+ void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {
+   auto &chunk = chunks[seq % kCommandChunkCount];
+   auto &tracker = chunk.ref_tracker;
+diff --git a/src/dxmt/dxmt_command_queue.hpp b/src/dxmt/dxmt_command_queue.hpp
+index 902a9bc..286cf41 100644
+--- a/src/dxmt/dxmt_command_queue.hpp
++++ b/src/dxmt/dxmt_command_queue.hpp
+@@ -38,6 +38,9 @@
+ #include <array>
+ #include <atomic>
+ #include <chrono>
++#include <string>
++#include <utility>
++#include <vector>
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstdio>
+@@ -211,6 +214,39 @@ private:
+   FrameTelemetry::Stamp frame_log_last_{};
+   uint64_t frame_log_compiles_ = 0;
+ 
++  /* Recall 1.7 (REC-76): GPU errors. A GPU hang or fault discards the command buffer and the GPU
++   * recovers; after repeated hangs macOS ignores every later command buffer of the process
++   * ("Ignored (for causing prior/excessive GPU errors)"), so nothing can be drawn again until it
++   * restarts and the last frame stays on screen. The finish thread sorts each error, logs it
++   * with the encoder that was running (DXMT_GPU_ERROR_DETAIL=1 asks Metal for each encoder's
++   * execution status), keeps a record of the process's GPU errors in DXMT_GPU_REPORT (a
++   * directory: gpu-<exe>-<Mac pid>.json), and once access is revoked ends the process if
++   * DXMT_GPU_LOST_EXIT names it (or is 1). After a hang, MetalFX starts its temporal history
++   * again and, with DXMT_METALFX_GPU_AFTER_HANG=1, moves its network from the Neural Engine to
++   * the GPU (d3d11_context_impl.cpp). DXMT_SIMULATE_GPU_ERROR=code@frame[,code@frame...] makes
++   * the first command buffer finishing at or after each frame report that MTLCommandBufferError
++   * code (2 hang, 3 page fault, 4 access revoked; revoked stays), for tests. */
++  enum class GpuErrorKind { Hang, Timeout, PageFault, Victim, Internal, Revoked, Other };
++  void InitGpuErrorHandling();
++  void HandleGpuError(CommandChunk &chunk, const WMTCommandBufferErrorInfo &info, bool simulated);
++  bool SimulatedGpuError(uint64_t frame, WMTCommandBufferErrorInfo &info);
++  void WriteGpuReport();
++  uint64_t error_options_ = 0;
++  std::atomic<uint64_t> gpu_error_epoch_{0};
++  std::atomic<bool> metalfx_gpu_wanted_{false};
++  std::atomic<bool> metalfx_used_{false};
++  std::atomic<bool> metalfx_gpu_mode_{false};
++  bool metalfx_gpu_after_hang_ = false;
++  bool exit_on_revoked_ = false;
++  bool access_revoked_ = false;
++  uint64_t revoked_frame_ = 0, ignored_after_revoked_ = 0;
++  std::string report_path_, started_time_, revoked_time_;
++  std::array<uint64_t, 7> gpu_errors_{};
++  uint64_t first_error_frame_ = 0, last_error_frame_ = 0;
++  std::string first_error_time_, last_error_time_, last_error_kind_, last_error_detail_;
++  std::vector<std::pair<uint64_t, uint64_t>> simulated_errors_; // (frame, code), in frame order
++  bool simulating_revoked_ = false;
++
+   dxmt::thread encodeThread;
+   dxmt::thread finishThread;
+   WMT::Device device;
+@@ -281,6 +317,13 @@ public:
+     return shared_event_listener;
+   }
+ 
++  // GPU errors (REC-76): bumped by each error the GPU recovers from, so MetalFX can start its
++  // temporal history again; set after a hang while DXMT_METALFX_GPU_AFTER_HANG is on.
++  uint64_t GpuErrorEpoch() const { return gpu_error_epoch_.load(std::memory_order_acquire); }
++  bool MetalFXGpuModeWanted() const { return metalfx_gpu_wanted_.load(std::memory_order_acquire); }
++  void NoteMetalFXInUse() { metalfx_used_.store(true, std::memory_order_release); }
++  void NoteMetalFXGpuMode() { metalfx_gpu_mode_.store(true, std::memory_order_release); }
++
+   /**
+   This is not thread-safe!
+   CurrentChunk & CommitCurrentChunk should be called on the same thread
+diff --git a/src/dxmt/dxmt_context.cpp b/src/dxmt/dxmt_context.cpp
+index a9a1b1a..3ab25fb 100644
+--- a/src/dxmt/dxmt_context.cpp
++++ b/src/dxmt/dxmt_context.cpp
+@@ -1065,6 +1065,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+       auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
+       if (bench_labels)
+         bench_label(encoder, bench_render_label(bench_label_frame, bench_label_index++, data));
++      else if (pass_labels)
++        encoder.setLabel(passLabel(pass_label_render_, "RenderPass"));
+       data->fence_wait.forEach(
+           data->fence_wait_vertex, // if a fence is waited pre-raster, no need to wait again at fragment
+           [&](auto id) { encoder.waitForFence(fence_pool_[id], WMTRenderStagePreRaster); },
+@@ -1167,6 +1169,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+                         return type == WMTComputeCommandDispatch || type == WMTComputeCommandDispatchIndirect;
+                       }));
+         bench_label(encoder, buf);
++      } else if (pass_labels) {
++        encoder.setLabel(passLabel(pass_label_compute_, "ComputePass"));
+       }
+       data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
+       struct wmtcmd_compute_setbuffer setcmd;
+@@ -1192,6 +1196,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+         std::snprintf(buf, sizeof buf, "F%llu#%u B n%u", (unsigned long long)bench_label_frame, bench_label_index++,
+                       bench_count(&data->cmd_head, [](uint16_t type) { return type != 0; }));
+         bench_label(encoder, buf);
++      } else if (pass_labels) {
++        encoder.setLabel(passLabel(pass_label_blit_, "BlitPass"));
+       }
+       data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
+       encoder.encodeCommands(&data->cmd_head);
+@@ -1327,9 +1333,18 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+       begin_scaler.updateFence(data->scaler->fence());
+       begin_scaler.endEncoding();
+ 
++      // After a GPU error the frame that failed left partial results in MetalFX's history: start
++      // it again rather than carry them forward (REC-76).
++      WMTFXTemporalScalerProps props = data->props;
++      uint64_t error_epoch = queue_.GpuErrorEpoch();
++      if (data->scaler->error_epoch != error_epoch) {
++        if (data->scaler->error_epoch != ~0ull)
++          props.reset = true;
++        data->scaler->error_epoch = error_epoch;
++      }
+       cmdbuf.encodeTemporalScale(
+           data->scaler->scaler(), data->input, data->output, data->depth, data->motion_vector, data->exposure,
+-          data->scaler->fence(), data->props
++          data->scaler->fence(), props
+       );
+ 
+       auto end_scaler = cmdbuf.blitCommandEncoder();
+diff --git a/src/dxmt/dxmt_context.hpp b/src/dxmt/dxmt_context.hpp
+index 2ecbf7f..ac5c664 100644
+--- a/src/dxmt/dxmt_context.hpp
++++ b/src/dxmt/dxmt_context.hpp
+@@ -837,6 +837,16 @@ public:
+   // DXMT_BENCH_LABELS=1: every encoder is labeled with its frame, its index in that
+   // frame, its attachments and its command count, for GPU traces of the replayer.
+   bool bench_labels = false;
++  // DXMT_GPU_ERROR_DETAIL (REC-76): render, compute and blit encoders carry a label, so the
++  // encoder a GPU error names can be told apart from MetalFX's (made once, kept).
++  bool pass_labels = false;
++  WMT::Reference<WMT::String> pass_label_render_, pass_label_compute_, pass_label_blit_;
++  WMT::String
++  passLabel(WMT::Reference<WMT::String> &label, const char *text) {
++    if (!label)
++      label = WMT::String::string(text, WMTUTF8StringEncoding);
++    return label;
++  }
+   uint64_t bench_label_frame = ~0ull;
+   unsigned bench_label_index = 0;
+ 
+diff --git a/src/dxmt/dxmt_scaler.hpp b/src/dxmt/dxmt_scaler.hpp
+index 6bc68d1..8b4ff48 100644
+--- a/src/dxmt/dxmt_scaler.hpp
++++ b/src/dxmt/dxmt_scaler.hpp
+@@ -41,6 +41,11 @@ public:
+     return fence_;
+   }
+ 
++  // The queue's GPU error count when this scaler last ran (encoding thread only; ~0 before its first
++  // frame): a GPU error since means a frame's work never finished, so MetalFX starts its temporal
++  // history again (REC-76).
++  uint64_t error_epoch = ~0ull;
++
+ private:
+   WMT::Reference<WMT::FXTemporalScaler> scaler_;
+   WMT::Reference<WMT::Fence> fence_;
+diff --git a/src/winemetal/Metal.hpp b/src/winemetal/Metal.hpp
+index 267d15d..0c89c9e 100644
+--- a/src/winemetal/Metal.hpp
++++ b/src/winemetal/Metal.hpp
+@@ -664,6 +664,11 @@ public:
+     return LogContainer{MTLCommandBuffer_logs(handle)};
+   }
+ 
++  bool
++  errorInfo(WMTCommandBufferErrorInfo &info) {
++    return MTLCommandBuffer_errorInfo(handle, &info) != 0;
++  }
++
+   uint64_t
+   gpuStartTime() {
+     return MTLCommandBuffer_property(handle, WMTCommandBufferPropertyGPUStartTime);
+@@ -735,6 +740,13 @@ public:
+     return CommandBuffer{MTLCommandQueue_commandBuffer(handle)};
+   }
+ 
++  CommandBuffer
++  commandBuffer(uint64_t error_options) {
++    if (!error_options)
++      return commandBuffer();
++    return CommandBuffer{MTLCommandQueue_commandBufferWithErrorOptions(handle, error_options)};
++  }
++
+   void
+   addResidencySet(ResidencySet residency_set) {
+     MTLCommandQueue_addResidencySet(handle, residency_set.handle);
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 2e71165..d3cbbe7 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -1,6 +1,9 @@
+ #include <stdatomic.h>
+ #include <dlfcn.h>
+ #include <time.h>
++#include <stdarg.h>
++#include <fcntl.h>
++#include <unistd.h>
+ #import <Cocoa/Cocoa.h>
+ #import <ColorSync/ColorSync.h>
+ #import <CoreFoundation/CFRunLoop.h>
+@@ -1739,6 +1742,155 @@ _WMTGetHostTimeNs(void *obj) {
+   return STATUS_SUCCESS;
+ }
+ 
++/* Recall 1.7 (REC-76): GPU errors (winemetal.h). */
++static NTSTATUS
++_MTLCommandQueue_commandBufferWithErrorOptions(void *obj) {
++  struct unixcall_generic_obj_uint64_obj_ret *params = obj;
++  MTLCommandBufferDescriptor *desc = [[MTLCommandBufferDescriptor alloc] init];
++  // retainedReferences stays YES, as with -[MTLCommandQueue commandBuffer].
++  desc.errorOptions = (MTLCommandBufferErrorOption)params->arg;
++  params->ret = (obj_handle_t)[(id<MTLCommandQueue>)params->handle commandBufferWithDescriptor:desc];
++  [desc release];
++  return STATUS_SUCCESS;
++}
++
++static void
++error_detail_append(char *out, size_t size, const char *format, ...) {
++  size_t used = strnlen(out, size);
++  if (used + 1 >= size)
++    return;
++  va_list args;
++  va_start(args, format);
++  vsnprintf(out + used, size - used, format, args);
++  va_end(args);
++}
++
++// An encoder as "#index 'label'": labels cut to 40 characters, and up to two of its debug signposts.
++static void
++error_detail_encoder(char *out, size_t size, NSUInteger index, id<MTLCommandBufferEncoderInfo> encoder) {
++  NSString *label = encoder.label;
++  const char *text = label.length ? label.UTF8String : NULL;
++  if (text)
++    error_detail_append(out, size, "#%lu '%.40s'", (unsigned long)index, text);
++  else
++    error_detail_append(out, size, "#%lu (no label)", (unsigned long)index);
++  NSArray<NSString *> *signposts = encoder.debugSignposts;
++  if (signposts.count) {
++    error_detail_append(out, size, " [");
++    for (NSUInteger i = 0; i < signposts.count && i < 2; i++)
++      error_detail_append(out, size, "%s'%.32s'", i ? ", " : "", signposts[i].UTF8String ?: "");
++    error_detail_append(out, size, "%s]", signposts.count > 2 ? ", ..." : "");
++  }
++}
++
++static NTSTATUS
++_MTLCommandBuffer_errorInfo(void *obj) {
++  struct unixcall_mtlcommandbuffer_errorinfo *params = obj;
++  struct WMTCommandBufferErrorInfo *info = params->info.ptr;
++  memset(info, 0, sizeof(*info));
++  params->ret = 0;
++  @autoreleasepool {
++    NSError *error = [(id<MTLCommandBuffer>)params->cmdbuf error];
++    if (!error)
++      return STATUS_SUCCESS;
++    params->ret = 1;
++    info->code = [error.domain isEqualToString:MTLCommandBufferErrorDomain] ? (uint64_t)error.code : ~0ull;
++    NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
++    if ([underlying isKindOfClass:NSError.class])
++      info->gpu_code = (uint64_t)underlying.code;
++    NSArray *encoders = error.userInfo[MTLCommandBufferEncoderInfoErrorKey];
++    if (![encoders isKindOfClass:NSArray.class])
++      return STATUS_SUCCESS;
++    info->encoders = (uint32_t)encoders.count;
++    NSUInteger first_unfinished = NSNotFound, listed = 0;
++    for (NSUInteger i = 0; i < encoders.count; i++) {
++      id<MTLCommandBufferEncoderInfo> encoder = encoders[i];
++      switch (encoder.errorState) {
++      case MTLCommandEncoderErrorStateCompleted: info->completed++; break;
++      case MTLCommandEncoderErrorStateFaulted: info->faulted++; break;
++      case MTLCommandEncoderErrorStateAffected: info->affected++; break;
++      case MTLCommandEncoderErrorStatePending: info->pending++; break;
++      default: info->unknown++; break;
++      }
++      if (encoder.errorState != MTLCommandEncoderErrorStateCompleted && first_unfinished == NSNotFound)
++        first_unfinished = i;
++    }
++    char *out = info->detail;
++    size_t size = sizeof(info->detail);
++    for (NSUInteger i = 0; i < encoders.count && listed < 4; i++) {
++      id<MTLCommandBufferEncoderInfo> encoder = encoders[i];
++      if (encoder.errorState != MTLCommandEncoderErrorStateFaulted)
++        continue;
++      error_detail_append(out, size, listed++ ? ", " : "faulted ");
++      error_detail_encoder(out, size, i, encoder);
++    }
++    if (info->faulted > listed)
++      error_detail_append(out, size, " and %u more", info->faulted - (uint32_t)listed);
++    if (first_unfinished != NSNotFound) {
++      static const char *states[] = {"unknown", "completed", "affected", "not run", "faulted"};
++      id<MTLCommandBufferEncoderInfo> encoder = encoders[first_unfinished];
++      NSUInteger state = encoder.errorState < 5 ? encoder.errorState : 0;
++      error_detail_append(out, size, "%sfirst unfinished ", out[0] ? "; " : "");
++      error_detail_encoder(out, size, first_unfinished, encoder);
++      error_detail_append(out, size, " (%s)", states[state]);
++      if (first_unfinished > 0) {
++        error_detail_append(out, size, ", after ");
++        error_detail_encoder(out, size, first_unfinished - 1, encoders[first_unfinished - 1]);
++      }
++    }
++  }
++  return STATUS_SUCCESS;
++}
++
++static NTSTATUS
++_WMTSetMetalFXForceGPU(void *obj) {
++  struct unixcall_generic_obj_uint64_noret *params = obj;
++  const char wanted = params->arg ? '1' : '0';
++  // A one-character value the launch set is changed in place: setenv can move the environment
++  // while another thread reads it.
++  char *value = getenv("MTLFX_FORCE_GPU");
++  if (value && (value[0] == '0' || value[0] == '1') && value[1] == 0)
++    value[0] = wanted;
++  else
++    setenv("MTLFX_FORCE_GPU", wanted == '1' ? "1" : "0", 1);
++  return STATUS_SUCCESS;
++}
++
++static NTSTATUS
++_WMTWriteHostFile(void *obj) {
++  struct unixcall_write_host_file *params = obj;
++  const char *path = params->path.ptr, *text = params->text.ptr;
++  params->ret = 0;
++  if (!path || !path[0] || !text)
++    return STATUS_SUCCESS;
++  // "{pid}" in the path becomes this process's Mac process ID.
++  char resolved[4000], temp[4096];
++  const char *mark = strstr(path, "{pid}");
++  int length = mark ? snprintf(resolved, sizeof(resolved), "%.*s%d%s", (int)(mark - path), path, (int)getpid(), mark + 5)
++                    : snprintf(resolved, sizeof(resolved), "%s", path);
++  if (length < 0 || length >= (int)sizeof(resolved))
++    return STATUS_SUCCESS;
++  path = resolved;
++  if (snprintf(temp, sizeof(temp), "%s.%d.tmp", path, (int)getpid()) >= (int)sizeof(temp))
++    return STATUS_SUCCESS;
++  int fd = open(temp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
++  if (fd < 0)
++    return STATUS_SUCCESS;
++  uint64_t done = 0;
++  while (done < params->length) {
++    ssize_t n = write(fd, text + done, params->length - done);
++    if (n <= 0)
++      break;
++    done += (uint64_t)n;
++  }
++  close(fd);
++  if (done == params->length && rename(temp, path) == 0)
++    params->ret = 1;
++  else
++    unlink(temp);
++  return STATUS_SUCCESS;
++}
++
+ static NTSTATUS
+ _SetMetalViewFullscreen(void *obj) {
+   struct unixcall_generic_obj_uint64_uint64_ret *params = obj;
+@@ -3346,6 +3498,10 @@ const void *__wine_unix_call_funcs[] = {
+     &_ConfigureMetalViewCanvas,
+     &_SetMetalViewFullscreen,
+     &_WMTGetHostTimeNs,
++    &_MTLCommandQueue_commandBufferWithErrorOptions,
++    &_MTLCommandBuffer_errorInfo,
++    &_WMTSetMetalFXForceGPU,
++    &_WMTWriteHostFile,
+ };
+ 
+ #ifndef DXMT_NATIVE
+@@ -3499,5 +3655,9 @@ const void *__wine_unix_call_wow64_funcs[] = {
+     &_ConfigureMetalViewCanvas,
+     &_SetMetalViewFullscreen,
+     &_WMTGetHostTimeNs,
++    &_MTLCommandQueue_commandBufferWithErrorOptions,
++    &_MTLCommandBuffer_errorInfo,
++    &_WMTSetMetalFXForceGPU,
++    &_WMTWriteHostFile,
+ };
+ #endif
+diff --git a/src/winemetal/winemetal.h b/src/winemetal/winemetal.h
+index 09a4570..1d42c52 100644
+--- a/src/winemetal/winemetal.h
++++ b/src/winemetal/winemetal.h
+@@ -2143,4 +2143,40 @@ WINEMETAL_API void MTLTexture_getBytes(
+     struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image
+ );
+ 
++
++/* Recall 1.7 (REC-76): GPU errors.
++ * After repeated GPU hangs macOS refuses every later command buffer of the process
++ * (MTLCommandBufferErrorAccessRevoked, "Ignored (for causing prior/excessive GPU errors)"); nothing
++ * can be drawn again until the process restarts. Command buffers can record each encoder's
++ * execution status, so a hang names the encoder that was running. */
++enum WMTCommandBufferErrorOption : uint64_t {
++  WMTCommandBufferErrorOptionNone = 0,
++  WMTCommandBufferErrorOptionEncoderExecutionStatus = 1,
++};
++
++WINEMETAL_API obj_handle_t MTLCommandQueue_commandBufferWithErrorOptions(obj_handle_t queue, uint64_t options);
++
++struct WMTCommandBufferErrorInfo {
++  uint64_t code;     // MTLCommandBufferError code, 0 when the command buffer has no error
++  uint64_t gpu_code; // the IOGPU reason under it (kIOGPUCommandBufferCallbackError...), 0 if none
++  uint32_t encoders; // encoders the error reports (with encoder execution status), by state:
++  uint32_t completed;
++  uint32_t faulted;
++  uint32_t affected;
++  uint32_t pending;
++  uint32_t unknown;
++  char detail[480];  // the faulted encoders and the one before the first of them, by index and label
++};
++
++// Fills info for a command buffer whose status is error; returns 0 when it has none.
++WINEMETAL_API uint32_t MTLCommandBuffer_errorInfo(obj_handle_t cmdbuf, struct WMTCommandBufferErrorInfo *info);
++
++// MetalFX runs its temporal scaler's network on the Neural Engine or on the GPU. It reads
++// MTLFX_FORCE_GPU each time a scaler is made, so this decides the mode of scalers made after it.
++WINEMETAL_API void WMTSetMetalFXForceGPU(uint32_t gpu);
++
++// Writes a small text file by its Mac path, replacing it whole (written aside, then renamed);
++// "{pid}" in the path becomes the Mac process ID.
++WINEMETAL_API uint32_t WMTWriteHostFile(const char *path, const char *text, uint64_t length);
++
+ #endif
+\ No newline at end of file
+diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
+index 43a36fa..c69feb4 100644
+--- a/src/winemetal/winemetal_thunks.c
++++ b/src/winemetal/winemetal_thunks.c
+@@ -1359,3 +1359,42 @@ WMTGetHostTimeNs(void) {
+   UNIX_CALL(148, &params);
+   return params.ret;
+ }
++
++WINEMETAL_API obj_handle_t
++MTLCommandQueue_commandBufferWithErrorOptions(obj_handle_t queue, uint64_t options) {
++  struct unixcall_generic_obj_uint64_obj_ret params;
++  params.handle = queue;
++  params.arg = options;
++  params.ret = 0;
++  UNIX_CALL(149, &params);
++  return params.ret;
++}
++
++WINEMETAL_API uint32_t
++MTLCommandBuffer_errorInfo(obj_handle_t cmdbuf, struct WMTCommandBufferErrorInfo *info) {
++  struct unixcall_mtlcommandbuffer_errorinfo params;
++  params.cmdbuf = cmdbuf;
++  WMT_MEMPTR_SET(params.info, info);
++  params.ret = 0;
++  UNIX_CALL(150, &params);
++  return (uint32_t)params.ret;
++}
++
++WINEMETAL_API void
++WMTSetMetalFXForceGPU(uint32_t gpu) {
++  struct unixcall_generic_obj_uint64_noret params;
++  params.handle = NULL_OBJECT_HANDLE;
++  params.arg = gpu;
++  UNIX_CALL(151, &params);
++}
++
++WINEMETAL_API uint32_t
++WMTWriteHostFile(const char *path, const char *text, uint64_t length) {
++  struct unixcall_write_host_file params;
++  WMT_MEMPTR_SET(params.path, path);
++  WMT_MEMPTR_SET(params.text, text);
++  params.length = length;
++  params.ret = 0;
++  UNIX_CALL(152, &params);
++  return (uint32_t)params.ret;
++}
+diff --git a/src/winemetal/winemetal_thunks.h b/src/winemetal/winemetal_thunks.h
+index 37645c9..194a7ac 100644
+--- a/src/winemetal/winemetal_thunks.h
++++ b/src/winemetal/winemetal_thunks.h
+@@ -435,6 +435,19 @@ struct unixcall_mtldevice_newicb {
+   obj_handle_t ret;
+ };
+ 
++struct unixcall_mtlcommandbuffer_errorinfo {
++  obj_handle_t cmdbuf;
++  struct WMTMemoryPointer info;
++  uint64_t ret;
++};
++
++struct unixcall_write_host_file {
++  struct WMTConstMemoryPointer path;
++  struct WMTConstMemoryPointer text;
++  uint64_t length;
++  uint64_t ret;
++};
++
+ #pragma pack(pop)
+ 
+ #endif

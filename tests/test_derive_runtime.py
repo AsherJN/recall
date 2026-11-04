@@ -608,6 +608,83 @@ class ShaderPack(unittest.TestCase):
         self.assertFalse((self.artifacts / 'next').exists())
 
 
+class GPUErrors(unittest.TestCase):
+    """1.6.3 (REC-76): the DXMT build with the GPU errors patch replaces the base's five DXMT files and
+    its d3d12.dll stand-in (each links DXMT's core); the DLSS stand-in keeps the bytes its signature
+    covers, the NVAPI stand-in and everything else stay byte-identical, and a build without the patch
+    or a base without the stand-in is refused. DLL stripping is stubbed (it needs LLVM-MinGW)."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ow2-gpu-errors-')
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name)
+        self.addCleanup(setattr, derive_runtime, 'ARTIFACTS', derive_runtime.ARTIFACTS)
+        derive_runtime.ARTIFACTS = self.artifacts = folder / 'artifacts'
+        real_package = derive_runtime.package_like_assembler
+        self.addCleanup(setattr, derive_runtime, 'package_like_assembler', real_package)
+        derive_runtime.package_like_assembler = lambda path: None if path.suffix == '.dll' else real_package(path)
+        (folder / 'probe.c').write_text('int probe(void) { return 1; }\n')
+
+        def winemetal(path, minimum='26.0'):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-mmacosx-version-min=' + minimum, '-dynamiclib',
+                            folder / 'probe.c', '-install_name', '@rpath/winemetal.so', '-Wl,-rpath,@loader_path',
+                            '-Wl,-rpath,@loader_path/../..', '-o', path],
+                           check=True)
+        self.base = base = self.artifacts / 'base'
+        windows = sorted({*derive_runtime.METALFX_REPLACED, *derive_runtime.METALFX_ADDED} - {'lib/wine/x86_64-unix/winemetal.so'})
+        for relative in [*windows, 'bin/wine']:
+            (base / relative).parent.mkdir(parents=True, exist_ok=True)
+            (base / relative).write_bytes(b'base ' + relative.encode() + (b' SIGNED' if relative.endswith('nvngx.dll') else b''))
+        winemetal(base / 'lib/wine/x86_64-unix/winemetal.so', '15.0')
+        files = {str(p.relative_to(base)): {'sha256': derive_runtime.sha(p)} for p in base.rglob('*') if p.is_file()}
+        (base / 'runtime.json').write_text(json.dumps({'version': 'base', 'minimum_macos': '15.0', 'files': files}))
+        write_archive(base)
+        (self.artifacts / 'base.tar.json').write_text(json.dumps({'version': 'base'}))
+        self.workspace = folder / 'dxmt'
+        install = self.workspace / 'dxmt-install'
+        for built in [*derive_runtime.METALFX_REPLACED.values(), *derive_runtime.METALFX_ADDED.values()]:
+            (install / built).parent.mkdir(parents=True, exist_ok=True)
+            (install / built).write_bytes(b'built ' + built.encode())
+        winemetal(install / 'x86_64-unix/winemetal.so')
+        self.proof = {'files': {str(p.relative_to(install)): derive_runtime.sha(p) for p in install.rglob('*') if p.is_file()},
+                      **{key: derive_runtime.sha(derive_runtime.ROOT / patch)
+                         for patch, key in derive_runtime.GPU_ERRORS_PATCHES.items()}}
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+
+    def test_dxmt_and_the_d3d12_stand_in_are_replaced(self):
+        derive_runtime.derive_gpu_errors('base', 'next', '-', self.workspace)
+        manifest = check_archive(self.artifacts / 'next.tar.gz')
+        base, next_ = self.base, self.artifacts / 'next'
+        replaced = sorted(derive_runtime.GPU_ERRORS_REPLACED)
+        self.assertEqual(sorted(manifest['files']), sorted(json.loads((base / 'runtime.json').read_text())['files']))
+        self.assertEqual(sorted(manifest['derived_from']['replaced']), replaced)
+        patches = manifest['derived_from']['replaced']['lib/wine/x86_64-windows/d3d12.dll']['patches']
+        self.assertEqual(sorted(patches), sorted(derive_runtime.GPU_ERRORS_PATCHES))
+        self.assertIn('patches/dxmt-gpu-errors.patch', patches)
+        for relative in manifest['files']:
+            if relative not in derive_runtime.GPU_ERRORS_REPLACED:
+                self.assertEqual((next_ / relative).read_bytes(), (base / relative).read_bytes(), relative)
+        self.assertEqual((next_ / 'lib/wine/x86_64-windows/d3d12.dll').read_bytes(), b'built x86_64-windows/d3d12.dll')
+        self.assertEqual((next_ / 'lib/wine/x86_64-windows/d3d11.dll').read_bytes(), b'built x86_64-windows/d3d11.dll')
+        self.assertTrue((next_ / derive_runtime.METALFX_NVNGX).read_bytes().endswith(b'SIGNED'))
+        self.assertEqual(file_minimum(next_ / 'lib/wine/x86_64-unix/winemetal.so')[1], parse_macos('15.0'))
+        self.assertEqual(sorted(json.loads((self.artifacts / 'next.tar.json').read_text())['replaced']), replaced)
+
+    def test_a_build_without_the_patch_or_a_base_without_the_stand_in_is_refused(self):
+        del self.proof['gpu_errors_patch_sha256']
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_gpu_errors('base', 'next', '-', self.workspace)
+        self.proof['gpu_errors_patch_sha256'] = derive_runtime.sha(derive_runtime.ROOT / 'patches/dxmt-gpu-errors.patch')
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+        manifest = json.loads((self.base / 'runtime.json').read_text())
+        del manifest['files']['lib/wine/x86_64-windows/d3d12.dll']
+        (self.base / 'runtime.json').write_text(json.dumps(manifest))
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_gpu_errors('base', 'next', '-', self.workspace)
+        self.assertFalse((self.artifacts / 'next').exists())
+
+
 class GameModeApp(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='ow2-game-mode-app-')

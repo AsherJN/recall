@@ -60,11 +60,15 @@
     "WINEMAC_MOUSELOOK": "Overwatch.exe",
     "WINEMAC_INPUT_VARIANT": "precise",
     "WINE_GAME_MODE": "Overwatch.exe",
-    "DXMT_PREPARE_SHADERS": "1"
+    "DXMT_PREPARE_SHADERS": "1",
+    "DXMT_GPU_ERROR_DETAIL": "1",
+    "DXMT_GPU_LOST_EXIT": "Overwatch.exe"
   },
   "metalfx_environment": {
     "DXMT_ENABLE_NVEXT": "1",
-    "WINEDLLOVERRIDES": "d3d11,dxgi,d3d10core,winemetal,d3d12,nvapi64,nvngx=b"
+    "WINEDLLOVERRIDES": "d3d11,dxgi,d3d10core,winemetal,d3d12,nvapi64,nvngx=b",
+    "DXMT_METALFX_GPU_AFTER_HANG": "1",
+    "MTLFX_FORCE_GPU": "0"
   },
   "metalfx_sharpening": {
     "low": "0.4",

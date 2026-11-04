@@ -56,15 +56,25 @@ support report (schema 4) carries it as `other_apps.at_last_launch` with the cur
 `other_apps.now`. `tests/BusyAppsTests.swift` covers the reading and the choice.
 `AppModel.openHelp` opens it on Troubleshooting after a failed step, on Support
 from Help › Report a Problem…, otherwise on FAQ. Every pop-up is 540 wide; Settings, Help &
-FAQ, About and Licenses are all 540 × 760 (`LauncherStyle.largeSheetHeight`), so tabs, Done and
-Uninstall never move: Settings' page scrolls only when a notice joins its tallest tab (Graphics
-with Battle.net open, 745), and About's letter and support section scroll. Esc closes every
+FAQ, About, Licenses and What's New are all 540 × 760 (`LauncherStyle.largeSheetHeight`), so tabs,
+Done and Uninstall never move: Settings' page scrolls only when a notice joins its tallest tab
+(Graphics with Battle.net open, 745), and About's letter and support section scroll. The smaller
+pop-ups (`FittedSheet`) take their content's height, their buttons last. Esc closes every
 pop-up a Done, Continue, Later or Cancel button closes (`closesOnEscape` beside Return), and a
 click on the main window outside the open pop-up closes it the same way (`Main.swift`'s local
 event monitor, `AppModel.closeSheetFromOutside`): not in the title bar, not under a nested sheet
 or an alert, not while an info popover is open, never during an update's download or install or
 once uninstalling has started. The window's minimum, 540 × 800, is also its SwiftUI content's,
-because the hosting view otherwise replaces the window's minimum with its content's (near zero). `ProjectLinks.swift` holds the link buttons, the lockup, the author
+because the hosting view otherwise replaces the window's minimum with its content's (near zero).
+All of this needs about 830 points of screen below the menu bar. On a shorter one (a display set
+toward Larger Text in System Settings › Displays: 1147 × 745 on a 14-inch MacBook Pro leaves
+about 717; issue #52) `WindowFit` lowers the window's minimum to the room left, never below 400,
+and the large pop-ups to 40 less: their scrolling parts take the difference, and a small pop-up's
+content scrolls above its buttons once it is taller than that. `AppDelegate.fitToScreen` applies
+it at launch and when the window changes display or the display changes, and moves a window that
+reaches past the menu bar, the Dock or the screen's edge back inside. Screens with room are
+unchanged. A private preview stands in a short screen with `--preview-visible-height <points>`.
+`ProjectLinks.swift` holds the link buttons, the lockup, the author
 photo and the support card. `DisplayOptions.swift` lists the fullscreen
 resolutions (1080p, 1440p and 4K in 16:10 and 16:9, as in the launch contract)
 and reads the main display, which Settings names and uses to say how a choice
@@ -131,13 +141,13 @@ buttons, passes their input on only while macOS still gives the game mouse input
 (so not while another app has the mouse), and counts GCMouse's input beside it for
 comparison (the Mouse logging preset's `hid_shadow_*`).
 
-Mouse updates per second (`AppModel.MouseRate`, REC-63), a row of choices in the Mouse panel,
-sets at most how many times a second Overwatch gets the mouse's movement: every report (the default
+Mouse › Advanced (`AppModel.MouseRate`, REC-63), closed until the player opens it, holds Mouse
+updates per second, a row of choices (each choice's tooltip says what it does), which sets at most how many times a second Overwatch gets the mouse's movement: every report (the default
 from 1.6.1), or 2,000, 1,000 (1.6.0's), 500 or 250, passed as `launch --mouse-rate`. The worker
 sets the window driver's `WINEMAC_MOUSELOOK_RAW_INTERVAL_US` (0, or a million over the rate);
 the driver adds up what comes in between, so no movement is lost, only later. Classic keeps
 the driver's own 1 ms, its 1.4 timing, so the worker leaves the variable out there and the
-row hides while Classic is chosen. In the owner's test of October 25 (4,000 Hz,
+section says so in place of the row. Closed, the section still names a lowered rate. In the owner's test of October 25 (4,000 Hz,
 High-precision) every report brought movement 1.6 ms sooner than 1,000 a second, at no FPS
 cost. The Support Report (`mouse_rate`) and the session record name the choice.
 
@@ -168,7 +178,11 @@ while Battle.net and Overwatch are closed. Setup and launches also make the left
 Alt in Overwatch alone (`keyboard`, Wine's Mac driver `LeftOptionIsAlt` under
 `AppDefaults\Overwatch.exe`): Wine sends nothing for Option and makes Command Alt, so
 Overwatch's Alt actions answered only to Command. Command stays Alt, and the right Option key
-and Battle.net keep typing Option's characters. On Global, the Play screens suggest the Korea
+and Battle.net keep typing Option's characters. They also give Battle.net 4 GB of addresses
+instead of 2 GB (`battlenet-memory`, CrossOver's `LargeAddressAware` under
+`AppDefaults\Battle.net.exe`, REC-75): Battle.net is a 32-bit program built without the
+large-address-aware flag, and on some Macs its built-in browser's pages ran out of room and
+Battle.net closed seconds after opening. On Global, the Play screens suggest the Korea
 region when the game folder holds Nexon's anti-cheat (`nexon_build`). Support reports name the
 failure code itself; anything that isn't a plain code stays `other_setup_error`.
 
@@ -276,6 +290,9 @@ swiftc -O -target arm64-apple-macos26.5 -parse-as-library app/Sources/Localizati
 swiftc -O -target arm64-apple-macos26.5 -parse-as-library app/Sources/Localization.swift app/Sources/DisplayOptions.swift \
   tests/DisplayOptionsTests.swift -o runtime/phase-3/display-options-tests
 runtime/phase-3/display-options-tests   # from the repository root
+swiftc -O -target arm64-apple-macos26.5 -parse-as-library app/Sources/WindowFit.swift \
+  tests/WindowFitTests.swift -o runtime/phase-3/window-fit-tests
+runtime/phase-3/window-fit-tests
 ```
 
 Native process execution: `scripts/portable_setup.m`, with scoped session and
@@ -285,8 +302,32 @@ It clones, prepares, verifies, and atomically publishes while preserving the
 prior cache. It never runs a player-side compiler or imports developer caches.
 The game names its cache folder with Metal's registry ID for the GPU, which
 macOS reassigns at each restart, so the coordinator first folds folders left by
-earlier restarts into the one the game opens now and removes them. Archives
-carry over only from the same macOS version; preparation rebuilds the rest.
+earlier restarts into the one the game opens now and removes them. After a macOS
+update (REC-77, 1.6.3) the folder of the earlier macOS moves in with its archives, listed in
+its `earlier-macos.json`: the game looks each pipeline up in them strictly
+(`MTLPipelineOptionFailOnBinaryArchiveMiss`) and builds any that doesn't fit, so a launch
+plays with them, with no warm-up first. The next preparation after a session (which
+Optimize Now also runs) removes them and prepares every learned pipeline for this macOS.
+Archives from another GPU (Migration Assistant; the records below name the GPU) are
+removed at once. When a preparation after a session finds nothing left to build, the
+helper records the macOS and GPU in `cache/optimized.json`. When Recall opens on the home
+screen with learned shaders and that record (or, before any 1.6.3 preparation, the warm-up's
+`cache/warmed.json`) names another macOS, or a folder still holds earlier archives
+(`MacOSShaders`), it shows `MacOSShadersSheet` once per macOS version (key
+`macOSShadersOffered`), before Battle.net opens, even by itself: Optimize Now runs
+`prepare-shaders`, Play Now opens Battle.net. The version compared is
+`operatingSystemVersionString`, the string the game hashes into its folder's name, so the
+offer comes exactly when the folder changes, security updates included. Until the record
+names this macOS, the ready screen shows `MacOSShadersCard` with Optimize Now, and the
+after-match status reads "Optimizing shaders for macOS …". The prompt's time is the learned
+count at 800 a minute (`MacOSShaders.perMinute`; the owner's M1 Pro prepared 19,611 in 23
+minutes after a simulated update), in whole 5 minutes. Settings › Graphics › Rebuild Shaders (1.6.3) does the
+same on request, without forgetting anything learned: after a confirmation it runs
+`prepare-shaders --rebuild 1`, which leaves `cache/rebuild-shaders` for the helper (the next
+`--after-session` run removes the pack and the request, then prepares every learned pipeline)
+and marks `cache/shader-update` "rebuild", so the status reads "Rebuilding your shaders". It
+is unavailable while Overwatch runs or a preparation does; Clear Shader Cache removes a request
+left behind.
 Its progress lines (each shader from the preparation tool's diagnostic log) reach
 the launching screen's "Preparing graphics" details as `graphics` events.
 With Game Mode the game runs as the engine's game app, and macOS keeps compiled
@@ -383,6 +424,15 @@ Shader memory at "Slowest only", so not the pack). While the game's window isn't
 the running screen says it can take up to a minute to close and offers Force Quit
 (`GameClosingNote`, which confirms first). It never ends the game itself: a game minimized
 mid-match, or on another desktop, looks the same.
+
+After repeated GPU hangs macOS stops running Overwatch's graphics work for good: the picture
+freezes on its last frame while the game and its sound go on (GitHub #58, REC-76). The graphics
+engine ends the game at that moment (`DXMT_GPU_LOST_EXIT`) and says so in its record of the
+game's GPU errors (`gpu-Overwatch.exe-<pid>.json` in the session's folder, `DXMT_GPU_REPORT`;
+`GPUReport` in `LogBundle.swift`). When the process the running screen watched ends, the app
+reads that game's record and, if macOS had cut it off, comes to the front with a notice that
+says what happened and to open Battle.net and play again. Save Logs turns the records into
+moments and summary lines.
 
 A Dock click opens Battle.net (when it's set to open with the app and nothing runs) only
 when the window was closed, as opening the app does; a window behind other apps or

@@ -25,8 +25,9 @@ CERTIFICATE_KEY = r'Software\Microsoft\SystemCertificates\Root\Certificates\A99D
 ASSURED_ROOT_KEY = r'Software\Microsoft\SystemCertificates\Root\Certificates\0563B8630D62D75ABBC8AB1E4BDFB5A899B24D43'
 DIRECT = bytes.fromhex('460000000100000001000000' + '00' * 24)
 GAME_KEYBOARD = r'Software\Wine\AppDefaults\Overwatch.exe\Mac Driver'
+BATTLENET_DEFAULTS = r'Software\Wine\AppDefaults\Battle.net.exe'
 
-# Wine's reg.exe, as far as Recall uses it: add a binary or string value, delete a value or a
+# Wine's reg.exe, as far as Recall uses it: add a binary, string or DWORD value, delete a value or a
 # key, and import a REGEDIT4 file of REG_MULTI_SZ values (saved as Wine saves them:
 # str(7):"a\0b\0").
 FAKE_REG = r'''import json, os, re, sys
@@ -71,8 +72,9 @@ def ours(section): return section.lower().startswith(header.lower()+' ') or sect
 def below(section): return section.lower().startswith(header[:-1].lower()+'\\\\')
 if action=='add':
     name=args[args.index('/v')+1]; kind=args[args.index('/t')+1]
-    assert kind in ('REG_BINARY','REG_SZ'), kind
+    assert kind in ('REG_BINARY','REG_SZ','REG_DWORD'), kind
     if kind=='REG_SZ': value='"%s"="%s"'%(name,args[args.index('/d')+1])
+    elif kind=='REG_DWORD': value='"%s"=dword:%08x'%(name,int(args[args.index('/d')+1],0))
     else:
         data=bytes.fromhex(args[args.index('/d')+1])
         hexed=','.join('%02x'%b for b in data)
@@ -214,6 +216,67 @@ class AdvancedSettings(unittest.TestCase):
         (self.root/'reg-fails').write_text('')
         self.assertEqual(self.call('keyboard')[-1], {'stage': 'keyboard', 'left_option_is_alt': True, 'changed': False, 'failed': True})
         self.assertNotIn('LeftOptionIsAlt', self.registry.read_text())
+
+    # REC-75: every Battle.net process gets 4 GB of addresses, not 2 GB.
+    def sections(self):
+        return {s.split(']')[0] + ']': s for s in re.split(r'\n(?=\[)', self.registry.read_text()) if s.startswith('[')}
+
+    def test_battlenet_gets_4_gb_and_nothing_else_does(self):
+        self.fixture()
+        before = len(self.calls())
+        self.assertEqual(self.call('battlenet-memory', '--apply', '0')[-1], {'stage': 'battlenet_memory', 'large_address_aware': True, 'changed': True})
+        self.assertEqual(len(self.calls()), before)
+        self.assertEqual(self.call('battlenet-memory')[-1], {'stage': 'battlenet_memory', 'large_address_aware': True, 'changed': True})
+        self.assertEqual(self.calls()[-1], ['reg.exe', 'add', 'HKCU\\' + BATTLENET_DEFAULTS, '/v', 'LargeAddressAware', '/t', 'REG_DWORD', '/d', '1', '/f'])
+        sections = self.sections()
+        self.assertIn('"LargeAddressAware"=dword:00000001', sections['[' + BATTLENET_DEFAULTS.replace('\\', '\\\\') + ']'])
+        # Named for Battle.net.exe alone: Overwatch, the installer and the Agent keep Wine's default.
+        self.assertEqual([name for name, section in sections.items() if 'LargeAddressAware' in section],
+                         ['[' + BATTLENET_DEFAULTS.replace('\\', '\\\\') + ']'])
+        # Set already: nothing to write.
+        before = len(self.calls())
+        self.assertEqual(self.call('battlenet-memory')[-1], {'stage': 'battlenet_memory', 'large_address_aware': True, 'changed': False})
+        self.assertIs(self.call('battlenet-memory', '--apply', '0')[-1]['changed'], False)
+        self.assertEqual(len(self.calls()), before)
+
+    def test_battlenet_memory_turned_off_elsewhere_is_set_again(self):
+        # A zero is Wine's 2 GB: written again as 1, the section's other values kept.
+        key = '[' + BATTLENET_DEFAULTS.replace('\\', '\\\\') + ']'
+        self.fixture('WINE REGISTRY Version 2\n\n' + key + ' 1\n#time=1\n"LargeAddressAware"=dword:00000000\n"Version"="win10"\n')
+        self.assertIs(self.call('battlenet-memory', '--apply', '0')[-1]['changed'], True)
+        self.call('battlenet-memory')
+        section = self.sections()[key]
+        self.assertIn('"LargeAddressAware"=dword:00000001', section)
+        self.assertNotIn('dword:00000000', section)
+        self.assertIn('"Version"="win10"', section)
+
+    def test_battlenet_memory_failure_never_stops_the_worker(self):
+        self.fixture()
+        (self.root/'reg-fails').write_text('')
+        self.assertEqual(self.call('battlenet-memory')[-1], {'stage': 'battlenet_memory', 'large_address_aware': True, 'changed': False, 'failed': True})
+        self.assertNotIn('LargeAddressAware', self.registry.read_text())
+
+    def test_launch_gives_battlenet_its_room_before_it_starts(self):
+        self.launch_fixture()
+        self.addCleanup(subprocess.run, ['pkill', '-f', f'ow2-setup watch --root {self.root}'])
+        events = self.call('launch')
+        stages = [e['stage'] for e in events]
+        self.assertEqual(events[stages.index('battlenet_memory')], {'stage': 'battlenet_memory', 'large_address_aware': True, 'changed': True})
+        self.assertLess(stages.index('battlenet_memory'), stages.index('battlenet_open'))
+        for _ in range(100):
+            if self.calls()[-1][0] != 'reg.exe':
+                break
+            time.sleep(0.05)
+        calls = self.calls()
+        laa = calls.index(['reg.exe', 'add', 'HKCU\\' + BATTLENET_DEFAULTS, '/v', 'LargeAddressAware', '/t', 'REG_DWORD', '/d', '1', '/f'])
+        client = next(i for i, call in enumerate(calls) if call[0].endswith('Battle.net.exe'))
+        self.assertLess(laa, client)
+        # The next launch finds it set and leaves it.
+        self.call('close-client')
+        before = [c for c in self.calls() if 'LargeAddressAware' in c]
+        events = {e['stage']: e for e in self.call('launch')}
+        self.assertIs(events['battlenet_memory']['changed'], False)
+        self.assertEqual([c for c in self.calls() if 'LargeAddressAware' in c], before)
 
     def test_settings_written_by_windows_are_recognised(self):
         # Another key name case, a counter Windows advanced, the value wrapped: still direct.

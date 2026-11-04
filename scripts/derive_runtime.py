@@ -53,6 +53,10 @@ with DXMT's stand-in and adds DXMT's signed DLSS stand-in (nvngx.dll), its NVAPI
 
 --shader-pack DXMT_WORKSPACE (1.4) replaces the base's winemetal.so with the build_portable_dxmt.py
 build in that workspace (dxmt-shader-pack.patch: the shader pack holds every learned pipeline).
+
+--gpu-errors DXMT_WORKSPACE (1.6.3) replaces the base's five DXMT files and its d3d12.dll stand-in with
+the build_portable_dxmt.py build in that workspace (dxmt-gpu-errors.patch: GPU hangs are sorted and
+recorded, MetalFX recovers after one, and a game whose GPU access macOS revoked is ended).
 The patch changes only the pipeline cache, which only winemetal.so contains, so DXMT's other files
 stay as the base ships them.
 
@@ -919,6 +923,51 @@ def derive_shader_pack(base_version, version, identity, dxmt_workspace):
     replace_files(base, dest, base_version, version, identity, manifest, sources, replaced)
 
 
+# GPU errors (1.6.3, REC-76): the command queue sorts each GPU error, records it beside the session's
+# logs, ends the game once macOS has revoked its GPU access, and MetalFX recovers after a hang. The
+# queue is in DXMT's core, which DXMT's five files and its d3d12.dll stand-in link; the DLSS and
+# NVAPI stand-ins don't, and nvngx.dll keeps the bytes its signature covers.
+GPU_ERRORS_PATCHES = {**SHADER_PACK_PATCHES, 'patches/dxmt-gpu-errors.patch': 'gpu_errors_patch_sha256'}
+GPU_ERRORS_REPLACED = {**DXMT_FILES, 'lib/wine/x86_64-windows/d3d12.dll': 'x86_64-windows/d3d12.dll'}
+
+
+def derive_gpu_errors(base_version, version, identity, dxmt_workspace):
+    """1.6.3: GPU errors. The DXMT build with the GPU errors patch on top of the shader pack build's
+    patches replaces the base's five DXMT files and its d3d12.dll stand-in, packaged as the
+    assembler packages DXMT's and signed; every other file stays byte-identical."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
+        raise ValueError('Invalid runtime version')
+    base, dest = ARTIFACTS / base_version, ARTIFACTS / version
+    if dest.exists() or Path(str(dest) + '.tar.gz').exists():
+        raise ValueError('Use a new version; existing artifact is never overwritten')
+    manifest = json.loads((base / 'runtime.json').read_text())
+    if manifest['version'] != base_version:
+        raise ValueError('The base artifact names a different version')
+    for relative in GPU_ERRORS_REPLACED:
+        if relative not in manifest['files']:
+            raise ValueError(f'{base_version} has no {relative} (derive from a MetalFX runtime, 1.3 or later)')
+    proof = json.loads((dxmt_workspace / 'dxmt-build-proof.json').read_text())
+    install = dxmt_workspace / 'dxmt-install'
+    for patch, key in GPU_ERRORS_PATCHES.items():
+        if proof.get(key) != sha(ROOT / patch):
+            raise ValueError(f'Rebuild DXMT: {patch} changed since the build')
+    record = {'built_by': 'scripts/build_portable_dxmt.py',
+              'patches': {patch: proof[key] for patch, key in GPU_ERRORS_PATCHES.items()}}
+    with tempfile.TemporaryDirectory() as folder:
+        sources, replaced = {}, {}
+        for relative, built in GPU_ERRORS_REPLACED.items():
+            if proof['files'].get(built) != sha(install / built):
+                raise ValueError(f'DXMT build proof does not match {built}')
+            source = install / built
+            if relative not in DXMT_FILES:  # replace_files packages DXMT's own five
+                source = Path(folder) / Path(built).name
+                shutil.copy2(install / built, source)
+                package_like_assembler(source)
+            sources[relative] = source
+            replaced[relative] = dict(record, build_sha256=proof['files'][built])
+        replace_files(base, dest, base_version, version, identity, manifest, sources, replaced)
+
+
 def unsigned_identical(original, resigned):
     """True when the two files are the same once their signatures are removed."""
     with tempfile.TemporaryDirectory() as folder:
@@ -1047,6 +1096,9 @@ if __name__ == '__main__':
                         help="Replace Wine's services.exe and sechost.dll (both architectures) with their build_wine_native.py builds")
     parser.add_argument('--shader-pack', type=Path, metavar='DXMT_WORKSPACE',
                         help="Replace winemetal.so with this build_portable_dxmt.py workspace's shader pack build")
+    parser.add_argument('--gpu-errors', type=Path, metavar='DXMT_WORKSPACE',
+                        help="Replace DXMT's five files and its d3d12.dll stand-in with this build_portable_dxmt.py "
+                             "workspace's GPU errors build")
     args = parser.parse_args()
     if args.repackage:
         repackage(args.base_version, args.version)
@@ -1066,6 +1118,8 @@ if __name__ == '__main__':
         derive_metalfx(args.base_version, args.version, args.identity, args.metalfx.resolve())
     elif args.shader_pack:
         derive_shader_pack(args.base_version, args.version, args.identity, args.shader_pack.resolve())
+    elif args.gpu_errors:
+        derive_gpu_errors(args.base_version, args.version, args.identity, args.gpu_errors.resolve())
     elif args.minimum_macos:
         restamp_runtime(args.base_version, args.version, args.identity, args.minimum_macos)
     elif args.native:

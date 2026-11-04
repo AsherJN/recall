@@ -114,9 +114,12 @@ Settings › Graphics › Shader memory sets how much of your shader cache Overw
 loads when it starts. Lower it only if your Mac runs short of memory during
 matches; it's meant for Macs with 8 GB.
 
-After a macOS update, the first launch can spend a few minutes on **Preparing
-graphics** before Battle.net opens while Recall builds the shaders you've already
-used again.
+Each macOS version builds graphics its own way, so after a macOS update Recall
+offers to optimize your shaders for the new version before Battle.net opens.
+**Optimize Now** rebuilds them in the background while you keep using your Mac;
+Recall shows about how long it takes. **Play Now** starts right away with your
+current shaders: some may need rebuilding, so you might see stutters until Recall
+optimizes them after your match.
 
 You can turn automatic checks off in Settings › General and check any time with Recall ›
 Check for Updates….

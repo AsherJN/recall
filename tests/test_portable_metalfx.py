@@ -91,6 +91,8 @@ class MetalFX(unittest.TestCase):
         self.assertEqual(env['DXMT_ENABLE_NVEXT'], '1')
         self.assertEqual(env['WINEDLLOVERRIDES'], CONTRACT['metalfx_environment']['WINEDLLOVERRIDES'])
         self.assertEqual(env['WINEMAC_MOUSELOOK'], 'Overwatch.exe')  # the rest of the contract stays
+        # After a GPU hang MetalFX moves to the GPU: DXMT turns this one-character value to 1 (REC-76).
+        self.assertEqual((env['DXMT_METALFX_GPU_AFTER_HANG'], env['MTLFX_FORCE_GPU']), ('1', '0'))
         self.assertEqual(events['metalfx'], {'stage': 'metalfx', 'enabled': True, 'available': True, 'nvngx': 'installed',
                                              'settings': sorted(NVIDIA), 'sharpness': '0.4'})
         # NVIDIA's loader finds the signed stand-in; Wine's placeholder is kept for later.
@@ -112,6 +114,7 @@ class MetalFX(unittest.TestCase):
 
         env, events = self.play('--metalfx', '0')
         self.assertNotIn('DXMT_ENABLE_NVEXT', env)
+        self.assertNotIn('MTLFX_FORCE_GPU', env)
         self.assertEqual(env['WINEDLLOVERRIDES'], 'd3d11,dxgi,d3d10core,winemetal=b;d3d12,nvapi64,nvngx=')
         self.assertEqual(events['metalfx']['nvngx'], 'restored')
         self.assertEqual(system32.read_bytes(), PLACEHOLDER)

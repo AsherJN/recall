@@ -6,6 +6,43 @@ func logLines<S:StringProtocol>(_ text:S)->[S.SubSequence] {
     text.split(omittingEmptySubsequences:false,whereSeparator:{ $0 == "\n" || $0 == "\r\n" })
 }
 
+/// The graphics engine's record of one process's GPU errors (REC-76): gpu-<exe>-<Mac pid>.json beside
+/// the session's record (portable_logs.h), written by DXMT when the Mac's graphics chip hangs or
+/// faults while the game runs. After repeated hangs macOS stops running the process's graphics work
+/// (`access_revoked`): nothing can be drawn again, so the engine ends the game (`ended_process`).
+struct GPUReport {
+    var process:String
+    var errors:[String:Int]
+    var firstError:Date?
+    var accessRevoked:Date?
+    var endedProcess:Bool
+    var metalfx:Bool
+    var metalfxGPUMode:Bool
+    var lastDetail:String
+    var hangs:Int { (errors["hang"] ?? 0)+(errors["timeout"] ?? 0) }
+    var total:Int { errors.values.reduce(0,+) }
+    var isGame:Bool { process.caseInsensitiveCompare("Overwatch.exe") == .orderedSame }
+    static func isReport(_ url:URL)->Bool { url.lastPathComponent.hasPrefix("gpu-") && url.pathExtension == "json" }
+    init?(data:Data) {
+        guard let value=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],value["schema"] as? Int == 1,
+              let process=value["process"] as? String else { return nil }
+        let iso=ISO8601DateFormatter()
+        func time(_ key:String)->Date? { ((value[key] as? [String:Any])?["time"] as? String).flatMap(iso.date(from:)) }
+        self.process=process
+        errors=(value["errors"] as? [String:Any] ?? [:]).compactMapValues { ($0 as? NSNumber)?.intValue }
+        firstError=time("first_error");accessRevoked=time("access_revoked")
+        endedProcess=value["ended_process"] as? Bool ?? false
+        metalfx=value["metalfx"] as? Bool ?? false;metalfxGPUMode=value["metalfx_gpu_mode"] as? Bool ?? false
+        lastDetail=(value["last_error"] as? [String:Any])?["detail"] as? String ?? ""
+    }
+    /// The record of the Overwatch process that just ended, in the session Battle.net started with.
+    static func forGame(root:URL, session:String?, pid:Int32)->GPUReport? {
+        guard let session,!session.isEmpty,!session.contains("/") else { return nil }
+        let url=root.appendingPathComponent("logs/sessions/\(session)/gpu-Overwatch.exe-\(pid).json")
+        return (try? Data(contentsOf:url)).flatMap(GPUReport.init(data:))
+    }
+}
+
 /// Save Logs (Settings › Advanced, Help › Support; REC-40): the logs of the player's recent
 /// sessions in one zip, with personal details removed (LogCleaner), a short timeline for people in
 /// the player's language (Summary.txt) and, for engineers and AI assistants, an index of every file
@@ -297,6 +334,15 @@ enum Moments {
             }
             if let ended=(record["ended"] as? String).flatMap(iso.date(from:)) { moments.append(Moment(time:ended,kind:"session_ended",file:file.path,line:1,excerpt:"")) }
         }
+        // The graphics engine's records of GPU errors (1.6.3, REC-76): when they began, and when macOS
+        // stopped running the process's graphics.
+        for file in files where file.source == .recallSession && GPUReport.isReport(file.url) {
+            guard let data=try? Data(contentsOf:folder.appendingPathComponent(file.path)),let report=GPUReport(data:data) else { continue }
+            let extra:[String:Any]=["process":report.process,"errors":report.errors,"metalfx":report.metalfx,
+                                    "metalfx_gpu_mode":report.metalfxGPUMode,"ended_process":report.endedProcess,"last_detail":report.lastDetail]
+            if report.total > 0 { moments.append(Moment(time:report.firstError,kind:"gpu_errors",file:file.path,line:1,excerpt:report.lastDetail,extra:extra)) }
+            if let revoked=report.accessRevoked { moments.append(Moment(time:revoked,kind:"gpu_access_revoked",file:file.path,line:1,excerpt:"",extra:extra)) }
+        }
         let winePrefix=try! NSRegularExpression(pattern:#"^([0-9]+\.[0-9]{3}):"#)
         let repeatPrefix=try! NSRegularExpression(pattern:#"^\[recall:repeated[^"]*"([0-9]+\.[0-9]{3}):"#)
         for file in files {
@@ -306,7 +352,7 @@ enum Moments {
             switch file.source {
             case .recallSession:
                 let clock=clocks[file.path.components(separatedBy:"/").dropLast().joined(separator:"/")]
-                var last:Date?,counts:[String:(line:Int,count:Int,text:String)]=[:]
+                var last:Date?,counts:[String:(line:Int,count:Int,text:String)]=[:],revoked=false
                 for (number,line) in lines.enumerated() {
                     let s=String(line)
                     // A line's own clock, or the last of a run collapse kept once.
@@ -315,8 +361,20 @@ enum Moments {
                     if s.contains("wine: Unhandled") || s.contains("Unhandled exception") {
                         moments.append(Moment(time:last,kind:"windows_program_error",file:file.path,line:number+1,excerpt:String(s.prefix(300))))
                     }
+                    // The graphics engine's GPU errors, in any Recall's logs: each hang, and the first
+                    // command buffer macOS ignored (its GPU access revoked; REC-76).
+                    if s.contains("Device error at frame") {
+                        if s.contains("CallbackErrorHang") || s.contains("CallbackErrorTimeout") {
+                            moments.append(Moment(time:last,kind:"gpu_hang",file:file.path,line:number+1,excerpt:String(s.prefix(300))))
+                        } else if !revoked && (s.contains("SubmissionsIgnored") || s.contains("MTLCommandBufferError code 4")) {
+                            revoked=true
+                            moments.append(Moment(time:last,kind:"gpu_revoked",file:file.path,line:number+1,excerpt:String(s.prefix(300))))
+                        }
+                    }
                     if let range=s.range(of:":err:") ?? (s.hasPrefix("err:") ? s.range(of:"err:") : nil) {
-                        let key=String(s[range.upperBound...]).replacingOccurrences(of:#"0x[0-9a-fA-F]+|[0-9a-fA-F]{8,}"#,with:"…",options:.regularExpression)
+                        // Frame numbers too: a GPU error repeated every frame is one kind of line, not
+                        // thousands that push the rest out of the 40 kept.
+                        let key=String(s[range.upperBound...]).replacingOccurrences(of:#"0x[0-9a-fA-F]+|[0-9a-fA-F]{8,}|(?<=frame )[0-9]+"#,with:"…",options:.regularExpression)
                         counts[key,default:(number+1,0,String(s.prefix(300)))].count+=1
                     }
                 }
@@ -486,6 +544,21 @@ enum Summary {
             if moment.extra["after_failed_read"] as? Bool == true { lines.append(L("Just before, it couldn’t read one of its game files.")) }
             return lines
         case "windows_program_error": return [L("A Windows program stopped with an error ({0}, line {1}).",moment.file,String(moment.line))]
+        case "gpu_errors":
+            // The graphics engine's record (REC-76); Overwatch's only.
+            guard moment.extra["process"] as? String == "Overwatch.exe" else { return nil }
+            let errors=moment.extra["errors"] as? [String:Int] ?? [:]
+            let hangs=(errors["hang"] ?? 0)+(errors["timeout"] ?? 0),total=errors.values.reduce(0,+)
+            var lines=[hangs == 1 ? L("Overwatch’s graphics stopped responding once.")
+                       : hangs > 1 ? L("Overwatch’s graphics stopped responding {0} times.",String(hangs))
+                       : L("Overwatch had graphics errors ({0}).",String(total))]
+            if moment.extra["metalfx_gpu_mode"] as? Bool == true { lines.append(L("MetalFX upscaling moved to the graphics chip for the rest of the game.")) }
+            return lines
+        case "gpu_access_revoked":
+            guard moment.extra["process"] as? String == "Overwatch.exe" else { return nil }
+            var lines=[L("After repeated graphics errors, macOS stopped Overwatch’s graphics and its picture froze.")]
+            if moment.extra["ended_process"] as? Bool == true { lines.append(L("{0} closed Overwatch so it could be started again.",Brand.name)) }
+            return lines
         default: return nil
         }
     }

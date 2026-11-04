@@ -140,3 +140,34 @@ static BOOL configureOptionKey(NSString *engine) {
     event(@"keyboard",details);
     return ok;
 }
+
+/* Room in memory for Battle.net (REC-75; GitHub #48, #51). Battle.net.exe is a 32-bit Windows
+ * program built without the large-address-aware flag, so each of its processes (the client and
+ * every process of its built-in browser, which all run Battle.net.exe) can address only 2 GB.
+ * Recall has that browser draw on the CPU (launchClient), so a page also keeps what it has drawn
+ * there. On some Macs (both reports: MacBooks on macOS 27, at the built-in display's "More Space")
+ * a page used up its 2 GB seconds after it opened: the browser aborted it (0xE0000008, Chromium's
+ * out-of-memory code), opened another, and after a few tries Battle.net closed, on every launch.
+ * CrossOver's Wine gives a program named in AppDefaults with a non-zero LargeAddressAware DWORD
+ * the 4 GB 64-bit Windows gives a large-address-aware one (dlls/ntdll/unix/virtual.c, force_laa;
+ * the preloader keeps the low 8 GB for Windows memory). Only Battle.net.exe is named: Overwatch
+ * is 64-bit, and the installer and update Agent keep Windows' default. Each process reads it as
+ * it starts, so a Battle.net already open keeps its 2 GB until it closes. */
+static NSString *const battleNetMemoryKey=@"Software\\Wine\\AppDefaults\\Battle.net.exe";
+/* Without ENGINE it only reports whether the value is missing. The registry tool runs only
+ * then. Never fails: setup and launches go on, and the next launch tries again. Reports
+ * battlenet_memory. */
+static BOOL configureBattleNetMemory(NSString *engine) {
+    NSDictionary *values=userRegistryValues(battleNetMemoryKey);
+    BOOL set=[values[@"LargeAddressAware"] isEqual:@"dword:00000001"],ok=YES;
+    NSMutableDictionary *details=[@{@"large_address_aware":@YES,@"changed":@NO} mutableCopy];
+    if(!values)details[@"registry"]=@"unreadable";
+    if(engine && !set) {
+        ok=registryTool(engine,@[@"add",[@"HKCU\\" stringByAppendingString:battleNetMemoryKey],@"/v",@"LargeAddressAware",@"/t",@"REG_DWORD",@"/d",@"1",@"/f"],@"battlenet-memory.log");
+        details[@"changed"]=@(ok);
+        if(!ok)details[@"failed"]=@YES;
+    }
+    else if(!engine)details[@"changed"]=@((BOOL)!set);
+    event(@"battlenet_memory",details);
+    return ok;
+}

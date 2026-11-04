@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 @MainActor @Observable
 final class AppModel {
     enum Screen: String, CaseIterable { case welcome, moveApp, checking, battleNet, readyToInstall, preparing, launching, installer, ready, running, driveMissing, failure }
-    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate, china, korea, changeRegion, otherInstallation, highPrecision; var id: String { rawValue } }
+    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate, macOSShaders, china, korea, changeRegion, otherInstallation, highPrecision; var id: String { rawValue } }
     enum UninstallState: Equatable { case idle, working, done(appRemoved: Bool), failed(String) }
     enum UpdateState: Equatable { case idle, checking, upToDate, available(AvailableUpdate), downloading(Double), installing, failed(String) }
     var uninstall: UninstallState = .idle
@@ -57,7 +57,7 @@ final class AppModel {
         }
     }
     /// At most how many times a second Overwatch is sent the mouse's movement (Settings › General ›
-    /// Mouse updates per second; worker: launch --mouse-rate; REC-63). The window driver adds up what comes in
+    /// Mouse › Advanced; worker: launch --mouse-rate; REC-63). The window driver adds up what comes in
     /// between, so none is lost, only later. Every report unless the player lowers it (owner, October
     /// 25: at 4,000 Hz it brought movement 1.6 ms sooner than 1.6.0's 1,000 a second, at no FPS cost).
     /// Standard and High-precision only: Classic keeps 1.4's timing.
@@ -208,6 +208,12 @@ final class AppModel {
     var afterMatchProgress:AfterMatch.Progress?
     /// What's preparing is the one-time shader cache update (Update Now) rather than a match's.
     var updatingShaderCache=false
+    /// After a macOS update, the learned shaders aren't yet prepared for this macOS (MacOSShaders,
+    /// REC-77): the home screen offers Optimize Now until they are, and preparing says what it does.
+    var macOSShadersNeeded=false
+    /// What's preparing is Settings › Graphics › Rebuild Shaders.
+    var rebuildingShaders=false
+    private var rebuildRequested=false
     /// What else is using the Mac (BusyApps, REC-5): looked at every few seconds while the Play,
     /// opening or running screen is on screen, so the note names what's busy as the player
     /// starts Overwatch. Nothing is checked while this window is hidden, a match included.
@@ -272,11 +278,14 @@ final class AppModel {
             // The logs are read once, and again when a preparation ends with its final numbers.
             if let progress=afterMatchProgress { learnedShaders=max(learnedShaders ?? 0,progress.learned) }
             else if learnedShaders == nil || (wasPreparing && !preparingAfterMatch) { readLearnedShaders() }
+            macOSShadersNeeded=MacOSShaders.needed(root:root,learned:learnedShaders)
         }
         let running=AfterMatch.running(root:root)
         if running || shaderUpdateRequested.map({ Date().timeIntervalSince($0) > 240 }) == true { shaderUpdateRequested=nil }
         preparingAfterMatch=running || shaderUpdateRequested != nil
         updatingShaderCache=preparingAfterMatch && (shaderUpdateRequested != nil || AfterMatch.updating(root:root))
+        if !preparingAfterMatch { rebuildRequested=false }
+        rebuildingShaders=preparingAfterMatch && ((rebuildRequested && shaderUpdateRequested != nil) || AfterMatch.rebuilding(root:root))
         afterMatchProgress=preparingAfterMatch ? AfterMatch.progress(root:root) : nil
     }
     /// After updating to 1.4, once, following What's New: shaders Overwatch has used that aren't
@@ -312,23 +321,47 @@ final class AppModel {
         learnedShaders=learned.flatMap { $0 > 0 ? $0 : nil }
     }
     func whatsNewClosed() {
-        guard !isPreview,clientInstalled,UserDefaults.standard.string(forKey:"shaderUpdateOffered") == nil else { return }
+        guard !isPreview,clientInstalled else { return }
+        guard UserDefaults.standard.string(forKey:"shaderUpdateOffered") == nil else {
+            DispatchQueue.main.async { _ = self.offerMacOSShaders() }
+            return
+        }
         UserDefaults.standard.set(WhatsNew.version,forKey:"shaderUpdateOffered")
         let record=ShaderRecord.read(root:root)
         guard let learned=record["learned"] as? Int,let ready=record["ready"] as? Int,learned > ready,!AfterMatch.running(root:root) else { return }
         shaderUpdatePending=learned-ready
         DispatchQueue.main.async { self.sheet = .shaderUpdate }
     }
-    func updateShaderCache() {
+    /// After a macOS update, once per macOS version, on the home screen before Battle.net opens
+    /// (REC-77): Optimize Now prepares every learned shader for this macOS; Play Now opens
+    /// Battle.net with the shaders the earlier macOS built, and they're optimized after the match.
+    /// The home screen keeps offering Optimize Now until it's done (MacOSShadersCard).
+    func offerMacOSShaders()->Bool {
+        guard !isPreview,clientInstalled,sheet == nil,screen == .ready else { return false }
+        checkAfterMatch()
+        guard macOSShadersNeeded,!preparingAfterMatch,UserDefaults.standard.string(forKey:"macOSShadersOffered") != MacOSShaders.current else { return false }
+        UserDefaults.standard.set(MacOSShaders.current,forKey:"macOSShadersOffered")
+        sheet = .macOSShaders
+        return true
+    }
+    /// Optimize Now: the same preparation as after a match, started now (prepare-shaders).
+    func optimizeShaders() { updateShaderCache() }
+    /// Play Now: Battle.net opens as from the home screen, with the earlier macOS's shaders.
+    func playWithoutOptimizing() { sheet=nil;launch() }
+    /// Settings › Graphics › Rebuild Shaders: every learned shader built again now, in the
+    /// background, keeping what Overwatch has learned (for graphics glitches or a drop in FPS).
+    func rebuildShaders() { updateShaderCache(rebuild:true) }
+    func updateShaderCache(rebuild:Bool=false) {
         sheet=nil
         guard !isPreview else { return }
+        rebuildRequested=rebuild
         shaderUpdateRequested=Date();checkAfterMatch()
         Task {
             while busy { try? await Task.sleep(for:.milliseconds(200)) }
             busy=true
             defer { busy=false }
             do {
-                _ = try await service.run("prepare-shaders",["--game-mode",gameMode ? "1" : "0"])
+                _ = try await service.run("prepare-shaders",["--game-mode",gameMode ? "1" : "0"]+(rebuild ? ["--rebuild","1"] : []))
             } catch {
                 shaderUpdateRequested=nil;checkAfterMatch()
                 notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message
@@ -692,6 +725,8 @@ final class AppModel {
         } else if clientInstalled && state["prepared_runtime"] as? String == release?.runtimeVersion {
             screen = .ready
             if updated { markVersionSeen();sheet = .whatsNew;return }
+            // A macOS update: the player chooses before Battle.net opens, even when it opens by itself.
+            if offerMacOSShaders() { return }
             guard autoLaunch && autoOpenBattleNet && state["onboarding_complete"] as? Bool == true else { return }
             if let found=await pendingUpdate() {
                 update = .available(found);offeredUpdate=found.version;launchDeferredForUpdate=true;sheet = .update;return
@@ -909,9 +944,15 @@ final class AppModel {
             state["battlenet_region"]=region.battleNet;state["korean_support"]=region == .korea
         }
         if value == .battleNet { clientInstalled=false;gameInstalled=false }
-        preparingAfterMatch=args.contains("--preview-after-match") || args.contains("--preview-shader-update")
-        updatingShaderCache=args.contains("--preview-shader-update")
+        preparingAfterMatch=args.contains("--preview-after-match") || args.contains("--preview-shader-update") || args.contains("--preview-optimizing")
+        updatingShaderCache=args.contains("--preview-shader-update") || args.contains("--preview-optimizing") || args.contains("--preview-rebuilding")
+        // Settings › Graphics › Rebuild Shaders under way.
+        rebuildingShaders=args.contains("--preview-rebuilding")
+        if rebuildingShaders { preparingAfterMatch=true }
         afterMatchProgress=preparingAfterMatch ? AfterMatch.Progress(ready:3072,learned:17767) : nil
+        // After a macOS update (REC-77): the home screen's Optimize Now, or optimizing under way.
+        macOSShadersNeeded=args.contains("--preview-macos-shaders") || args.contains("--preview-optimizing")
+        if args.contains("--preview-optimizing") || rebuildingShaders,let learned=learnedShaders { afterMatchProgress=AfterMatch.Progress(ready:learned*42/100,learned:learned) }
         // The busy note (REC-5): Chrome and Steam busy, Low Power Mode, a hot Mac, low memory with
         // Visual Studio Code and Safari to quit, or with nothing to quit (a restart).
         macLoad=MacLoad()
@@ -929,6 +970,9 @@ final class AppModel {
             }
         }
         if args.contains("--preview-low-memory") { macLoad.lowMemory=true;macLoad.restart=true }
+        // Play after macOS cut Overwatch off from the GPU and the engine closed it (REC-76).
+        let gpuLost=args.contains("--preview-gpu-lost")
+        if gpuLost { notice=Self.gpuLostNotice }
         // Settings › Graphics › Shader memory with the owner's pack of 2026-10-14.
         shaderUpdatePending=16911
         shaderPack=[121822128,172324720,179897488,202437120,196611296,166780256,162372016,89495856,166106304,139503200,32750624].enumerated()
@@ -1302,6 +1346,7 @@ final class AppModel {
     private func sessionProcessEnded(_ pid:Int32) {
         guard let source=exitWatches.removeValue(forKey:pid) else { return }
         source.cancel()
+        gpuLost(pid)
         Task {
             while busy { try? await Task.sleep(for:.milliseconds(250)) }
             syncSession()
@@ -1309,6 +1354,20 @@ final class AppModel {
             for _ in 0..<3 { checkAfterMatch();try? await Task.sleep(for:.seconds(6)) }
             checkAfterMatch()
         }
+    }
+    /// After repeated GPU hangs macOS stops running Overwatch's graphics for good: its picture froze
+    /// while the game and its sound went on, until the player force quit it (GitHub #58, REC-76).
+    /// The graphics engine now ends the game at that moment and says so in its record of the
+    /// game's GPU errors (GPUReport); Recall comes to the front and tells the player.
+    static var gpuLostNotice:String {
+        L("Overwatch’s picture froze because your Mac’s graphics stopped responding, so {0} closed the game. Open Battle.net and play again to get back in.",Brand.name)
+    }
+    private func gpuLost(_ pid:Int32) {
+        guard let report=GPUReport.forGame(root:root,session:state["log_session"] as? String,pid:pid),
+              report.accessRevoked != nil,report.endedProcess else { return }
+        notice=Self.gpuLostNotice
+        NSApp.activate(ignoringOtherApps:true)
+        NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
     }
     /// Settings: what runs now. The screen answers at once; a session check confirms it
     /// unless another step is using the worker.

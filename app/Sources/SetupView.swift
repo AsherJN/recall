@@ -57,6 +57,7 @@ struct SetupView: View {
                 .onDisappear { model.updateSheetClosed() }
             case .whatsNew: WhatsNewSheet().onDisappear { model.whatsNewClosed() }
             case .shaderUpdate: ShaderUpdateSheet(model:model)
+            case .macOSShaders: MacOSShadersSheet(model:model)
             case .china: ChinaBattleNetSheet(confirm:model.confirmBattleNet)
             case .korea: KoreanSupportSheet(confirm:model.confirmBattleNet)
             case .changeRegion: ChangeRegionSheet(model:model).interactiveDismissDisabled(model.regionChange == .working)
@@ -188,7 +189,8 @@ struct SetupView: View {
             VStack(spacing:16) {
                 if LoggingReminder.shows(model) { LoggingReminder(model:model) }
                 if model.lowStorage { storageWarning }
-                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) }
+                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache,optimizingFor:model.macOSShadersNeeded ? model.macOS : nil,rebuilding:model.rebuildingShaders) }
+                else if model.macOSShadersNeeded { MacOSShadersCard(version:model.macOS,shaders:model.learnedShaders ?? 0,optimize:model.optimizeShaders).disabled(model.busy) }
                 PerformanceTip(model:model)
                 if model.showKoreanTip { KoreanAccountTip(open:model.openRegionSettings) { model.koreanTipDismissed=true } }
                 if !model.gameInstalled { SignInNote(model:model) }
@@ -203,7 +205,7 @@ struct SetupView: View {
             VStack(spacing:16) {
                 if model.existingName == "Overwatch" && model.gameWindowHidden { GameClosingNote() }
                 if LoggingReminder.shows(model) { LoggingReminder(model:model) }
-                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache) }
+                if model.showsAfterMatch { AfterMatchStatus(progress:model.afterMatchProgress,updating:model.updatingShaderCache,optimizingFor:model.macOSShadersNeeded ? model.macOS : nil,rebuilding:model.rebuildingShaders) }
                 PerformanceTip(model:model)
                 if model.showKoreanTip { KoreanAccountTip(open:model.openRegionSettings) { model.koreanTipDismissed=true } }
                 if !model.gameInstalled { SignInNote(model:model) }
@@ -496,6 +498,33 @@ struct PerformanceTip: View {
     }
     /// System Settings › Battery on a MacBook, › Energy on other Macs: one pane, where Low Power Mode is.
     static let batterySettings=URL(string:"x-apple.systempreferences:com.apple.Battery-Settings.extension")!
+}
+/// After a macOS update, on the home screen until the shaders are optimized for it (REC-77):
+/// what the player skipped in the pop-up (MacOSShadersSheet), and Optimize Now again. It goes
+/// once a preparation finishes, Optimize Now's or the one after the next match.
+struct MacOSShadersCard: View {
+    let version:String
+    let shaders:Int
+    let optimize:()->Void
+    @State private var info=false
+    var body:some View {
+        HStack(alignment:.top,spacing:10) {
+            Label {
+                VStack(alignment:.leading,spacing:10) {
+                    VStack(alignment:.leading,spacing:3) {
+                        Text(L("Shaders not yet optimized for macOS {0}",version)).font(LauncherStyle.font(13,.semibold)).foregroundStyle(.primary)
+                        Text(L("Overwatch may stutter until they are. Optimizing takes about {0} minutes, or happens after your next match.",MacOSShaders.minutes(shaders).formatted()))
+                            .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
+                    }
+                    Button(L("Optimize Now"),action:optimize).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).foregroundStyle(.primary)
+                }
+            } icon: { Image(systemName:"square.stack.3d.up") }
+            Spacer(minLength:0)
+            ShaderInfoButton(isPresented:$info)
+        }.font(LauncherStyle.font(13)).foregroundStyle(.secondary)
+            .padding(16).frame(maxWidth:.infinity,alignment:.leading)
+            .background(LauncherStyle.accent.opacity(0.09),in:RoundedRectangle(cornerRadius:16,style:.continuous))
+    }
 }
 // The Play, opening and running screens, from the first session (while Overwatch downloads):
 // first matches compile the game's shaders on this Mac. It counts the shaders learned so far

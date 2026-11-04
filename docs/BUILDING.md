@@ -24,7 +24,8 @@ reference.
 Initialize DXMT at its exact commit and initialize the pinned DirectX and NVAPI
 headers submodules. Apply, once each and in this order, `patches/dxmt-v1-private.patch`,
 `patches/dxmt-v1-performance.patch`, `patches/dxmt-portable-metal.patch`,
-`patches/dxmt-metalfx-upscaling.patch` and `patches/dxmt-shader-pack.patch`.
+`patches/dxmt-metalfx-upscaling.patch`, `patches/dxmt-shader-pack.patch` and
+`patches/dxmt-gpu-errors.patch`.
 Extract the Wine source and apply, once each and in this order,
 `patches/wine-v1-canvas.patch`, `patches/wine-mouselook.patch`,
 `patches/wine-portable-directory-boolean.patch`, Soju's
@@ -195,6 +196,17 @@ built with `patches/wine-winemac-activation.patch` (`scripts/build_wine_native.p
 `scripts/derive_runtime.py --native winemac`): a keyboard layout chosen in macOS while the game runs
 reaches it, so chat types in the new layout without a restart; keys held during the switch are
 released.
+
+Runtime `phase2-20261102.1` is `phase2-20261028.2` with DXMT built with
+`patches/dxmt-gpu-errors.patch` on top of the other DXMT patches (`scripts/build_portable_dxmt.py`,
+then `scripts/derive_runtime.py --gpu-errors <DXMT workspace>`): DXMT's five files and its
+`d3d12.dll` stand-in, which all contain DXMT's command queue, are replaced. The DLSS and NVAPI
+stand-ins stay as `phase2-20261028.2` ships them, so `nvngx.dll` keeps its signature.
+
+Runtime `phase2-20261103.1` is `phase2-20261102.1` with only the Mac driver `winemac.so` replaced,
+built with `patches/wine-winemac-activation.patch` (`scripts/build_wine_native.py winemac`, then
+`scripts/derive_runtime.py --native winemac`): coming back to the game re-reads the display list
+only when the displays changed while the player was away.
 
 Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
 replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py

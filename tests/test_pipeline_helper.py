@@ -394,6 +394,109 @@ class PipelineHelper(unittest.TestCase):
             self.assertNotIn('warming', [s['graphics'] for s in steps], identifier)
         self.assertFalse((self.root / 'cache/warmed.json').exists())
 
+    def macos_update(self):
+        # The game names its folder after the macOS version, so after an update the folder of
+        # the earlier macOS is one consolidate() can't match: any other name stands in for it.
+        earlier = self.folder.parent / secrets.token_hex(32); self.folder.rename(earlier)
+        return earlier
+
+    def test_after_a_macos_update_launches_play_with_the_earlier_archives_until_a_session_ends(self):
+        # REC-77. The folder of the earlier macOS moves into this macOS's with its archives, listed
+        # as from the earlier macOS: the game tries them and builds whatever doesn't fit. A launch
+        # (Play Now) keeps them and holds Battle.net back for no warm-up. The preparation after the
+        # session, which Optimize Now also runs, removes them and prepares every learned pipeline
+        # again, then records that the pack is complete for this macOS and GPU.
+        identifier = 'org.overwatch2mac.helper-test-' + secrets.token_hex(4)
+        self.addCleanup(shutil.rmtree, self.caches / identifier, True)
+        app = self.base / 'Overwatch.app'; (app / 'Contents').mkdir(parents=True)
+        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': identifier}))
+        old = self.recipes(600, age=7 * 86400); self.archives(old); new = self.recipes(20, cost=200000)
+        hashes = [a['sha256'] for a in self.catalog()['archives']]
+        (self.root / 'cache/warmed.json').write_text(json.dumps({'app': identifier, 'macos': 'Version 26.5 (Build 25F71)', 'gpu': self.gpu}))
+        earlier = self.macos_update()
+        for attempt in range(2):
+            result, steps, calls = self.run_helper(app, launch=True)
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual(calls, [])
+            self.assertNotIn('warming', [s['graphics'] for s in steps])
+            self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 600, 'added': 0, 'warmed': 0})
+            self.assertEqual([a['sha256'] for a in self.catalog()['archives']], hashes)
+            self.assertTrue((self.folder / 'archives' / (hashes[0] + '.metallib')).exists())
+            self.assertEqual(json.loads((self.folder / 'earlier-macos.json').read_text()), {'schema': 1, 'archives': hashes})
+            self.assertFalse((self.root / 'cache/optimized.json').exists())
+        self.assertFalse(earlier.exists())
+        result, steps, calls = self.run_helper(app)
+        self.assertEqual(result.returncode, 0, result)
+        self.assertIn('Archives from an earlier macOS removed', result.stdout)
+        self.assertEqual(calls, ['prepare 620', 'verify 620'])
+        self.assertEqual(set(self.prepared()), set(old + new))
+        self.assertFalse((self.folder / 'earlier-macos.json').exists())
+        self.assertFalse((self.folder / 'archives' / (hashes[0] + '.metallib')).exists())
+        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 620, 'added': 620, 'warmed': 620})
+        self.assertEqual(json.loads((self.root / 'cache/optimized.json').read_text()), {'macos': self.macos, 'gpu': self.gpu})
+        self.assertEqual(json.loads((self.root / 'cache/warmed.json').read_text())['macos'], self.macos)
+
+    def test_the_first_launch_after_a_macos_update_moves_the_folder_and_keeps_its_archives(self):
+        old = self.recipes(600, age=7 * 86400); self.archives(old)
+        self.macos_update()
+        result, steps, calls = self.run_helper(launch=True)
+        self.assertEqual(result.returncode, 0, result)
+        self.assertIn('moved other_macos', result.stdout)
+        self.assertIn('Playing with archives from an earlier macOS', result.stdout)
+        self.assertEqual(steps[0], {'graphics': 'kept', 'folders': 1, 'added': 0})
+        self.assertEqual(set(self.prepared()), set(old))
+
+    def test_archives_another_gpu_built_are_not_kept(self):
+        # A folder moved from another Mac (Migration Assistant): its GPU's code can't fit this one.
+        old = self.recipes(600, age=7 * 86400); self.archives(old)
+        (self.root / 'cache/optimized.json').write_text(json.dumps({'macos': self.macos, 'gpu': 'Apple M9 Ultra'}))
+        self.macos_update()
+        result, steps, calls = self.run_helper(launch=True)
+        self.assertEqual(result.returncode, 0, result)
+        self.assertIn('moved other_macos', result.stdout)
+        self.assertFalse((self.folder / 'archive.json').exists())
+        self.assertFalse((self.folder / 'earlier-macos.json').exists())
+        self.assertEqual(list((self.folder / 'archives').iterdir()), [])
+        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 0, 'added': 0, 'warmed': 0})
+
+    def test_rebuild_shaders_prepares_every_learned_pipeline_again_and_forgets_none(self):
+        # Settings › Graphics › Rebuild Shaders: the worker leaves cache/rebuild-shaders; a launch
+        # plays with the pack as it is, and the next preparation removes it and builds all again.
+        old = self.recipes(600, age=7 * 86400); new = self.recipes(20, cost=200000); self.archives(old + new)
+        hashes = [a['sha256'] for a in self.catalog()['archives']]
+        request = self.root / 'cache/rebuild-shaders'; request.write_text('')
+        result, steps, calls = self.run_helper(launch=True)
+        self.assertEqual((calls, [a['sha256'] for a in self.catalog()['archives']]), ([], hashes))
+        self.assertTrue(request.exists())
+        result, steps, calls = self.run_helper()
+        self.assertEqual(result.returncode, 0, result)
+        self.assertIn('Rebuild requested', result.stdout)
+        self.assertEqual(calls, ['prepare 620', 'verify 620'])
+        self.assertEqual(set(self.prepared()), set(old + new))
+        self.assertFalse((self.folder / 'archives' / (hashes[0] + '.metallib')).exists())
+        self.assertFalse(request.exists())
+        self.assertEqual(len(list((self.folder / 'recipes').glob('*.json'))), 620)
+        self.assertEqual(steps[-1], {'graphics': 'done', 'ready': 620, 'added': 620, 'warmed': 0})
+        # Done once: the next preparation finds nothing to do.
+        self.assertIn('up to date', self.run_helper()[0].stdout)
+
+    def test_only_a_completed_preparation_records_the_macos_and_gpu_it_was_for(self):
+        old = self.recipes(600, age=7 * 86400); self.archives(old); self.recipes(20, cost=200000)
+        record = self.root / 'cache/optimized.json'
+        (self.helpers / 'nosave').write_text('')
+        self.assertEqual(self.run_helper()[0].returncode, 0)
+        self.assertFalse(record.exists())
+        (self.helpers / 'nosave').unlink()
+        self.run_helper(launch=True)
+        self.assertFalse(record.exists())
+        result, steps, calls = self.run_helper()
+        self.assertEqual(calls, ['prepare 20', 'verify 20'])
+        self.assertEqual(json.loads(record.read_text()), {'macos': self.macos, 'gpu': self.gpu})
+        # Nothing new to prepare is complete too.
+        record.unlink()
+        self.assertIn('up to date', self.run_helper()[0].stdout)
+        self.assertEqual(json.loads(record.read_text()), {'macos': self.macos, 'gpu': self.gpu})
+
 
 if __name__ == '__main__':
     unittest.main()

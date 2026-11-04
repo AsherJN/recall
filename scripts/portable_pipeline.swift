@@ -213,6 +213,39 @@ func sameMacFolders(_ names: [String], _ device: MTLDevice) -> Set<String> {
     }
     return found
 }
+// After a macOS update the game opens a new, empty folder, since its name hashes the macOS
+// version. consolidate() moves the latest folder into it with its archives and lists those here:
+// they hold GPU code the earlier macOS's compiler built. The game looks each pipeline up in them
+// strictly (MTLPipelineOptionFailOnBinaryArchiveMiss, pipeline_cache.c) and builds any that
+// doesn't fit itself, so a player who plays before optimizing starts with them rather than with
+// nothing (REC-77). The next preparation after a session, which is also Optimize Now, removes
+// them first and prepares every learned pipeline again for this macOS.
+let earlierMacOS = "earlier-macos.json"
+// The macOS and GPU the pack was last completed on: every learned pipeline prepared, none from an
+// earlier macOS. The launcher compares it with this Mac's to offer Optimize Now (AppModel, REC-77).
+let optimizedRecord = root.appendingPathComponent("cache/optimized.json")
+let warmedRecord = root.appendingPathComponent("cache/warmed.json")
+func dropArchives(_ folder: URL) throws {
+    // The catalog goes first: without it the game loads no archive, whatever is left.
+    for name in ["archive.json", "archives", earlierMacOS] where fm.fileExists(atPath: folder.appendingPathComponent(name).path) {
+        try fm.removeItem(at: folder.appendingPathComponent(name))
+    }
+    try fm.createDirectory(at: folder.appendingPathComponent("archives"), withIntermediateDirectories: true)
+}
+// A folder another Mac's GPU filled (Migration Assistant) holds archives that can't fit this one;
+// the records say which GPU the pack was last built or warmed on. Without one, they're kept.
+func builtForAnotherGPU(_ device: MTLDevice) -> Bool {
+    for record in [optimizedRecord, warmedRecord] {
+        if let gpu = (try? json(record))?["gpu"] as? String { return gpu != device.name }
+    }
+    return false
+}
+func recordOptimized() {
+    guard let device = MTLCreateSystemDefaultDevice() else { return }
+    let record = ["macos": ProcessInfo.processInfo.operatingSystemVersionString, "gpu": device.name]
+    if let saved = try? json(optimizedRecord), record.allSatisfy({ saved[$0.key] as? String == $0.value }) { return }
+    try? save(record, optimizedRecord)
+}
 // Returns the folder the game opens in this restart, which need not exist yet.
 func consolidate() throws -> URL {
     guard let device = MTLCreateSystemDefaultDevice() else { throw PreparationError(message: "No Metal device") }
@@ -231,13 +264,16 @@ func consolidate() throws -> URL {
     let sameMac = sameMacFolders(earlier.map(\.lastPathComponent), device)
     var moved = "none"
     if !fm.fileExists(atPath: current.path) {
-        // The most recent folder becomes this restart's. Archives hold GPU code
-        // compiled for its macOS version, so they stay only from this macOS.
+        // The most recent folder becomes this restart's. Archives hold GPU code compiled
+        // for its macOS version: from another macOS they're kept, listed as such
+        // (earlierMacOS), until the next preparation replaces them; from another GPU they go.
         let base = earlier.first { sameMac.contains($0.lastPathComponent) } ?? earlier[0]
         earlier.removeAll { $0 == base }
         if !sameMac.contains(base.lastPathComponent) {
-            for name in ["archives","archive.json","refresh-decision-native.json"] where fm.fileExists(atPath: base.appendingPathComponent(name).path) { try fm.removeItem(at: base.appendingPathComponent(name)) }
-            try fm.createDirectory(at: base.appendingPathComponent("archives"), withIntermediateDirectories: true)
+            try? fm.removeItem(at: base.appendingPathComponent("refresh-decision-native.json"))
+            let hashes = (try? packEntries(base).map(\.hash)) ?? []
+            if hashes.isEmpty || builtForAnotherGPU(device) { try dropArchives(base) }
+            else { try save(["schema": 1, "archives": hashes], base.appendingPathComponent(earlierMacOS)) }
         }
         try fm.moveItem(at: base, to: current)
         moved = sameMac.contains(base.lastPathComponent) ? "same_macos" : "other_macos"
@@ -354,6 +390,21 @@ func prepare() throws {
     guard lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) == 0 else { if lock >= 0 { close(lock) }; exit(75) }
     defer { close(lock) }
     defer { try? summarize(original) }
+    // Archives from an earlier macOS (consolidate) serve launches until the game has closed; then
+    // they're replaced: every learned pipeline is prepared again for this macOS, from scratch.
+    let fromEarlierMacOS = fm.fileExists(atPath: original.appendingPathComponent(earlierMacOS).path)
+    if afterSession && fromEarlierMacOS {
+        try dropArchives(original)
+        print("Archives from an earlier macOS removed; every learned pipeline is prepared again")
+    }
+    // Settings › Graphics › Rebuild Shaders (prepare-shaders --rebuild 1): the same, on request.
+    // The request goes once the pack is gone, so a rebuild cut short resumes rather than restarts.
+    let rebuildRequest = root.appendingPathComponent("cache/rebuild-shaders")
+    if afterSession && fm.fileExists(atPath: rebuildRequest.path) {
+        try dropArchives(original)
+        try fm.removeItem(at: rebuildRequest)
+        print("Rebuild requested; every learned pipeline is prepared again")
+    }
     var previous = try keys(original)
     // Every way out says how many are ready now; a failure leaves the archives published so far.
     var ready = previous.count, added = 0, warmed = 0
@@ -372,7 +423,10 @@ func prepare() throws {
     for file in (try? fm.contentsOfDirectory(at: original.appendingPathComponent("archives"), includingPropertiesForKeys: nil)) ?? []
         where file.lastPathComponent.hasPrefix("capture-") && file.pathExtension == "tmp" { try? fm.removeItem(at: file) }
     progress("learned", ["learned": costs.count, "ready": previous.count])
-    if !afterSession { warmed = try warm(original, costs) }
+    // The player chose to play with the earlier macOS's archives (Play Now): no warm-up holds
+    // Battle.net back. The preparation after the session warms everything once they're replaced.
+    if !afterSession && fromEarlierMacOS { print("Playing with archives from an earlier macOS; shader warm-up follows the session") }
+    else if !afterSession { warmed = try warm(original, costs) }
     guard afterSession else {
         if let saved = try? json(report) { added = saved["added"] as? Int ?? 0; try? fm.removeItem(at: report) }
         print("The archive is prepared after the session"); return
@@ -413,6 +467,8 @@ func prepare() throws {
         return try json(output, limit: catalogLimit)
     }
     var baselineRecipes: [String: String]?, baselineLibraries: [String: String]?, batches = 0
+    // Every learned pipeline that could be built is ready for this macOS (optimizedRecord).
+    var finished = false
     while interrupted == 0 {
         let entries = try packEntries(original)
         let adding = !pending.isEmpty
@@ -421,6 +477,7 @@ func prepare() throws {
         var rebuild = entries.filter { damaged.contains($0.hash) } + (adding || small.count > 1 ? small : [])
         guard adding || !rebuild.isEmpty else {
             if batches == 0 { print("Learned pipelines are up to date") }
+            finished = true
             break
         }
         var limited: [(hash: String, keys: [String])] = [], count = 0
@@ -490,6 +547,8 @@ func prepare() throws {
         guard lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) == 0 else { break }
     }
     if interrupted == 0 { warmed = try warm(original, costs, after: true) }
+    // Recorded after the warm-up, so the launcher's status names the macOS until it's all done.
+    if finished && interrupted == 0 { recordOptimized() }
 }
 do { try prepare() } catch {
     print("Pipeline preparation skipped; existing cache retained: \((error as? PreparationError)?.message ?? String(describing: error))")

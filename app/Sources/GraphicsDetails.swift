@@ -164,7 +164,7 @@ enum ShaderInfo {
     static var learned:String { L("Every shader Overwatch has used on this Mac. The number grows as you see new maps, heroes, skins and effects; there’s no fixed total.") }
     static var ready:String { L("Learned shaders {0} has already built. After you quit Overwatch, {0} builds the ones that aren’t ready yet, slowest first. Overwatch loads them all when it starts, unless you choose less under Shader memory in Settings, and any it doesn’t load still come quickly from macOS’s own shader cache.",Brand.name) }
     static var interrupted:String { L("Preparing keeps going if you quit {0}. If your Mac shuts down or sleeps, or you play again before it’s done, what’s finished is kept and the rest is prepared after your next match.",Brand.name) }
-    static var update:String { L("After a macOS update, {0} builds your learned shaders again. It starts before Battle.net opens and finishes after your next match.",Brand.name) }
+    static var update:String { L("Each macOS version builds graphics its own way. After a macOS update, {0} offers to optimize your shaders: it builds every learned shader again for the new version. Until then, Overwatch plays with the shaders built for your previous macOS and may stutter, and they’re optimized after your next match.",Brand.name) }
     static var local:String { L("Shaders stay on this Mac; nothing is uploaded.") }
     static var learnedShort:String { L("Every shader Overwatch has used on this Mac.") }
     static var readyShort:String { L("Built after you quit Overwatch and loaded when the game starts.") }
@@ -203,19 +203,29 @@ struct AfterMatchStatus:View {
     var progress:AfterMatch.Progress?
     /// The one-time shader cache update (Update Now after updating to 1.4) rather than a match's.
     var updating=false
+    /// After a macOS update, the version the shaders are being optimized for (REC-77): what
+    /// preparing does then, whether Optimize Now or the match started it.
+    var optimizingFor:String?=nil
+    /// Settings › Graphics › Rebuild Shaders started it: every learned shader built again.
+    var rebuilding=false
     /// How far along: ready of learned. The helper updates it about every second while it builds.
     private var fraction:Double? { progress.map { min(1,Double($0.ready)/Double(max($0.learned,1))) } }
     @State private var info=false
     @Environment(\.colorScheme) private var scheme
+    private var title:String {
+        if let optimizingFor { return L("Optimizing shaders for macOS {0}",optimizingFor) }
+        if rebuilding { return L("Rebuilding your shaders") }
+        return updating ? L("Updating your shader cache") : L("Preparing shaders from your last match")
+    }
     var body:some View {
         HStack(alignment:.center,spacing:12) {
             if let fraction { ProgressRing(fraction:fraction).accessibilityHidden(true) }
             else { ProgressView().controlSize(.small).accessibilityHidden(true) }
             VStack(alignment:.leading,spacing:2) {
-                Text((updating ? L("Updating your shader cache") : L("Preparing shaders from your last match"))+(fraction.map { " · "+($0 >= 1 ? L("Finishing up") : "\(Int($0*100))%") } ?? ""))
+                Text(title+(fraction.map { " · "+($0 >= 1 ? L("Finishing up") : "\(Int($0*100))%") } ?? ""))
                     .font(LauncherStyle.font(13,.semibold)).monospacedDigit()
                 Text(sentences(progress.map { L("{0} of {1} ready.",$0.ready.formatted(),$0.learned.formatted()) } ?? "",
-                               updating ? L("This one-time update keeps going if you quit {0}.",Brand.name) : L("This keeps going if you quit {0}.",Brand.name),
+                               updating && optimizingFor == nil && !rebuilding ? L("This one-time update keeps going if you quit {0}.",Brand.name) : L("This keeps going if you quit {0}.",Brand.name),
                                L("Keep your Mac awake until it’s done.")))
                     .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             }.accessibilityElement(children:.combine)
@@ -255,6 +265,8 @@ enum AfterMatch {
     }
     /// The monitor preparing is the one-time update's (portable_session.h watchClient).
     static func updating(root:URL)->Bool { FileManager.default.fileExists(atPath:root.appendingPathComponent("cache/shader-update").path) }
+    /// The monitor preparing is Rebuild Shaders' (the marker says "rebuild").
+    static func rebuilding(root:URL)->Bool { (try? String(contentsOf:root.appendingPathComponent("cache/shader-update"),encoding:.utf8)) == "rebuild" }
     static func running(root:URL)->Bool {
         guard let text=try? String(contentsOf:root.appendingPathComponent("cache/after-session.pid"),encoding:.utf8),
               let pid=pid_t(text.trimmingCharacters(in:.whitespacesAndNewlines)),pid>0 else { return false }
@@ -332,6 +344,43 @@ enum ShaderCache {
         }
         return total
     }
+}
+/// After a macOS update (REC-77). Each macOS version builds graphics its own way, so the shaders
+/// Recall prepared were built for the earlier one, and the game opens a new folder for the new
+/// version. The helper keeps the earlier shaders for the player to play with until a preparation
+/// replaces them (portable_pipeline.swift, earlier-macos.json), and records the macOS the shaders
+/// were last all prepared on (cache/optimized.json). Recall offers to optimize, which is that
+/// preparation now, until the record names this macOS.
+enum MacOSShaders {
+    /// This Mac's macOS as the shader cache names it: the string the game hashes into its folder's
+    /// name, so Recall asks exactly when that folder changes, small updates included.
+    static var current:String { ProcessInfo.processInfo.operatingSystemVersionString }
+    /// The macOS the shaders were last all prepared on (from 1.6.3), or before that the one the
+    /// game's shader cache was last fully warmed on (cache/warmed.json, from 1.4).
+    static func preparedOn(root:URL)->String? {
+        for name in ["optimized.json","warmed.json"] {
+            if let data=try? Data(contentsOf:root.appendingPathComponent("cache/\(name)")),data.count < 65536,
+               let value=try? JSONSerialization.jsonObject(with:data) as? [String:Any],let macOS=value["macos"] as? String { return macOS }
+        }
+        return nil
+    }
+    /// The game's folder still holds shaders the earlier macOS built (the helper lists them).
+    static func earlierKept(root:URL)->Bool {
+        let folders=(try? FileManager.default.contentsOfDirectory(at:root.appendingPathComponent("cache/pipelines"),includingPropertiesForKeys:nil)) ?? []
+        return folders.contains { $0.lastPathComponent.count == 64 && FileManager.default.fileExists(atPath:$0.appendingPathComponent("earlier-macos.json").path) }
+    }
+    /// Learned shaders aren't all prepared for this macOS yet. Without any record (a new
+    /// installation, or no preparation finished yet) there's nothing to optimize.
+    static func needed(root:URL,learned:Int?,current:String=current)->Bool {
+        guard let learned,learned > 0 else { return false }
+        if earlierKept(root:root) { return true }
+        return preparedOn(root:root).map { $0 != current } ?? false
+    }
+    /// About how long optimizing takes, in whole 5 minutes: it prepares every learned shader with
+    /// macOS's own caches empty, as after an update. The owner's M1 Pro prepared 19,611 in 23
+    /// minutes (about 850 a minute, November 3, REC-77); 800 leaves room for slower Macs.
+    static let perMinute=800.0
+    static func minutes(_ shaders:Int)->Int { max(5,Int((Double(shaders)/perMinute/5).rounded(.up))*5) }
 }
 /// The support report's shader record: the numbers and how the last after-match preparation
 /// ended, read from the helper's own logs and reported as numbers and codes (no paths).

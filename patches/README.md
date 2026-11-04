@@ -65,6 +65,30 @@ Apple's MetalFX temporal upscaler.
 with `scripts/sign_pe.py`: NVIDIA's loader, part of the game, loads only a
 signed core DLL.
 
+`dxmt-gpu-errors.patch` (1.6.3) handles GPU errors. When the Mac's graphics chip
+hangs or faults, macOS discards that command buffer and the GPU recovers; after
+repeated hangs it ignores every later command buffer of the process ("Ignored
+(for causing prior/excessive GPU errors)"), so nothing can be drawn again until
+the process restarts and its last, half-drawn frame stays on screen.
+- Each error is sorted by the reason macOS gives under Metal's code: a hang or
+  timeout, a page fault, an internal error, or work discarded while the GPU
+  recovered from another program's error.
+- With `DXMT_GPU_ERROR_DETAIL=1`, command buffers record each encoder's
+  execution status, and render, compute and blit encoders carry a label, so
+  the log names the encoder that was running.
+- `DXMT_GPU_REPORT` names a folder for a small JSON record of the process's
+  GPU errors (`gpu-<program>-<Mac process ID>.json`), written at each error.
+- After an error the MetalFX temporal scaler starts its history again. With
+  `DXMT_METALFX_GPU_AFTER_HANG=1`, a hang also moves MetalFX's network from the
+  Neural Engine to the GPU for the rest of the process: MetalFX reads
+  `MTLFX_FORCE_GPU` when it creates a scaler, so DXMT sets it and creates the
+  scalers again.
+- Once macOS has revoked the process's GPU access, DXMT ends it if
+  `DXMT_GPU_LOST_EXIT` names it.
+- `DXMT_SIMULATE_GPU_ERROR` makes chosen frames report an error, for tests.
+- Logged descriptions are cut to 600 characters: Wine's debug output takes
+  lines of about 1,000 bytes.
+
 ## Wine
 
 These apply to the `sources/wine` subtree of the
@@ -118,12 +142,13 @@ patches above:
   re-reads the display list only after the game had actually been inactive, so
   clicks no longer cost a frame;
 - coming back to the game re-reads the display list only when a display, its
-  arrangement or its mode changed while you were away. Each re-read made the
-  game's window thread send every window a display change, one at a time with up
-  to 2 s each, while Wine's desktop rebuilt its display list; after about one
-  return in seven to the fullscreen game (Cmd-Tab or a Spaces swipe) the game drew
-  nothing for 8–13 s, and the held exit from fullscreen (below) was then applied
-  as well. Changes macOS announces while you are away still reach Wine at once;
+  arrangement or its mode changed while you were away. Each re-read rebuilt
+  Wine's display list on the game's window thread and then waited, with no time
+  limit, for Wine's desktop to answer: every return to the fullscreen game
+  (Cmd-Tab or a Spaces swipe) paused drawing for about a quarter of a second, and
+  on some Macs about one return in seven drew nothing for 8–13 s, after which the
+  held exit from fullscreen (below) was applied as well (contributed by
+  @Seglats). Changes macOS announces while you are away still reach Wine at once;
 - the fullscreen letterbox bars stay black, and on a 1x external monitor the
   drawable is capped at the monitor's own pixels;
 - when the game moves or resizes its window in fullscreen, the driver answers

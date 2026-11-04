@@ -87,9 +87,26 @@ with (older/'write.lock').open('a') as lock:
 merged=run();assert merged.returncode==0 and 'moved none, 1 added, 1 removed' in merged.stdout,merged
 assert not older.exists() and learning()==before
 namespace.rename(older)
-# Archives from another macOS are dropped, so all three are prepared again.
-moved=run();assert moved.returncode==0 and 'moved other_macos' in moved.stdout and 'Prepared and verified 3' in moved.stdout,moved
+# After a macOS update (REC-77) a launch (Play Now) keeps the earlier macOS's archives, listed as
+# such, with no warm-up first: the game itself (pipeline_cache.c as winemetal.so builds it) loads
+# them and looks its pipelines up in them, building any that doesn't fit.
+def launch():return subprocess.run([str(helpers/'ow2-pipeline'),str(root)],capture_output=True,text=True,timeout=180)
+kept=launch();assert kept.returncode==0 and 'moved other_macos' in kept.stdout and 'Playing with archives from an earlier macOS' in kept.stdout,kept
+hashes=[a['sha256'] for a in json.loads((namespace/'archive.json').read_text())['archives']]
+assert json.loads((namespace/'earlier-macos.json').read_text())=={'schema':1,'archives':hashes} and sorted(p.name for p in (namespace/'archives').iterdir())==archives
+log=out/('game-'+secrets.token_hex(4))
+game=subprocess.run([str(out/'fixture'),str(out/'fixture.metallib'),nonce,'growth_native'],env=dict(env,DXMT_PIPELINE_CACHE_LOG=str(log)),capture_output=True,text=True,timeout=40)
+game.check_returncode()
+events=[json.loads(l) for f in out.glob(log.name+'-*.jsonl') for l in f.read_text().splitlines() if l.startswith('{')]
+loaded=[v for v in events if v['event']=='archive_load'];summary=[v for v in events if v['event']=='summary'][-1]
+assert loaded and all(v['success'] for v in loaded) and summary['archive_failures']==0 and summary['archive_lookup_hits']>=1,(loaded,summary)
+played={k:summary[k] for k in ('archive_lookup_hits','archive_lookup_misses','archive_failures','runtime_creates')}
+before=learning()  # The game rewrites the recipes it uses.
+# The preparation after the session, which Optimize Now also runs, removes them and prepares all
+# three again for this macOS, then records it.
+moved=run();assert moved.returncode==0 and 'Archives from an earlier macOS removed' in moved.stdout and 'Prepared and verified 3' in moved.stdout,moved
 assert not older.exists() and learning()==before and len(json.loads((namespace/'archive.json').read_text())['prepared_keys'])==3
+assert not (namespace/'earlier-macos.json').exists() and json.loads((root/'cache/optimized.json').read_text())=={'macos':system,'gpu':gpu}
 # With Game Mode the game runs as its own app with its own Metal shader cache, which
 # preparation warms once per app, macOS version and GPU (here a test identity).
 identifier='org.overwatch2mac.pipeline-test-'+nonce
@@ -125,6 +142,6 @@ first=loads('first');assert first=={'budget':0,'loaded_bytes':size,'skipped_arch
 mib=loads(1);assert mib=={'budget':1<<20,'loaded_bytes':min(2,(1<<20)//size)*size,'skipped_archives':2-min(2,(1<<20)//size),'first_only':False},mib
 (cache/'load.json').unlink()
 (out/'result.json').write_text(json.dumps({'real_render':json.loads(r.stdout),'prepared':prepared.stdout.strip(),'progress':first,'repeat':repeat.stdout.strip(),'repaired':repaired.stdout.strip(),'lock_exit':locked.returncode,'learned_inputs_unchanged':True,'previous_cache_retained':True,
-    'after_restart':restart.stdout.strip(),'earlier_folder_in_use':busy.stdout.strip(),'merged':merged.stdout.strip(),'other_macos':moved.stdout.strip(),'warmed':warmed.stdout.strip(),
-    'shader_memory':{'none':everything,'first':first,'1_mib':mib}},indent=2)+'\n')
-print('PASS: native preparation past the old size limit, a damaged archive built again, fresh-process verification, repeat launch, writer lock, prior-cache retention, folders from earlier restarts, progress lines, the game app\'s shader warm-up and the game loading the pack as Shader memory says')
+    'after_restart':restart.stdout.strip(),'earlier_folder_in_use':busy.stdout.strip(),'merged':merged.stdout.strip(),'other_macos_launch':kept.stdout.strip(),'played_with_earlier_archives':played,
+    'other_macos':moved.stdout.strip(),'warmed':warmed.stdout.strip(),'shader_memory':{'none':everything,'first':first,'1_mib':mib}},indent=2)+'\n')
+print('PASS: native preparation past the old size limit, a damaged archive built again, fresh-process verification, repeat launch, writer lock, prior-cache retention, folders from earlier restarts, the game playing with an earlier macOS\'s archives until a preparation replaces them, progress lines, the game app\'s shader warm-up and the game loading the pack as Shader memory says')

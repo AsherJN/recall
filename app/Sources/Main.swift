@@ -24,14 +24,17 @@ import Darwin
         // after a privacy change) arrive as this event. AppKit drops it while a sheet is open,
         // so AppModel.quit handles it: it closes the sheet first.
         NSAppleEventManager.shared().setEventHandler(self,andSelector:#selector(quitEvent(_:withReplyEvent:)),forEventClass:AEEventClass(kCoreEventClass),andEventID:AEEventID(kAEQuitApplication))
-        window=NSWindow(contentRect:NSRect(x:0,y:0,width:600,height:800),styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
+        window=NSWindow(contentRect:NSRect(x:0,y:0,width:600,height:WindowFit.window.height),styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
         window.title=Brand.name;window.isReleasedWhenClosed=false
         // The hosting view sets the window's minimum from its SwiftUI content's, which a scroll
-        // view puts near zero (it replaced minSize with 0 × 32), so the content states it too.
-        let minimum=LauncherStyle.windowMinimum
-        window.titlebarAppearsTransparent=true;window.minSize=minimum
-        window.contentView=NSHostingView(rootView:SetupView(model:model).frame(minWidth:minimum.width,minHeight:minimum.height))
-        window.center();window.makeKeyAndOrderFront(nil)
+        // view puts near zero (it replaced minSize with 0 × 32), so the content states it too
+        // (WindowContent): the height the screen has room for.
+        window.titlebarAppearsTransparent=true;window.center();fitToScreen()
+        window.contentView=NSHostingView(rootView:WindowContent(model:model))
+        window.makeKeyAndOrderFront(nil)
+        // Moved to another display, or the display's size changed in System Settings.
+        NotificationCenter.default.addObserver(self,selector:#selector(screenChanged),name:NSWindow.didChangeScreenNotification,object:window)
+        NotificationCenter.default.addObserver(self,selector:#selector(screenChanged),name:NSApplication.didChangeScreenParametersNotification,object:nil)
         // A click on the window outside its open pop-up closes it, as Esc would
         // (AppModel.closeSheetFromOutside), and goes no further. Only in the content area (the
         // title bar still drags the window), not while something sits on the pop-up (a nested
@@ -148,6 +151,30 @@ import Darwin
     @objc func uninstall() { show();model.sheet = .uninstall }
     @objc func help() { show();model.openHelp() }
     func show() { window?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true) }
+    @objc func screenChanged(_ notification:Notification) { fitToScreen() }
+    /// Fits the window to the screen it is on (WindowFit, REC-73): its minimum, and the large
+    /// pop-ups with it, to the room there; the window inside the screen's visible part, made
+    /// shorter if it was taller, or taller again on a screen with more room.
+    func fitToScreen() {
+        guard let window,let screen=window.screen ?? NSScreen.main else { return }
+        var visible=screen.visibleFrame
+        if let preview=previewVisibleHeight,preview < visible.height { visible.origin.y=visible.maxY-preview;visible.size.height=preview }
+        let titleBar=window.frame.height-window.contentRect(forFrameRect:window.frame).height
+        let height=WindowFit.windowHeight(visible:visible.height,titleBar:titleBar)
+        WindowFit.shared.windowHeight=height
+        window.contentMinSize=NSSize(width:WindowFit.window.width,height:height)
+        let frame=WindowFit.fitted(window.frame,visible:visible,minimumFrame:height+titleBar)
+        if frame != window.frame { window.setFrame(frame,display:true) }
+    }
+    /// A private preview stands in a shorter screen, as the room below the menu bar (and above a
+    /// Dock): --preview-visible-height 717 is a 14-inch MacBook Pro at 1147 × 745, the
+    /// Displays setting nearest Larger Text (GitHub #52).
+    private lazy var previewVisibleHeight:CGFloat? = {
+        let args=CommandLine.arguments
+        guard model.release?.distribution == "private-preview",let i=args.firstIndex(of:"--preview-visible-height"),
+              args.indices.contains(i+1),let value=Double(args[i+1]),value > 0 else { return nil }
+        return CGFloat(value)
+    }()
     func applicationDidBecomeActive(_ notification:Notification) { model.syncSession();model.checkIfDue();model.checkAfterMatch() }
     /// The busy note looks at the Mac only while this window can be seen (AppModel.watchesLoad).
     func applicationDidChangeOcclusionState(_ notification:Notification) { model.windowVisible=NSApp.occlusionState.contains(.visible) }
@@ -172,6 +199,14 @@ import Darwin
         let app=NSApplication.shared,delegate=AppDelegate()
         app.setActivationPolicy(.regular);app.delegate=delegate
         withExtendedLifetime(delegate) { app.run() }
+    }
+}
+/// The window's content, at least as tall as the room the screen leaves (WindowFit); the hosting
+/// view makes that the window's minimum.
+private struct WindowContent:View {
+    let model:AppModel
+    var body:some View {
+        SetupView(model:model).frame(minWidth:WindowFit.window.width,minHeight:WindowFit.shared.windowHeight)
     }
 }
 /// The responder chain's undo: and redo:, which AppKit declares for Objective-C only.
