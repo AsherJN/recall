@@ -240,7 +240,8 @@ Battle.net is closed.
 
 The app has no network account, telemetry, player-side Python or runtime build
 step. Authentication and game downloads remain inside official Battle.net.
-`UpdateService.swift` is its only network use: when automatic checks are on, an
+Besides the Discord invite's member counts (Discord's public invite record, at most
+once a day), `UpdateService.swift` is its only network use: when automatic checks are on, an
 anonymous request to GitHub's latest-release API at launch and at most every 12
 hours. Update Now downloads the release DMG, checks GitHub's SHA-256, mounts it
 and accepts the app inside only if it is notarized, signed by this app's own

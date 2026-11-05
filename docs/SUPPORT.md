@@ -181,6 +181,9 @@ request carries no account, identifier or information about your Mac; like any
 web request it reaches GitHub from your IP address. Turn it off in Settings › General,
 and check by hand from the Recall menu.
 
+The Discord invite on the home screen asks Discord's public invite record for the
+server's online and member counts, at most once a day, with nothing about you.
+
 The Mosaic News links in the app open in your browser with a tag naming the
 screen they came from (for example `utm_content=home`), so the author can see
 which placement works. Nothing else is added, and the app itself records
