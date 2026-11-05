@@ -92,7 +92,7 @@ func details(_ card:Any??)->String? { ((card ?? nil) as? [String:Any])?["details
         let badge=assets?["small_image"] ?? ""
         precondition(badge.hasPrefix("https://raw.githubusercontent.com/\(Brand.repositoryPath)/") && badge.hasSuffix("/app/Resources/AppIcon.png") && badge.utf16.count <= 300)
         precondition(FileManager.default.fileExists(atPath:"app/Resources/AppIcon.png"),"run from the repository root")
-        precondition(buttons?.count == 1 && buttons?[0]["label"] == "Play OW on Mac" && (buttons?[0]["label"]?.utf16.count ?? 99) <= 32
+        precondition(buttons?.count == 1 && buttons?[0]["label"] == "Play Overwatch on Mac" && (buttons?[0]["label"]?.utf16.count ?? 99) <= 32
                      && buttons?[0]["url"] == Brand.repository.absoluteString)
         precondition(DiscordAssets.applicationID == DiscordAssets.standardID && JSONSerialization.isValidJSONObject(card))
     }

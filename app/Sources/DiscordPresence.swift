@@ -5,7 +5,7 @@ import Darwin
 // client listens on (no account, no network).
 
 enum DiscordAssets {
-    // Blizzard's Overwatch listing. Support: defaults write org.overwatch2mac.launcher discordApplicationID <digits>
+    // Discord's own Overwatch listing. Support: defaults write org.overwatch2mac.launcher discordApplicationID <digits>
     static let standardID="356875221078245376"
     static var applicationID:String {
         UserDefaults.standard.string(forKey:"discordApplicationID").flatMap { id in (17...20).contains(id.count) && id.allSatisfy { $0.isASCII && $0.isNumber } ? id : nil } ?? standardID
@@ -19,7 +19,7 @@ enum PresenceCard {
     static func activity(launched:Date)->[String:Any] {
         ["type":0,"timestamps":["start":Int(launched.timeIntervalSince1970)],
          "assets":["small_image":DiscordAssets.badge.absoluteString,"small_text":"Playing on Mac with \(Brand.name)"],
-         "buttons":[["label":"Play OW on Mac","url":Brand.repository.absoluteString]]]
+         "buttons":[["label":"Play Overwatch on Mac","url":Brand.repository.absoluteString]]]
     }
 }
 

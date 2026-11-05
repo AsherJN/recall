@@ -422,8 +422,9 @@ from schema 5 whether Game Mode is on.
 
 Discord activity (`DiscordFeature.swift`, `DiscordPresence.swift`, Settings › General) shows
 "Playing Overwatch" on the player's Discord profile while the game runs, set over the local
-socket every Discord client listens on, under Blizzard's Overwatch listing. Off (or with China's
-Battle.net), nothing is watched or opened. The report's `discord_presence` (schema 7) says whether Discord answered.
+socket every Discord client listens on, under Discord's own Overwatch listing. It is off until
+the player turns it on, in Settings or from the offer under Play's Discord card (shown once,
+while the Discord app is on the Mac). Off (or with China's Battle.net), nothing is watched or opened. The report's `discord_presence` (schema 7) says whether Discord answered.
 
 The running screen learns the session's processes from `ow2-setup session` (when the window
 becomes active, or from Settings) and asks macOS to report when each one ends (a process

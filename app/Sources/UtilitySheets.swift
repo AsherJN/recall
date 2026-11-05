@@ -181,9 +181,7 @@ struct SettingsSheet:View {
     private var discord:some View {
         LauncherPanel(inset:16) {
             SettingSwitch(title:L("Discord activity"),detail:L("Discord shows you’re playing Overwatch on Mac with {0}, and for how long.",Brand.name),
-                          isOn:Bindable(model.discord).on) {
-                Text(L("New")).font(LauncherStyle.font(12,.semibold)).foregroundStyle(LauncherStyle.accent)
-            }
+                          isOn:Bindable(model.discord).on)
         }
     }
     private var battleNet:some View {

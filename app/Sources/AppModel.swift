@@ -182,6 +182,8 @@ final class AppModel {
     /// Discord is blocked in mainland China: players on China's Battle.net get GitHub wherever
     /// Recall offers the Discord (GitHubHelpLink; owner, October 15).
     var showsDiscord:Bool { currentRegion != .china }
+    // Play offers Discord activity once, under the Discord card, while the Discord app is on this Mac.
+    var offersDiscordActivity:Bool { showsDiscord && screen == .ready && !discord.on && !discord.offerAnswered && discord.discordInstalled }
     /// The 929PJ warm-up is a global-server code; China's servers don't take it (NetEase). Players
     /// on China's Battle.net get the stutter heads-up without it (owner, October 19).
     var offersWorkshopCode:Bool { currentRegion != .china }
