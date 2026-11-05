@@ -21,6 +21,7 @@ final class AppModel {
     var autoOpenBattleNet=UserDefaults.standard.object(forKey:"autoOpenBattleNet") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoOpenBattleNet,forKey:"autoOpenBattleNet") }
     }
+    let discord=DiscordFeature()
     /// Apple's Metal Performance HUD over Overwatch (worker: launch --metal-hud). Battle.net
     /// starts the game with its own environment, so Settings changes it only while
     /// Battle.net is closed (see running).
@@ -591,6 +592,7 @@ final class AppModel {
             if clientInstalled || state["battlenet_region"] != nil { battleNetRegion=installedRegion }
             if let language=(state["battlenet_language"] as? String).flatMap(BattleNetLanguage.init) { battleNetLanguage=language }
         }
+        discord.statusKnown()
         freeBytes=(status["free_bytes"] as? NSNumber)?.uint64Value ?? 0
         // Match Finder's "available" figure, which includes purgeable storage.
         if let available=try? root.resourceValues(forKeys:[.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage,available>0 {
@@ -624,6 +626,7 @@ final class AppModel {
     }
     func startup() {
         guard !started else { return };started=true
+        discord.start(allowed:{ [unowned self] in showsDiscord && !isPreview },lookForGame:{ [unowned self] in syncSession() })
         // Preview states exercise UI only and never create a user environment.
         if release?.distribution == "private-preview",let i=CommandLine.arguments.firstIndex(of:"--preview-state"),CommandLine.arguments.indices.contains(i+1),let preview=Screen(rawValue:CommandLine.arguments[i+1]) {
             isPreview=true;previewScreen(preview);return
@@ -1317,6 +1320,7 @@ final class AppModel {
         }
     }
     private func showSession(_ processes:[[String:Any]]) {
+        discord.sessionSeen(processes)
         guard !processes.isEmpty else { screen = .ready;gameWindowHidden=false;sessionLogging=nil;return }
         readSessionLogging()
         existingName=processes.contains { $0["kind"] as? String == "game" } ? "Overwatch" : "Battle.net"
@@ -1586,7 +1590,8 @@ final class AppModel {
         // Schema 6 (1.6.1): mouse_rate, "all" or the most a second (REC-63); Classic ignores it.
         let fresh=loadChecked.map { Date().timeIntervalSince($0) < 15 } ?? false
         let otherApps:[String:Any]=["at_last_launch":launchLoad ?? "none","now":fresh ? macLoad.report as Any : "not_checked"]
-        let data:[String:Any]=["schema":6,"game_mode":gameMode ? "on" : "off",
+        // Schema 7: discord_presence (DiscordFeature.report).
+        let data:[String:Any]=["schema":7,"discord_presence":discord.report,"game_mode":gameMode ? "on" : "off",
                                 "mouse_input":mouseInput.rawValue,"mouse_rate":mouseRate.rawValue,"input_monitoring":InputMonitoring.access.rawValue,
                                 "other_apps":otherApps,"logging":logs,"battlenet":battleNet,"app_language":AppLanguage.current,"default_browser":browser,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? "on" : "off","metalfx_sharpening":metalFXSharpening.rawValue,"install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode,"shaders":ShaderRecord.read(root:root),"shader_memory":shaderMemory]
         report=String(data:(try? JSONSerialization.data(withJSONObject:data,options:[.prettyPrinted,.sortedKeys])) ?? Data(),encoding:.utf8) ?? ""
