@@ -469,6 +469,8 @@
     "Checking…": "확인 중…",
     "Couldn’t reach GitHub; check your connection": "GitHub에 연결할 수 없음. 연결 상태를 확인하세요",
     "Open Battle.net when {0} opens": "{0}을 열 때 Battle.net 열기",
+    "Discord activity": "Discord 활동",
+    "Discord shows you’re playing Overwatch on Mac with {0}, and for how long.": "Discord에 Mac에서 {0}로 오버워치를 플레이 중인 것과 플레이 시간이 표시됩니다.",
     "Turn off to start Battle.net yourself with Open Battle.net.": "끄면 ‘Battle.net 열기’로 직접 Battle.net을 시작합니다.",
     "Battle.net region": "Battle.net 지역",
     "Fullscreen resolution": "전체 화면 해상도",
