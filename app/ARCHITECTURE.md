@@ -127,14 +127,16 @@ let Recall "receive keystrokes", how to undo it and what macOS shows next. Its T
 (`AppModel.turnOnHighPrecision`) chooses it and shows macOS's prompt the first time, or after
 a no opens System Settings, since macOS asks only once; once Input Monitoring is allowed,
 Settings chooses it at once. Settings shows the three as tiles, High-precision marked
-Recommended while a mouse is connected, and says when Input Monitoring is on; its info button
+Recommended while a mouse is connected, and says when Input Monitoring is on. Until it is, the
+tile lit is Standard, which is what the game gets, and the choice waits; its info button
 (`MouseInfo`) explains each and the update rate. The Play
 screen's card (`HighPrecisionCard`, `HighPrecisionInvite`) invites players to it once Overwatch is installed,
 while Battle.net is closed and a mouse is connected (the driver's rule, read from the I/O
 Registry, which needs no permission), and after it is chosen reminds them to finish the
 permission; closing it, or leaving High-precision, hides it for good. IOHID needs Input Monitoring,
-the app's permission as the microphone is (`InputMonitoring.swift`): the panel links to the
-switch in System Settings until it is allowed, and the game's process, which the app
+the app's permission as the microphone is (`InputMonitoring.swift`): until it is allowed, the
+panel asks for it while macOS hasn't (Allow…, which also lists Recall under Input Monitoring:
+an app that never asked isn't there to switch on), and otherwise links to the switch in System Settings, and the game's process, which the app
 started, has the app's answer. Without it the driver keeps GCMouse and asks nothing. The
 driver opens only devices with a mouse collection, trackpads excepted, reads only X, Y and
 buttons, passes their input on only while macOS still gives the game mouse input of its own

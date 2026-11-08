@@ -212,9 +212,13 @@ struct SettingsSheet:View {
     /// mouse is connected, first explains itself and why macOS will ask for Input Monitoring
     /// (HighPrecisionMouseSheet), whose Turn On chooses it and shows macOS's prompt the first time
     /// (AppModel.turnOnHighPrecision); once Input Monitoring is allowed, it's chosen at once. Until
-    /// then the mouse works as Standard does and the panel says what to do; after, its title says so.
+    /// then the mouse works as Standard does, so Standard is the tile lit, and the panel says what to
+    /// do; after, High-precision is lit and its title says so. The choice itself is kept, so it takes
+    /// effect as soon as macOS allows it; choosing Standard or Classic drops it.
     private var mouse:some View {
-        let input=model.mouseInput,allowed=model.inputMonitoring == .allowed
+        let chosen=model.mouseInput,allowed=model.inputMonitoring == .allowed
+        let waiting=chosen == .highPrecision && !allowed
+        let input:AppModel.MouseInput=waiting ? .standard : chosen
         let needs=L("Needs Input Monitoring."),until=L("Until then, your mouse works as Standard does.")
         return LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:8) {
@@ -225,7 +229,7 @@ struct SettingsSheet:View {
                         .help(L("About the mouse settings")).accessibilityLabel(L("About the mouse settings"))
                         .infoPopover(isPresented:$aboutMouse) { MouseInfo() }
                     Spacer(minLength:8)
-                    if input == .highPrecision && allowed {
+                    if input == .highPrecision {
                         Text(L("Input Monitoring is on")).font(LauncherStyle.font(11,.medium)).foregroundStyle(.secondary).transition(.opacity)
                     }
                 }
@@ -233,16 +237,19 @@ struct SettingsSheet:View {
                     MouseTile(title:L("Standard"),symbol:"cursorarrow",selected:input == .standard) { model.mouseInput = .standard }
                     MouseTile(title:L("Classic"),symbol:"clock.arrow.circlepath",selected:input == .classic) { model.mouseInput = .classic }
                     MouseTile(title:L("High-precision"),symbol:"cursorarrow.motionlines",recommended:model.mouseConnected,selected:input == .highPrecision) {
-                        if input != .highPrecision { if allowed { model.mouseInput = .highPrecision } else { explainHighPrecision=true } }
+                        if allowed { model.mouseInput = .highPrecision } else { explainHighPrecision=true }
                     }
                 }.padding(3).background(.primary.opacity(0.06),in:RoundedRectangle(cornerRadius:15,style:.continuous))
                     .disabled(model.running != nil).opacity(model.running != nil ? 0.6 : 1)
-                if input == .highPrecision && !allowed {
+                if waiting {
                     HStack(spacing:10) {
                         Text("\(Text(needs).fontWeight(.semibold))\(AppLanguage.gap)\(Text(until).foregroundStyle(.secondary))")
                             .font(LauncherStyle.font(12)).fixedSize(horizontal:false,vertical:true)
                         Spacer(minLength:8)
-                        Button(L("Open System Settings")) { NSWorkspace.shared.open(InputMonitoring.privacySettings) }.buttonStyle(AccentButtonStyle())
+                        // An app is listed under Input Monitoring only once it has asked: undecided, ask
+                        // (macOS's prompt, which adds Recall to the list); answered, only System Settings can change it.
+                        Button(model.inputMonitoring == .undecided ? L("Allow…") : L("Open System Settings")) { model.requestInputMonitoring() }
+                            .buttonStyle(AccentButtonStyle())
                     }.padding(.vertical,8).padding(.leading,12).padding(.trailing,8)
                         .background(LauncherStyle.accent.opacity(0.1),in:RoundedRectangle(cornerRadius:12,style:.continuous))
                         .overlay { RoundedRectangle(cornerRadius:12,style:.continuous).strokeBorder(LauncherStyle.accent.opacity(0.25),lineWidth:1) }
@@ -255,7 +262,8 @@ struct SettingsSheet:View {
                 mouseRate
                 if let running=model.running { closeFirst(running,several:false) }
             }.animation(reduceMotion ? nil : .easeOut(duration:0.3),value:input)
-        }
+                .animation(reduceMotion ? nil : .easeOut(duration:0.3),value:waiting)
+        }.onAppear { model.inputMonitoring=InputMonitoring.access }
     }
     /// Mouse › Advanced (AppModel.MouseRate, REC-63), closed until the player opens it, since most
     /// never need it (owner, October 25): how many times a second Overwatch gets the mouse's
