@@ -151,9 +151,14 @@ final class AppModel {
     func turnOnHighPrecision() {
         guard !isPreview else { previewInvite = .permission;return }
         mouseInput = .highPrecision
+        requestInputMonitoring()
+    }
+    /// macOS's prompt while it hasn't been answered (which also lists Recall under Input Monitoring;
+    /// an app that never asked isn't there to switch on), otherwise System Settings at Input Monitoring.
+    func requestInputMonitoring() {
         switch InputMonitoring.access {
         case .undecided: InputMonitoring.ask()
-        case .denied: NSWorkspace.shared.open(InputMonitoring.privacySettings)
+        case .denied: InputMonitoring.ask();NSWorkspace.shared.open(InputMonitoring.privacySettings)
         case .allowed: break
         }
         inputMonitoring=InputMonitoring.access
