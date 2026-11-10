@@ -181,7 +181,7 @@ request carries no account, identifier or information about your Mac; like any
 web request it reaches GitHub from your IP address. Turn it off in Settings › General,
 and check by hand from the Recall menu.
 
-The Discord invite on the home screen asks Discord's public invite record for the
+The Discord card in Recall's window asks Discord's public invite record for the
 server's online and member counts, at most once a day, with nothing about you.
 
 The Mosaic News links in the app open in your browser with a tag naming the
