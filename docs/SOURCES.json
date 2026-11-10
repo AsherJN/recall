@@ -34,6 +34,11 @@
      "patch": "patches/dxmt-gpu-errors.patch",
      "sha256": "384d8d252ae9bf9baa0b37f9cf9d1617665b4fdbcb9d2f0801cc138694aee207",
      "applies_after": "patches/dxmt-shader-pack.patch"
+    },
+    {
+     "patch": "patches/dxmt-stream-output.patch",
+     "sha256": "4361f2d828b5761ea22fde36d0c02af2562f7f4a19a68e143b7ab53003f518ab",
+     "applies_after": "patches/dxmt-gpu-errors.patch"
     }
    ],
    "nvapi_headers_commit": "d08488fcc82eef313b0464db37d2955709691e94",

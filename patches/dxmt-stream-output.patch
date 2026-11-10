@@ -1,0 +1,288 @@
+diff --git a/src/airconv/air_type.cpp b/src/airconv/air_type.cpp
+index 01fb51b..b23508a 100644
+--- a/src/airconv/air_type.cpp
++++ b/src/airconv/air_type.cpp
+@@ -64,7 +64,7 @@ AirType::AirType(LLVMContext &context) : context(context) {
+     context,
+     {
+       _int->getPointerTo((uint32_t)AddressSpace::device),
+-      _int->getPointerTo((uint32_t)AddressSpace::device),
++      _long, // vertices per instance
+     },
+     "dxmt_stream_output_buffer_entry"
+   );
+diff --git a/src/airconv/airconv_public.h b/src/airconv/airconv_public.h
+index 15b51c1..cb7ea41 100644
+--- a/src/airconv/airconv_public.h
++++ b/src/airconv/airconv_public.h
+@@ -88,6 +88,7 @@ struct MTL_GEOMETRY_SHADER_REFLECTION {
+     uint32_t GSPassThrough;
+   };
+   uint32_t Primitive;
++  uint32_t OutputIsInput; // passes its input through unchanged
+ };
+ 
+ struct MTL_POST_TESSELLATOR_REFLECTION {
+diff --git a/src/airconv/dxbc_converter.cpp b/src/airconv/dxbc_converter.cpp
+index 4b1387b..5227e9e 100644
+--- a/src/airconv/dxbc_converter.cpp
++++ b/src/airconv/dxbc_converter.cpp
+@@ -661,7 +661,10 @@ llvm::Error convert_dxbc_vertex_shader(
+       auto slot0_entry =
+           builder.CreateLoad(so_entries_type, builder.CreateConstInBoundsGEP1_32(so_entries_type, so_entries, 0));
+       auto slot0 = builder.CreateExtractValue(slot0_entry, {0});
+-      auto adjusted_vertex_id = builder.CreateSub(vertex_id, base_vertex);
++      auto vertices_per_instance = builder.CreateTrunc(builder.CreateExtractValue(slot0_entry, {1}), ctx.types._int);
++      auto adjusted_vertex_id = builder.CreateAdd(
++          builder.CreateSub(vertex_id, base_vertex), builder.CreateMul(ctx.resource.instance_id, vertices_per_instance)
++      );
+       auto output_regs = builder.CreateBitOrPointerCast(
+         ctx.resource.output.ptr_int4, llvm::PointerType::get(ctx.types._int, 0)
+       );
+@@ -902,8 +905,20 @@ llvm::Error convertDXBC(
+ bool CheckGSBBIsPassThrough(dxmt::dxbc::BasicBlock *bb) {
+   using namespace dxmt::dxbc;
+   if (bb->instructions.any(patterns{
+-        [](InstNop &) { return false; }, [](InstMov &mov) { return false; },
+-        [](InstEmit &) { return false; }, [](InstCut &) { return false; },
++        [](const InstNop &) { return false; },
++        [](const InstMov &mov) {
++          // only an input copied unchanged to the output with its register
++          auto dst = std::get_if<DstOperandOutput>(&mov.dst);
++          auto src = std::get_if<SrcOperandInputICP>(&mov.src);
++          if (mov._.saturate || !dst || !src || src->_.abs || src->_.neg || dst->regid != src->regid)
++            return true;
++          uint8_t swizzle[4] = {src->_.swizzle.x, src->_.swizzle.y, src->_.swizzle.z, src->_.swizzle.w};
++          for (uint8_t c = 0; c < 4; c++)
++            if ((dst->_.mask & (1 << c)) && swizzle[c] != c)
++              return true;
++          return false;
++        },
++        [](const InstEmit &) { return false; }, [](const InstCut &) { return false; },
+         [](auto &) { return true; }
+       }))
+     return false;
+@@ -1299,8 +1314,9 @@ AIRCONV_API int SM50Initialize(
+           binding_srv_hi_mask || binding_srv_lo_mask ||
+           !CheckGSBBIsPassThrough(sm50_shader->entry())) {
+         pRefl->GeometryShader.GSPassThrough = ~0u;
++        pRefl->GeometryShader.OutputIsInput = 0;
+       } else {
+-        CheckGSSignatureIsPassThrough(
++        pRefl->GeometryShader.OutputIsInput = CheckGSSignatureIsPassThrough(
+           inputParser, outputParser, pRefl->GeometryShader.Data
+         );
+       }
+diff --git a/src/d3d11/d3d11_context_impl.cpp b/src/d3d11/d3d11_context_impl.cpp
+index b203443..3002bb4 100644
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -1281,6 +1281,8 @@ public:
+     if (unlikely(!VertexCount))
+       return;
+     std::lock_guard<mutex_t> lock(mutex);
++    if (unlikely(!AppendStreamOutput(VertexCount, 1, StartVertexLocation)))
++      return;
+ 
+     WMTPrimitiveType Primitive;
+     uint32_t ControlPointCount;
+@@ -1357,6 +1359,8 @@ public:
+     if (unlikely(!VertexCountPerInstance || !InstanceCount))
+       return;
+     std::lock_guard<mutex_t> lock(mutex);
++    if (unlikely(!AppendStreamOutput(VertexCountPerInstance, InstanceCount, StartVertexLocation)))
++      return;
+ 
+     WMTPrimitiveType Primitive;
+     uint32_t ControlPointCount;
+@@ -2246,6 +2250,10 @@ public:
+ 
+     if (!ValidateMultiSOTargets(NumBuffers, ppSOTargets))
+       return;
++    if (!NumBuffers || !ppSOTargets[0] || !pOffsets || pOffsets[0] != UINT(-1)) {
++      so_append_offset_ = NumBuffers && ppSOTargets[0] && pOffsets ? pOffsets[0] : 0;
++      so_append_bytes_ = 0;
++    }
+ 
+     for (unsigned slot = 0; slot < D3D11_SO_BUFFER_SLOT_COUNT; slot++) {
+       auto pBuffer = slot < NumBuffers ? GetResourceCommon(ppSOTargets[slot]) : nullptr;
+@@ -3274,6 +3282,34 @@ public:
+   GetDynamicBufferAllocation(Rc<DynamicBuffer> &dynamic);
+ 
+   uint64_t *allocated_encoder_argbuf_size_ = nullptr;
++  UINT so_append_offset_ = 0;
++  uint64_t so_append_bytes_ = 0;
++
++  /**
++  D3D appends stream output draw after draw and instance after instance. Moves the binding to the
++  append position before a point-list draw; false when the draw's output would not fit.
++  */
++  bool
++  AppendStreamOutput(UINT VertexCount, UINT InstanceCount, UINT StartVertex) {
++    if (likely(!state_.StreamOutput.Targets.test_bound(0)))
++      return true;
++    auto layout = com_cast<IMTLD3D11StreamOutputLayout>(state_.ShaderStages[PipelineStage::Geometry].Shader.ptr());
++    if (!layout || state_.InputAssembler.Topology != D3D11_PRIMITIVE_TOPOLOGY_POINTLIST || StartVertex)
++      return true;
++    MTL_SHADER_STREAM_OUTPUT_ELEMENT_DESC *elements;
++    uint32_t strides[4] = {};
++    layout->GetStreamOutputElements(&elements, strides);
++    uint64_t at = so_append_offset_ + so_append_bytes_, size = uint64_t(VertexCount) * InstanceCount * strides[0];
++    if (at + size > state_.StreamOutput.Targets[0].Buffer->buffer()->length())
++      return false;
++    so_append_bytes_ += size;
++    EmitST([at = unsigned(at), VertexCount](ArgumentEncodingContext &enc) {
++      enc.bindStreamOutputBufferOffset(0, at);
++      enc.setStreamOutputVerticesPerInstance(0, VertexCount);
++    });
++    state_.StreamOutput.Targets.set_dirty(0);
++    return true;
++  }
+ 
+   uint64_t PreAllocateArgumentBuffer(size_t size, size_t alignment) {
+     assert(allocated_encoder_argbuf_size_ && "otherwise invalid call");
+@@ -4483,6 +4519,15 @@ public:
+         dsv_info.viewId = state_.OutputMerger.DSV->viewId();
+         dsv_info.PixelFormat = state_.OutputMerger.DSV->pixelFormat();
+         dsv_info.ReadOnlyFlags =  state_.OutputMerger.DSV->readonlyFlags();
++      } else if (effective_render_target == 0 && !state_.OutputMerger.UAVs.any_bound() &&
++                 state_.StreamOutput.Targets.any_bound()) {
++        // Stream output only: a pass without attachments, as for UAVs.
++        auto &viewport = state_.Rasterizer.viewports[0];
++        bool sized = state_.Rasterizer.NumViewports && viewport.Width >= 1 && viewport.Height >= 1;
++        render_target_width = sized ? viewport.Width : 1;
++        render_target_height = sized ? viewport.Height : 1;
++        sample_count = 1;
++        uav_only = true;
+       } else if (effective_render_target == 0) {
+         if (!state_.OutputMerger.UAVs.any_bound()) {
+           DEBUG("No rendering attachment or uav is bounded");
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 1b1b542..6f8c3ef 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -3,6 +3,8 @@
+ #include "com/com_guid.hpp"
+ #include "d3d11_fence.hpp"
+ #include "d3d11_input_layout.hpp"
++#include "DXBCParser/BlobContainer.h"
++#include "DXBCParser/d3d12tokenizedprogramformat.hpp"
+ #include "d3d11_interfaces.hpp"
+ #include "d3d11_multithread.hpp"
+ #include "d3d11_pipeline.hpp"
+@@ -268,6 +270,36 @@ public:
+                                               ppGeometryShader);
+   }
+ 
++  /**
++  Stream output is emulated in the vertex shader: from a vertex shader, or from a geometry shader that
++  passes points through unchanged.
++  */
++  bool
++  CanEmulateStreamOutput(const void *pShaderBytecode, SIZE_T BytecodeLength) {
++    using namespace microsoft;
++    CDXBCParser parser;
++    if (parser.ReadDXBC(pShaderBytecode, BytecodeLength) != S_OK)
++      return false;
++    UINT blob = parser.FindNextMatchingBlob(DXBC_GenericShaderEx);
++    if (blob == DXBC_BLOB_NOT_FOUND)
++      blob = parser.FindNextMatchingBlob(DXBC_GenericShader);
++    if (blob == DXBC_BLOB_NOT_FOUND)
++      return false;
++    switch (DECODE_D3D10_SB_TOKENIZED_PROGRAM_TYPE(*(const UINT *)parser.GetBlob(blob))) {
++    case D3D10_SB_VERTEX_SHADER:
++      return true;
++    case D3D10_SB_GEOMETRY_SHADER: {
++      Com<ID3D11GeometryShader> shader;
++      if (FAILED(pipeline_cache_->AddGeometryShader(pShaderBytecode, BytecodeLength, &shader)))
++        return false;
++      auto &gs = com_cast<IMTLD3D11Shader>(shader.ptr())->GetManagedShader()->reflection().GeometryShader;
++      return gs.OutputIsInput && gs.Primitive == D3D10_SB_PRIMITIVE_POINT;
++    }
++    default:
++      return false;
++    }
++  }
++
+   HRESULT STDMETHODCALLTYPE CreateGeometryShaderWithStreamOutput(
+       const void *pShaderBytecode, SIZE_T BytecodeLength,
+       const D3D11_SO_DECLARATION_ENTRY *pSODeclaration, UINT NumEntries,
+@@ -282,8 +314,7 @@ public:
+         ((char *)pShaderBytecode)[0] == 'D' &&
+         ((char *)pShaderBytecode)[1] == 'X' &&
+         ((char *)pShaderBytecode)[2] == 'B' &&
+-        ((char *)pShaderBytecode)[3] == 'C') {
+-      // FIXME: ensure the input shader is a vertex shader
++        ((char *)pShaderBytecode)[3] == 'C' && CanEmulateStreamOutput(pShaderBytecode, BytecodeLength)) {
+       WARN("Emulate stream output");
+ 
+       Com<IMTLD3D11StreamOutputLayout> so_layout;
+diff --git a/src/d3d11/d3d11_input_layout.cpp b/src/d3d11/d3d11_input_layout.cpp
+index 8c03b2b..7191387 100644
+--- a/src/d3d11/d3d11_input_layout.cpp
++++ b/src/d3d11/d3d11_input_layout.cpp
+@@ -185,6 +185,8 @@ HRESULT ExtractMTLStreamOutputElements(
+   uint32_t element_count = 0;
+   CSignatureParser parser;
+   HRESULT hr = DXBCGetOutputSignature(pShaderBytecode, &parser);
++  if (FAILED(hr)) // a pass-through geometry shader (OSG5): its inputs are its outputs
++    hr = DXBCGetInputSignature(pShaderBytecode, &parser);
+   if (FAILED(hr)) {
+     return hr;
+   }
+diff --git a/src/d3d11/d3d11_shader.cpp b/src/d3d11/d3d11_shader.cpp
+index 285cbb9..96b514f 100644
+--- a/src/d3d11/d3d11_shader.cpp
++++ b/src/d3d11/d3d11_shader.cpp
+@@ -412,6 +412,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
+   Sha1HashState h;
+   h.update(getGlobalShaderFlag());
+   h.update(((IMTLD3D11StreamOutputLayout *)variant.stream_output_layout_handle)->Digest());
++  h.update(uint32_t(1)); // instanced write index
+   if (variant.input_layout_handle)
+     h.update(variant.input_layout_handle->sha1());
+   auto variant_digest = h.final();
+diff --git a/src/dxmt/dxmt_context.cpp b/src/dxmt/dxmt_context.cpp
+index 3ab25fb..a893f60 100644
+--- a/src/dxmt/dxmt_context.cpp
++++ b/src/dxmt/dxmt_context.cpp
+@@ -145,7 +145,7 @@ ArgumentEncodingContext::encodeStreamOutputBuffers<PipelineKind::Ordinary>(uint6
+     }
+     auto [buffer_alloc, buffer_offset] = access<PipelineStage::Vertex>(buffer, state.offset, 0, ResourceAccess::Write);
+     entries[slot].buffer_handle = buffer_alloc->gpuAddress() + buffer_offset + state.offset;
+-    entries[slot].counter_handle = 0; // TODO(stream-output): counter & buffer_filled_size
++    entries[slot].counter_handle = state.vertices_per_instance; // TODO(stream-output): counter & buffer_filled_size
+     makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(buffer.ptr(), false, true);
+   };
+   {
+diff --git a/src/dxmt/dxmt_context.hpp b/src/dxmt/dxmt_context.hpp
+index ac5c664..e363eeb 100644
+--- a/src/dxmt/dxmt_context.hpp
++++ b/src/dxmt/dxmt_context.hpp
+@@ -109,6 +109,7 @@ struct StreamOutputBinding {
+   Rc<Buffer> buffer;
+   uint64_t offset;
+   Rc<Buffer> counter;
++  uint32_t vertices_per_instance;
+ };
+ 
+ enum class EncoderType {
+@@ -484,6 +485,7 @@ public:
+     entry.buffer = std::move(buffer);
+     entry.offset = offset;
+     entry.counter = std::move(counter);
++    entry.vertices_per_instance = 0;
+   }
+   
+   void bindStreamOutputBufferOffset(unsigned slot, unsigned offset) {
+@@ -491,6 +493,10 @@ public:
+     entry.offset = offset;
+   }
+ 
++  void setStreamOutputVerticesPerInstance(unsigned slot, unsigned vertices) {
++    so_[slot].vertices_per_instance = vertices;
++  }
++
+   void
+   bindVertexBuffer(unsigned slot, unsigned offset, unsigned stride, Rc<Buffer> &&buffer) {
+     auto &entry = vbuf_[slot];

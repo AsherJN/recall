@@ -89,6 +89,15 @@ the process restarts and its last, half-drawn frame stays on screen.
 - Logged descriptions are cut to 600 characters: Wine's debug output takes
   lines of about 1,000 bytes.
 
+`dxmt-stream-output.patch` fixes flickering particle effects (Ana's sleep, Sombra's
+hack, mythic skins, highlight intros). Overwatch builds them with stream output
+through a geometry shader that passes points through unchanged, and DXMT dropped
+every such draw. DXMT's vertex-shader emulation of stream output now takes such a
+shader (DXMT's own pass-through checks, which never matched and now also require
+each move to copy an input unchanged, kept in the shader's reflection), a draw
+whose only output is stream output gets a pass without attachments, and point
+draws append instance after instance and draw after draw, as D3D does.
+
 ## Wine
 
 These apply to the `sources/wine` subtree of the

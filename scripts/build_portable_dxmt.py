@@ -79,14 +79,21 @@ def prepare_source(work):
     check=subprocess.run(['git','apply','--check',str(gpu_errors)],cwd=source,capture_output=True)
     if check.returncode==0:run('git','apply',gpu_errors,cwd=source)
     else:run('git','apply','--reverse','--check',gpu_errors,cwd=source)
+    # Stream output through a point pass-through geometry shader, which Overwatch uses for the buffer
+    # behind many particle effects: every such draw was dropped and the effects flickered.
+    stream_output=ROOT/'patches/dxmt-stream-output.patch'
+    if hashlib.sha256(stream_output.read_bytes()).hexdigest()!='4361f2d828b5761ea22fde36d0c02af2562f7f4a19a68e143b7ab53003f518ab':raise ValueError('Accepted stream output patch changed')
+    check=subprocess.run(['git','apply','--check',str(stream_output)],cwd=source,capture_output=True)
+    if check.returncode==0:run('git','apply',stream_output,cwd=source)
+    else:run('git','apply','--reverse','--check',stream_output,cwd=source)
     return source,{'patch':patch,'performance':performance,'portable':portable_patch,'metalfx':metalfx,'shader_pack':shader_pack,
-                   'gpu_errors':gpu_errors}
+                   'gpu_errors':gpu_errors,'stream_output':stream_output}
 
 
 def build(work,tools,jobs,signing=SIGNING):
     if not (signing/sign_pe.KEY).is_file():raise ValueError(f'No signing certificate in {signing} (scripts/sign_pe.py create-certificate)')
     source,patches=prepare_source(work);builddir=work/'dxmt-build';install=work/'dxmt-install'
-    patch,performance,portable_patch,metalfx,shader_pack,gpu_errors=(patches[k] for k in ('patch','performance','portable','metalfx','shader_pack','gpu_errors'))
+    patch,performance,portable_patch,metalfx,shader_pack,gpu_errors,stream_output=(patches[k] for k in ('patch','performance','portable','metalfx','shader_pack','gpu_errors','stream_output'))
     wrapper=source/'portable_metal.py'
     shutil.copy2(ROOT/'scripts/portable_metal.py',wrapper);wrapper.chmod(0o755)
     env=os.environ.copy();env.pop('DESTDIR',None)
@@ -112,6 +119,7 @@ def build(work,tools,jobs,signing=SIGNING):
         'metalfx_patch_sha256':hashlib.sha256(metalfx.read_bytes()).hexdigest(),'nvapi':NVAPI,
         'shader_pack_patch_sha256':hashlib.sha256(shader_pack.read_bytes()).hexdigest(),
         'gpu_errors_patch_sha256':hashlib.sha256(gpu_errors.read_bytes()).hexdigest(),
+        'stream_output_patch_sha256':hashlib.sha256(stream_output.read_bytes()).hexdigest(),
         'nvngx_certificate_sha256':hashlib.sha256((signing/sign_pe.LEAF).read_bytes()).hexdigest(),
         'portable_metal_patch_sha256':hashlib.sha256(portable_patch.read_bytes()).hexdigest(),
         'portable_metal_wrapper_sha256':hashlib.sha256(wrapper.read_bytes()).hexdigest(),
