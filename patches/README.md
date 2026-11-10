@@ -138,6 +138,10 @@ Battle.net keeps 96.
 
 `wine-winemac-activation.patch` applies to the Mac driver after the two driver
 patches above:
+- AppKit's display-synchronized event loop is off, which executables built with
+  the macOS 26 SDK or later otherwise get: AppKit's copy of a click arrived about
+  2.4 ms sooner in Overwatch, and keys about 3 ms sooner in a standalone test
+  (`WINEMAC_APPKIT_UPDATE_CYCLE=1` leaves macOS's default);
 - macOS announces the game as active again on every left click; the driver
   re-reads the display list only after the game had actually been inactive, so
   clicks no longer cost a frame;

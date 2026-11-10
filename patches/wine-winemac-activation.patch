@@ -2962,3 +2962,21 @@ index 6e09399..8bde010 100644
          return;
      }
  
+diff --git a/dlls/winemac.drv/cocoa_main.m b/dlls/winemac.drv/cocoa_main.m
+--- a/dlls/winemac.drv/cocoa_main.m
++++ b/dlls/winemac.drv/cocoa_main.m
+@@ -68,6 +68,14 @@
+
+     @autoreleasepool
+     {
++        /* AppKit's display-synchronized event loop off: executables built with the macOS 26 SDK
++           or later get it by default, and it holds input back to the display refresh. AppKit
++           reads this while NSApplication starts, so it comes first.
++           WINEMAC_APPKIT_UPDATE_CYCLE=1 leaves macOS's default. */
++        const char* update_cycle = getenv("WINEMAC_APPKIT_UPDATE_CYCLE");
++        if (!update_cycle || *update_cycle != '1')
++            [[NSUserDefaults standardUserDefaults] registerDefaults:@{ @"NSApplicationUpdateCycleEnabled" : @NO }];
++
+         if (!NSApp)
+         {
+             [WineApplication sharedApplication];
