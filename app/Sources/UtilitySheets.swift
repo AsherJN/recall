@@ -125,6 +125,7 @@ struct SettingsSheet:View {
             updates
             battleNet
             mouse
+            if model.showsDiscord { discord }
             if model.otherInstallation != nil { otherInstallation }
         case .display:
             display
@@ -175,6 +176,12 @@ struct SettingsSheet:View {
         case .downloading, .installing: return L("Updating…")
         case .failed: return L("Couldn’t reach GitHub; check your connection")
         default: return L("Version {0}",UpdateCheck.installed)
+        }
+    }
+    private var discord:some View {
+        LauncherPanel(inset:16) {
+            SettingSwitch(title:L("Discord activity"),detail:L("Discord shows you’re playing Overwatch on Mac with {0}, and for how long.",Brand.name),
+                          isOn:Bindable(model.discord).on)
         }
     }
     private var battleNet:some View {
