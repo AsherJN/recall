@@ -95,11 +95,15 @@ private struct DiscordMark:Shape {
     }
 }
 /// The community server, in Discord's own blurple with its mark, so it is clear where it
-/// leads. On every main-window screen, above the support card; a link, never a pop-up.
+/// leads, with how many are online and how many have joined once Discord has said (InviteCounts).
+/// On every main-window screen, above the support card; a link, never a pop-up.
 struct DiscordLink:View {
     static let blurple=Color(red:0x58/255,green:0x65/255,blue:0xF2/255)  // #5865F2, Discord's brand colour; white text 4.6:1
     static let hover=Color(red:0x47/255,green:0x52/255,blue:0xC4/255)  // #4752C4, Discord's own hover shade
+    // Discord's online green, a shade lighter so it reads on blurple.
+    static let online=Color(red:0x3B/255,green:0xD1/255,blue:0x6F/255)
     @Environment(\.openURL) private var openURL
+    private let counts=InviteCounts.shared
     var body:some View {
         Button { openURL(Brand.discord) } label: {
             HStack(spacing:14) {
@@ -108,6 +112,18 @@ struct DiscordLink:View {
                     Text(L("Join the {0} Discord",Brand.name)).font(LauncherStyle.font(15,.semibold))
                     Text(L("Get help, compare setups, and find other Mac Overwatch players."))
                         .font(LauncherStyle.font(12)).fixedSize(horizontal:false,vertical:true)
+                    if let online=counts.online,let members=counts.members {
+                        HStack(spacing:14) {
+                            HStack(spacing:6) {
+                                Circle().fill(Self.online).frame(width:8,height:8)
+                                Text(L("{0} online",online.formatted()))
+                            }
+                            HStack(spacing:6) {
+                                Circle().fill(.white.opacity(0.55)).frame(width:8,height:8)
+                                Text(L("{0} members",members.formatted()))
+                            }
+                        }.font(LauncherStyle.font(12,.medium)).monospacedDigit().lineLimit(1).padding(.top,3).accessibilityHidden(true)
+                    }
                 }
                 Spacer(minLength:0)
                 Image(systemName:"arrow.up.right").font(.system(size:12,weight:.semibold)).accessibilityHidden(true)
@@ -115,7 +131,36 @@ struct DiscordLink:View {
                 .padding(.horizontal,18).padding(.vertical,13).frame(maxWidth:.infinity,minHeight:60,alignment:.leading)
         }.buttonStyle(DiscordLinkStyle())
             .accessibilityLabel(L("Join the {0} Discord",Brand.name)).accessibilityHint(L("Opens the invite in your browser"))
+            .accessibilityValue(counts.online.flatMap { online in counts.members.map { L("{0} online, {1} members",online.formatted(),$0.formatted()) } } ?? "")
             .help(L("Open the {0} Discord invite in your browser",Brand.name))
+            .task { counts.refresh() }
+    }
+}
+// Discord's public invite record, at most once a day; the last answer is kept for the next launch.
+@MainActor @Observable private final class InviteCounts {
+    static let shared=InviteCounts()
+    private(set) var online:Int?
+    private(set) var members:Int?
+    @ObservationIgnored private var answered:Date?
+    @ObservationIgnored private var asked=false
+    private init() {
+        let kept=UserDefaults.standard.dictionary(forKey:"discordInviteCounts")
+        online=kept?["online"] as? Int;members=kept?["members"] as? Int;answered=kept?["at"] as? Date
+    }
+    func refresh() {
+        guard !asked,answered.map({ -$0.timeIntervalSinceNow > 86400 }) ?? true,
+              let url=URL(string:"https://discord.com/api/v10/invites/\(Brand.discord.lastPathComponent)?with_counts=true") else { return }
+        asked=true
+        Task {
+            let session=URLSession(configuration:.ephemeral)
+            defer { session.finishTasksAndInvalidate() }
+            guard let (data,_)=try? await session.data(for:URLRequest(url:url,cachePolicy:.reloadIgnoringLocalCacheData,timeoutInterval:15)),
+                  let record=try? JSONSerialization.jsonObject(with:data) as? [String:Any],
+                  let online=record["approximate_presence_count"] as? Int,let members=record["approximate_member_count"] as? Int,members>0 else { return }
+            let now=Date()
+            self.online=online;self.members=members;answered=now
+            UserDefaults.standard.set(["online":online,"members":members,"at":now],forKey:"discordInviteCounts")
+        }
     }
 }
 /// Help's footer, beside Report a Problem: questions go to the community, bugs to GitHub.

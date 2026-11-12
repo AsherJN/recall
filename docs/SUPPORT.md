@@ -186,6 +186,9 @@ you're playing Overwatch while it runs. Recall tells only the Discord app on you
 sends nothing over the internet itself; Discord shows the card to your friends. Turn it off
 there, or hide it with Discord's Activity Privacy setting.
 
+The Discord card in Recall's window asks Discord's public invite record for the
+server's online and member counts, at most once a day, with nothing about you.
+
 The Mosaic News links in the app open in your browser with a tag naming the
 screen they came from (for example `utm_content=home`), so the author can see
 which placement works. Nothing else is added, and the app itself records
