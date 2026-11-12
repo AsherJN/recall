@@ -295,6 +295,9 @@ runtime/phase-3/display-options-tests   # from the repository root
 swiftc -O -target arm64-apple-macos26.5 -parse-as-library app/Sources/WindowFit.swift \
   tests/WindowFitTests.swift -o runtime/phase-3/window-fit-tests
 runtime/phase-3/window-fit-tests
+swiftc -O -target arm64-apple-macos26.5 -parse-as-library app/Sources/Brand.swift app/Sources/Localization.swift \
+  app/Sources/DiscordPresence.swift tests/DiscordPresenceTests.swift -o runtime/phase-3/discord-presence-tests
+runtime/phase-3/discord-presence-tests   # from the repository root
 ```
 
 Native process execution: `scripts/portable_setup.m`, with scoped session and
@@ -416,6 +419,12 @@ a check of real logs). `Summary.txt` is the timeline in the player's language; `
 matter, by file and line. Crash dumps never go in. The support report names the setting, and
 from schema 5 whether Game Mode is on.
 `tests/LogBundleTests.swift` and `tests/test_session_logs.py` cover them.
+
+Discord activity (`DiscordFeature.swift`, `DiscordPresence.swift`, Settings › General) shows
+"Playing Overwatch" on the player's Discord profile while the game runs, set over the local
+socket every Discord client listens on, under Discord's own Overwatch listing. It is off until
+the player turns it on, in Settings or from the offer under Play's Discord card (shown once,
+while the Discord app is on the Mac). Off (or with China's Battle.net), nothing is watched or opened. The report's `discord_presence` (schema 7) says whether Discord answered.
 
 The running screen learns the session's processes from `ow2-setup session` (when the window
 becomes active, or from Settings) and asks macOS to report when each one ends (a process

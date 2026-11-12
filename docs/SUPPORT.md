@@ -181,6 +181,11 @@ request carries no account, identifier or information about your Mac; like any
 web request it reaches GitHub from your IP address. Turn it off in Settings › General,
 and check by hand from the Recall menu.
 
+If you turn on Discord activity (Settings › General), your Discord profile shows that
+you're playing Overwatch while it runs. Recall tells only the Discord app on your Mac and
+sends nothing over the internet itself; Discord shows the card to your friends. Turn it off
+there, or hide it with Discord's Activity Privacy setting.
+
 The Mosaic News links in the app open in your browser with a tag naming the
 screen they came from (for example `utm_content=home`), so the author can see
 which placement works. Nothing else is added, and the app itself records

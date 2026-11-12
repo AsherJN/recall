@@ -86,7 +86,7 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         }
         for (upscaling,sharpening,expected) in [("YES","off","on"),("YES","high","on"),("NO","off","off"),("NO","low","off")] {
             let fields=try report(upscaling,sharpening)
-            precondition(fields["schema"] as? Int == 6)
+            precondition(fields["schema"] as? Int == 7)
             // Game Mode (REC-51, REC-55): on unless the player turned it off.
             precondition(fields["game_mode"] as? String == "on","\(fields)")
             // The mouse (REC-52, REC-57): Standard unless the player chose another, with Input
@@ -95,6 +95,10 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
             // Mouse › Advanced (REC-63): every report unless the player lowers it.
             precondition(fields["mouse_rate"] as? String == "all","\(fields)")
             precondition(["allowed","denied","undecided"].contains(fields["input_monitoring"] as? String ?? ""),"\(fields)")
+            // Discord (DiscordFeature.swift, schema 7): off until the player turns it on, no Discord talked to here, and never what the card shows.
+            let discord=fields["discord_presence"] as? [String:Any]
+            precondition(discord?["v"] as? Int == 1 && discord?["power"] as? String == "off" && discord?["allowed"] is Bool && discord?["app_id"] as? String == "default"
+                         && discord?["connected"] as? Bool == false && discord?["accepted"] as? Bool == false && discord?["last_answer"] as? String == "none","\(String(describing:discord))")
             // Other apps (REC-5): nothing launched from this copy, and its busy note never looked.
             let other=fields["other_apps"] as? [String:Any]
             precondition(other?["at_last_launch"] as? String == "none" && other?["now"] as? String == "not_checked","\(String(describing:other))")
