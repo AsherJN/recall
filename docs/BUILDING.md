@@ -24,8 +24,8 @@ reference.
 Initialize DXMT at its exact commit and initialize the pinned DirectX and NVAPI
 headers submodules. Apply, once each and in this order, `patches/dxmt-v1-private.patch`,
 `patches/dxmt-v1-performance.patch`, `patches/dxmt-portable-metal.patch`,
-`patches/dxmt-metalfx-upscaling.patch`, `patches/dxmt-shader-pack.patch` and
-`patches/dxmt-gpu-errors.patch`.
+`patches/dxmt-metalfx-upscaling.patch`, `patches/dxmt-shader-pack.patch`,
+`patches/dxmt-gpu-errors.patch` and `patches/dxmt-stream-output.patch`.
 Extract the Wine source and apply, once each and in this order,
 `patches/wine-v1-canvas.patch`, `patches/wine-mouselook.patch`,
 `patches/wine-portable-directory-boolean.patch`, Soju's
