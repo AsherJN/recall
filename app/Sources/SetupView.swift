@@ -45,6 +45,7 @@ struct SetupView: View {
                     VersionStatus(model:model).padding(.bottom,12)
                     HStack(spacing:12) {
                         FooterTile(title:L("Settings"),symbol:"gearshape") { model.sheet = .settings }.disabled(model.screen == .moveApp)
+                        FooterTile(title:L("Highlights"),symbol:"film.stack") { model.openHighlights() }.disabled(model.screen == .moveApp)
                         FooterTile(title:L("Help & FAQ"),symbol:"questionmark.circle") { model.openHelp() }
                         FooterTile(title:L("About"),symbol:"info.circle") { model.sheet = .about }
                     }.frame(maxWidth:LauncherStyle.contentWidth).padding(.bottom,24)
@@ -69,8 +70,15 @@ struct SetupView: View {
             case .korea: KoreanSupportSheet(confirm:model.confirmBattleNet)
             case .changeRegion: ChangeRegionSheet(model:model).interactiveDismissDisabled(model.regionChange == .working)
             case .otherInstallation: OtherInstallationSheet(model:model)
+            case .moveInstallation: MoveInstallationSheet(model:model).interactiveDismissDisabled(model.move.staysOpen)
             case .highPrecision: HighPrecisionMouseSheet(access:model.inputMonitoring,confirm:model.turnOnHighPrecision)
+            case .highlights: HighlightsSheet(model:model)
+            case .highlightMark: HighlightMarkSheet(model:model)
             }
+        }
+        // REC-97: the first time the player comes back to Recall with a saved highlight.
+        .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in
+            model.checkHighlightMark()
         }
         .task { model.startup() }
         // While the after-match status shows, look again every few seconds to see it finish.
@@ -109,7 +117,7 @@ struct SetupView: View {
         case .running: return model.existingName == "Overwatch" ? L("Can’t find the game window? Choose Show Overwatch or check your other desktops.") : L("Play from the Battle.net window. Can’t find it? Choose Show Battle.net.")
         case .ready: return model.gameInstalled ? (AppModel.playEnabled ? L("Battle.net opens and starts Overwatch for you.") : L("Open Battle.net, select Overwatch and click Play.")) : L("Sign in to Battle.net and install Overwatch.")
         case .driveMissing: return L("Overwatch is installed on “{0}”. Connect the drive and this app picks up where it left off.",model.driveName)
-        case .failure: return model.failure.message
+        case .failure: return model.failureMessage
         }
     }
     @ViewBuilder private var details:some View {
@@ -202,8 +210,8 @@ struct SetupView: View {
                 if model.showKoreanTip { KoreanAccountTip(open:model.openRegionSettings) { model.koreanTipDismissed=true } }
                 if !model.gameInstalled { SignInNote(model:model) }
                 if let stage=model.highPrecisionInvite {
-                    HighPrecisionCard(stage:stage,open:{
-                        if stage == .invite { model.sheet = .highPrecision } else { NSWorkspace.shared.open(InputMonitoring.privacySettings) }
+                    HighPrecisionCard(stage:stage,access:model.inputMonitoring,open:{
+                        if stage == .invite { model.sheet = .highPrecision } else { model.requestInputMonitoring() }
                     },close:model.closeHighPrecisionInvite)
                 }
                 firstMatchTip
@@ -395,8 +403,23 @@ struct SetupView: View {
                     Button(L("How to Fix It")) { model.openHelp(.troubleshooting,topic:InstallLocation.folderAccessTopic) }.buttonStyle(.borderless)
                     Button(L("Try Again"),action:retry).buttonStyle(.borderless).disabled(model.busy)
                 }
+            } else if model.failure.repairOffer == .main {
+                // REC-94: Try Again checks the same files again; Repair unpacks them anew.
+                LauncherPrimaryAction(title:L("Repair Game Files"),action:model.repairFromFailure).keyboardShortcut(.defaultAction).disabled(model.busy)
+                HStack(spacing:24) {
+                    if model.repairNoteNamesFolder { Button(L("Show in Finder"),action:model.showFolder).buttonStyle(.borderless) }
+                    Button(L("Try Again"),action:retry).buttonStyle(.borderless).disabled(model.busy)
+                }
+                RepairNote(model:model)
             } else {
                 LauncherPrimaryAction(title:model.failure.code == "cancelled" ? L("Resume Setup") : L("Try Again"),action:retry).keyboardShortcut(.defaultAction).disabled(model.busy)
+                if model.failure.repairOffer == .beside {
+                    HStack(spacing:24) {
+                        Button(L("Repair Game Files"),action:model.repairFromFailure).buttonStyle(.borderless).disabled(model.busy)
+                        if model.repairNoteNamesFolder { Button(L("Show in Finder"),action:model.showFolder).buttonStyle(.borderless) }
+                    }
+                    RepairNote(model:model)
+                }
             }
         }
     }
@@ -407,6 +430,24 @@ struct SetupView: View {
         else if model.clientInstalled { model.launch() }
         else if model.state["active_runtime"] != nil { model.setup() }
         else { model.check() }
+    }
+}
+
+// REC-94: under Repair Game Files on the failure screen. What Repair keeps, always; then security
+// software's part: the apps this Mac has and the folder to add as an exception, or a line for when
+// it keeps happening.
+struct RepairNote: View {
+    @Bindable var model:AppModel
+    var body:some View {
+        VStack(spacing:6) {
+            Text(L("Takes a minute or two. Overwatch, its settings and your Battle.net sign-in are kept."))
+            Text(model.securityNote)
+            if model.repairNoteNamesFolder {
+                Text(verbatim:(model.folderToFix.path as NSString).abbreviatingWithTildeInPath).textSelection(.enabled)
+            }
+        }
+        .font(LauncherStyle.font(12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        .fixedSize(horizontal:false,vertical:true).frame(maxWidth:LauncherStyle.contentWidth)
     }
 }
 
@@ -749,9 +790,12 @@ struct KoreanAccountTip: View {
 }
 // REC-64: the Play screen's invitation to the High-precision mouse and, once it's chosen, the
 // reminder to finish macOS's permission (HighPrecisionInvite, AppModel.highPrecisionInvite). Its
-// close button hides it for good.
+// close button hides it for good. The reminder's button is the Settings strip's (REC-83): while
+// macOS hasn't asked, Allow… shows its prompt, since Recall isn't in Input Monitoring's list to
+// switch on until it has asked (AppModel.requestInputMonitoring); after, System Settings.
 struct HighPrecisionCard: View {
     let stage:HighPrecisionInvite
+    let access:InputMonitoring.Access
     let open:()->Void
     let close:()->Void
     var body:some View {
@@ -763,9 +807,10 @@ struct HighPrecisionCard: View {
                 Text(stage == .invite ? L("Try the High-precision mouse") : L("One more step for High-precision"))
                     .font(LauncherStyle.font(14,.semibold)).foregroundStyle(.primary).accessibilityAddTraits(.isHeader)
                 Text(stage == .invite ? L("Overwatch reads your mouse directly, skipping macOS’s mouse layer, for the most precise aim.")
-                                      : L("Switch on {0} in System Settings › Privacy & Security › Input Monitoring. Until then, your mouse works as Standard does.",Brand.name))
+                     : access == .undecided ? L("Choose Allow…, then Open System Settings when macOS asks, and switch on {0}. Until then, your mouse works as Standard does.",Brand.name)
+                     : L("Switch on {0} in System Settings › Privacy & Security › Input Monitoring. Until then, your mouse works as Standard does.",Brand.name))
                     .lineSpacing(3).fixedSize(horizontal:false,vertical:true)
-                Button(stage == .invite ? L("Turn On…") : L("Open System Settings"),action:open)
+                Button(stage == .invite ? L("Turn On…") : access == .undecided ? L("Allow…") : L("Open System Settings"),action:open)
                     .buttonStyle(AccentButtonStyle()).padding(.top,8)
             }
             Spacer(minLength:0)

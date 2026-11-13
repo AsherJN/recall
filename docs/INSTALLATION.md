@@ -73,9 +73,20 @@ On the setup screen, open the **Install location** menu and choose **Choose
 Another Location…** to pick an external SSD or another folder. The app creates
 an `Overwatch2Mac` folder there. The drive must be formatted as APFS or Mac OS
 Extended and must not be case-sensitive; ExFAT, FAT and NTFS drives, network
-drives and iCloud folders are refused before anything downloads. The location
-can only be chosen before setup starts; moving an existing installation is not
-supported yet.
+drives and iCloud folders are refused before anything downloads.
+
+## Moving the game to another drive
+
+Once the game is set up, **Settings › General › Move…** moves Overwatch,
+Battle.net, your settings and the shaders Recall has learned to another drive
+or folder. Nothing downloads again. Quit Overwatch first; Recall closes
+Battle.net for you. The same drive rules apply as above.
+
+Recall copies everything, checks the copy against the original, and only then
+switches to it and moves the earlier copy to the Trash. Empty the Trash to free
+its space. If you cancel, or the drive is unplugged part way, your game stays
+where it was and opens as before. Moving to another folder on the same drive
+takes a moment, because nothing is copied.
 
 If the app says your drive is case-sensitive, you don't need to erase it. In
 Disk Utility, select a volume on the drive, choose **Edit › Add APFS Volume**

@@ -26,6 +26,9 @@ ASSURED_ROOT_KEY = r'Software\Microsoft\SystemCertificates\Root\Certificates\056
 DIRECT = bytes.fromhex('460000000100000001000000' + '00' * 24)
 GAME_KEYBOARD = r'Software\Wine\AppDefaults\Overwatch.exe\Mac Driver'
 BATTLENET_DEFAULTS = r'Software\Wine\AppDefaults\Battle.net.exe'
+WINE_BROWSER = r'Software\Wine\WineBrowser'
+# What winebrowser.exe runs, the link added, for web (Browsers) and email (Mailers) links.
+BROWSER_COMMAND = '/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/open'
 
 # Wine's reg.exe, as far as Recall uses it: add a binary, string or DWORD value, delete a value or a
 # key, and import a REGEDIT4 file of REG_MULTI_SZ values (saved as Wine saves them:
@@ -278,6 +281,87 @@ class AdvancedSettings(unittest.TestCase):
         self.assertIs(events['battlenet_memory']['changed'], False)
         self.assertEqual([c for c in self.calls() if 'LargeAddressAware' in c], before)
 
+    # REC-84 (GitHub #69): links start the Mac's browser with an empty environment, so macOS gives
+    # it the player's own HOME and USER (and keychain), not Recall's.
+    def browser_link_calls(self):
+        return [c for c in self.calls() if c[:3] == ['reg.exe', 'add', 'HKCU\\' + WINE_BROWSER]]
+
+    def browser_link_call(self, name):
+        return ['reg.exe', 'add', 'HKCU\\' + WINE_BROWSER, '/v', name, '/t', 'REG_SZ', '/d', BROWSER_COMMAND, '/f']
+
+    def test_links_open_with_an_empty_environment(self):
+        self.fixture()
+        before = len(self.calls())
+        self.assertEqual(self.call('browser-links', '--apply', '0')[-1], {'stage': 'browser_links', 'clean_environment': True, 'changed': True})
+        self.assertEqual(len(self.calls()), before)
+        self.assertEqual(self.call('browser-links')[-1], {'stage': 'browser_links', 'clean_environment': True, 'changed': True})
+        self.assertEqual(self.browser_link_calls(), [self.browser_link_call('Browsers'), self.browser_link_call('Mailers')])
+        section = self.sections()['[' + WINE_BROWSER.replace('\\', '\\\\') + ']']
+        self.assertIn('"Browsers"="%s"' % BROWSER_COMMAND, section)
+        self.assertIn('"Mailers"="%s"' % BROWSER_COMMAND, section)
+        self.assertIn('"RetinaMode"="Y"', self.registry.read_text())
+        # Set already: nothing to write.
+        before = len(self.calls())
+        self.assertEqual(self.call('browser-links')[-1], {'stage': 'browser_links', 'clean_environment': True, 'changed': False})
+        self.assertIs(self.call('browser-links', '--apply', '0')[-1]['changed'], False)
+        self.assertEqual(len(self.calls()), before)
+
+    def test_link_command_is_one_entry_winebrowser_can_run(self):
+        # A REG_SZ entry splits into candidates at commas, and winebrowser reads at most 255
+        # characters. Each argument is plain (no quotes to parse), and the programs are the Mac's own.
+        self.assertNotIn(',', BROWSER_COMMAND)
+        self.assertLess(len(BROWSER_COMMAND), 255)
+        self.assertNotIn('"', BROWSER_COMMAND)
+        program, *args = BROWSER_COMMAND.split(' ')
+        self.assertEqual((program, args[0], args[-1]), ('/usr/bin/env', '-i', '/usr/bin/open'))
+        self.assertTrue(Path(program).is_file() and Path(args[-1]).is_file())
+        # env -i passes on nothing of the caller's environment but PATH.
+        shown = subprocess.run(BROWSER_COMMAND.split(' ')[:-1] + ['/usr/bin/env'], env={'HOME': '/tmp/recall', 'USER': 'player'},
+                               capture_output=True, text=True, check=True).stdout
+        self.assertEqual(shown, 'PATH=/usr/bin:/bin\n')
+
+    def test_links_set_elsewhere_are_replaced_and_others_kept(self):
+        # Another browser named for web links, email links already right: only Browsers is written,
+        # the section's other values kept.
+        key = '[' + WINE_BROWSER.replace('\\', '\\\\') + ']'
+        self.fixture('WINE REGISTRY Version 2\n\n' + key + ' 1\n#time=1\n"Browsers"="firefox,/usr/bin/open"\n'
+                     '"Mailers"="%s"\n"Other"="kept"\n' % BROWSER_COMMAND)
+        self.assertIs(self.call('browser-links', '--apply', '0')[-1]['changed'], True)
+        self.assertIs(self.call('browser-links')[-1]['changed'], True)
+        self.assertEqual(self.browser_link_calls(), [self.browser_link_call('Browsers')])
+        section = self.sections()[key]
+        self.assertIn('"Browsers"="%s"' % BROWSER_COMMAND, section)
+        self.assertNotIn('firefox', section)
+        self.assertIn('"Other"="kept"', section)
+
+    def test_browser_links_failure_never_stops_the_worker(self):
+        self.fixture()
+        (self.root/'reg-fails').write_text('')
+        self.assertEqual(self.call('browser-links')[-1], {'stage': 'browser_links', 'clean_environment': True, 'changed': False, 'failed': True})
+        self.assertNotIn('WineBrowser', self.registry.read_text())
+
+    def test_launch_sets_browser_links_before_battlenet_starts(self):
+        self.launch_fixture()
+        self.addCleanup(subprocess.run, ['pkill', '-f', f'ow2-setup watch --root {self.root}'])
+        events = self.call('launch')
+        stages = [e['stage'] for e in events]
+        self.assertEqual(events[stages.index('browser_links')], {'stage': 'browser_links', 'clean_environment': True, 'changed': True})
+        self.assertLess(stages.index('browser_links'), stages.index('battlenet_open'))
+        for _ in range(100):
+            if self.calls()[-1][0] != 'reg.exe':
+                break
+            time.sleep(0.05)
+        calls = self.calls()
+        client = next(i for i, call in enumerate(calls) if call[0].endswith('Battle.net.exe'))
+        self.assertLess(calls.index(self.browser_link_call('Browsers')), client)
+        self.assertLess(calls.index(self.browser_link_call('Mailers')), client)
+        # The next launch finds them set and leaves them.
+        self.call('close-client')
+        before = self.browser_link_calls()
+        events = {e['stage']: e for e in self.call('launch')}
+        self.assertIs(events['browser_links']['changed'], False)
+        self.assertEqual(self.browser_link_calls(), before)
+
     def test_settings_written_by_windows_are_recognised(self):
         # Another key name case, a counter Windows advanced, the value wrapped: still direct.
         settings = bytes.fromhex('4600000007000000010000000000000000000000000000000000000000000000')
@@ -451,6 +535,9 @@ class AdvancedSettings(unittest.TestCase):
         self.assertEqual(events[-1]['code'], 'korean_support_failed')
         self.assertNotIn('environment_ready', [event['stage'] for event in events])
         self.assertNotIn('prepared_runtime', self.state())
+        # Setup tries the browser links (REC-84) before the certificate; their failure alone never stops it.
+        stages = [event['stage'] for event in events]
+        self.assertEqual(events[stages.index('browser_links')], {'stage': 'browser_links', 'clean_environment': True, 'changed': False, 'failed': True})
 
     def test_battlenet_installer_starts_with_a_direct_connection(self):
         self.fixture()

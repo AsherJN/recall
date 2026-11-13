@@ -49,6 +49,24 @@ import Foundation
             precondition(failure.isFolderAccess && failure.message != generic && failure.message.contains("permissions"),code)
         }
         precondition(!SetupFailure(code:"process_launch_failed").isFolderAccess && !SetupFailure(code:"").isFolderAccess)
-        print("PASS: native event stream, graphics progress, structured errors, concurrent operation exclusion, cancellation and resume, support report codes, folder access messages")
+        // REC-94: damaged game files make Repair Game Files the main button, with their own message.
+        for code in SetupFailure.damagedFileCodes {
+            let failure=SetupFailure(code:code)
+            precondition(failure.filesDamaged && failure.repairOffer == .main && failure.message != generic && failure.message.contains("Repair"),code)
+        }
+        // A step that failed for a reason Recall doesn't name offers Repair beside Try Again.
+        for code in ["unexpected_setup_error","process_launch_failed","environment_initialization_failed","runtime_required_component_missing"] {
+            precondition(SetupFailure(code:code).repairOffer == .beside && SetupFailure(code:code).message == generic,code)
+        }
+        // Where the message gives the fix, there's no Repair.
+        for code in ["cancelled","insufficient_disk_space","download_interrupted_retry_to_resume","cached_download_hash_mismatch","rosetta_required",
+                     "close_game_before_setup","setup_already_running","install_location_unavailable","archive_hash_mismatch","directory_creation_failed"] {
+            precondition(SetupFailure(code:code).repairOffer == .none,code)
+        }
+        // A damaged copy of the app itself still asks for a reinstall (Repair unpacks from it); damaged
+        // game files no longer do, since a reinstall only checks the same files again.
+        precondition(SetupFailure(code:"archive_hash_mismatch").message.contains("reinstall"))
+        precondition(!SetupFailure(code:"runtime_file_hash_mismatch").message.contains("reinstall") && !SetupFailure(code:"runtime_missing").message.contains("reinstall"))
+        print("PASS: native event stream, graphics progress, structured errors, concurrent operation exclusion, cancellation and resume, support report codes, folder access messages, repair offers")
     }
 }

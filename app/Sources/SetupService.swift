@@ -19,8 +19,22 @@ struct SetupFailure: Error {
     /// never helped: only the folder's permissions do.
     static let folderAccessCodes: Set<String>=["directory_creation_failed","directory_not_owned_by_user","private_directory_permissions_failed","ownership_write_failed","setup_lock_failed"]
     var isFolderAccess: Bool { Self.folderAccessCodes.contains(code) }
-    var message: String {
+    /// REC-94: game components the worker checked when it installed them are missing or changed
+    /// (verifyRuntime, runtime()). Security software that quarantines Windows files does this, and
+    /// Try Again or a reinstall of the app only checks the same files again: Repair Game Files
+    /// unpacks them anew from the app. A runtime that lacks a required component as built
+    /// (runtime_required_component_missing) is the app's own archive, which Repair can't change.
+    static let damagedFileCodes: Set<String>=["runtime_file_missing","runtime_file_hash_mismatch","runtime_link_mismatch","runtime_unlisted_file","runtime_identity_mismatch","runtime_missing"]
+    var filesDamaged: Bool { Self.damagedFileCodes.contains(code) }
+    /// Where Repair Game Files goes on the failure screen: the main button when files are damaged,
+    /// beside Try Again when the step failed for a reason Recall doesn't name, and not at all where
+    /// the message gives the fix (storage, connection, Rosetta, a folder, a game still open…).
+    enum RepairOffer { case none, beside, main }
+    var repairOffer: RepairOffer { filesDamaged ? .main : (specificMessage == nil ? .beside : .none) }
+    var message: String { specificMessage ?? L("This step couldn’t finish. Retry, or open Help & FAQ to save a support report. Your game data has been kept.") }
+    private var specificMessage: String? {
         if isFolderAccess { return L("macOS isn’t letting {0} create or change the folder that holds its files. Reinstalling won’t help: the folder’s permissions need fixing first.",Brand.name) }
+        if filesDamaged { return L("Some of the files {0} installed are missing or damaged. Repair puts them back.",Brand.name) }
         switch code {
         case "cancelled": return L("Setup is paused. Continue when you’re ready; completed steps are saved.")
         case "apple_silicon_required": return L("This version requires a Mac with Apple Silicon (M1 or later).")
@@ -35,7 +49,7 @@ struct SetupFailure: Error {
         case "setup_already_running", "app_worker_busy", "pipeline_cache_busy": return L("Another setup or launch is finishing. Wait a moment, then retry.")
         case "download_interrupted_retry_to_resume": return L("The download was interrupted. Check your connection and retry to resume.")
         case "download_hash_mismatch", "client_installer_hash_mismatch", "cached_download_hash_mismatch": return L("The download differs from the version this app expects. Retry once; if it happens again, check for a newer app release.")
-        case "archive_hash_mismatch", "runtime_file_hash_mismatch", "runtime_missing": return L("An installation component is missing or damaged. Keep your game data and reinstall the app from the original download.")
+        case "archive_hash_mismatch": return L("An installation component is missing or damaged. Keep your game data and reinstall the app from the original download.")
         case "battlenet_not_installed": return L("Finish installing Battle.net in its installer window, then choose Continue.")
         case "retina_configuration_failed": return L("The display setup couldn’t finish. Close Overwatch and Battle.net, then retry. If it happens again, open Help & FAQ to save a support report.")
         case "directory_not_owned_by_app", "invalid_ownership_marker", "existing_environment_not_owned": return L("The destination contains data this app did not create. Nothing was replaced. Open Help & FAQ for installation guidance.")
@@ -50,8 +64,17 @@ struct SetupFailure: Error {
         case "korean_support_failed": return L("The certificates Korean accounts need couldn’t be added. Close Overwatch and Battle.net, then try again.")
         case "setting_change_failed": return L("This setting couldn’t be changed. Close Overwatch and Battle.net, then try again.")
         case "shader_preparation_running": return L("{0} is preparing shaders from your last match. Wait for it to finish, then try again.",Brand.name)
+        // REC-82: Settings › General › Move… (the worker's move). The installation stays where it was.
+        case "close_game_before_move": return L("Overwatch is running. Quit the game, then try again.")
+        case "move_destination_full": return L("There isn’t enough free space there for Overwatch and Battle.net.")
+        case "move_destination_disconnected": return L("The drive you were moving to was disconnected. Connect it and try again: the move goes on from where it stopped.")
+        case "move_destination_unavailable": return L("That drive isn’t connected. Connect it, then try again.")
+        case "move_destination_in_use", "move_same_location", "move_destination_inside_source": return L("That folder can’t be used for the move. Choose another location.")
+        case "move_destination_not_writable": return L("macOS isn’t letting {0} write to that location. Choose another folder, or allow {0} under System Settings › Privacy & Security › Files and Folders.",Brand.name)
+        case "move_copy_failed": return L("A file couldn’t be copied. Try again: the move goes on from where it stopped.")
+        case "move_verification_failed": return L("The copy didn’t match the original, so {0} didn’t switch to it. Try again. If it happens again, the drive may have a fault.",Brand.name)
         case "shader_delete_failed": return L("The shader cache couldn’t be cleared. Close Overwatch and Battle.net, then try again.")
-        default: return L("This step couldn’t finish. Retry, or open Help & FAQ to save a support report. Your game data has been kept.")
+        default: return nil
         }
     }
     /// The code as a support report shows it. Worker and app codes are fixed names like

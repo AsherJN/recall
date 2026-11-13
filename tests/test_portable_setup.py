@@ -10,11 +10,14 @@ import json
 import os
 import re
 from pathlib import Path
+import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +28,9 @@ from build_portable_setup import build
 # a Retina one unless they choose otherwise, whatever this Mac's main display is.
 os.environ.setdefault('OW2_SETUP_TEST_DISPLAY_SCALE','2')
 os.environ.setdefault('OW2_SETUP_TEST_DISPLAY_REFRESH','120')
+# Display sync follows the chip (portable_renderer.h, REC-93); tests stand in an M-series one
+# unless they choose otherwise.
+os.environ.setdefault('OW2_SETUP_TEST_CHIP','Apple M1 Pro')
 
 
 class NativeSetup(unittest.TestCase):
@@ -45,8 +51,9 @@ class NativeSetup(unittest.TestCase):
         self.root=self.base/'User Directory With Spaces'/'Overwatch2Mac'
         self.root.parent.mkdir()
 
-    def call(self,command,*args,success=True):
-        r=subprocess.run([str(self.binary),command,'--root',str(self.root),*map(str,args)],capture_output=True,text=True)
+    def call(self,command,*args,success=True,env=None):
+        r=subprocess.run([str(self.binary),command,'--root',str(self.root),*map(str,args)],capture_output=True,text=True,
+                         env=dict(os.environ,**env) if env else None)
         if success:self.assertEqual(r.returncode,0,r.stdout+r.stderr)
         else:self.assertNotEqual(r.returncode,0,r.stdout)
         return [json.loads(line) for line in r.stdout.splitlines()]
@@ -90,6 +97,49 @@ class NativeSetup(unittest.TestCase):
         self.root.mkdir();(self.root/'personal.txt').write_text('keep')
         self.assertEqual(self.call('uninstall',success=False)[-1]['code'],'directory_not_owned_by_app')
         self.assertEqual((self.root/'personal.txt').read_text(),'keep')
+
+    def test_saved_highlights_go_to_movies_and_earlier_clips_move_there(self):
+        # REC-53: Overwatch's highlights folder becomes a link to Movies › Overwatch (NSHomeDirectory's,
+        # here a scratch home through CFFIXED_USER_HOME), and clips saved before move there.
+        home=self.base/'home';(home/'Movies').mkdir(parents=True);env={'CFFIXED_USER_HOME':str(home)}
+        self.call('status',env=env)
+        videos=self.root/'environment/drive_c/users/crossover/Documents/Overwatch/videos'
+        (videos/'overwatch').mkdir(parents=True)
+        (videos/'overwatch'/'Genji.mp4').write_text('saved before')
+        (videos/'overwatch'/'.DS_Store').write_text('finder')
+        movies=home/'Movies'/'Overwatch';movies.mkdir();(movies/'Genji.mp4').write_text('already there')
+        events=self.call('highlights',env=env)
+        self.assertEqual(events[0]['stage'],'highlights_moved');self.assertEqual(events[0]['count'],1)
+        self.assertEqual(Path(events[-1]['folder']).resolve(),movies.resolve())
+        self.assertTrue((videos/'overwatch').is_symlink())
+        self.assertEqual((videos/'overwatch').resolve(),movies.resolve())
+        self.assertEqual((movies/'Genji.mp4').read_text(),'already there')
+        self.assertEqual((movies/'Genji 2.mp4').read_text(),'saved before')
+        self.assertFalse((movies/'.DS_Store').exists())
+        # Again: nothing to do. A file Overwatch writes through the link lands in Movies.
+        self.assertEqual([e['stage'] for e in self.call('highlights',env=env)],['highlights_ready'])
+        (videos/'overwatch'/'Tracer.mp4').write_text('new clip')
+        self.assertEqual((movies/'Tracer.mp4').read_text(),'new clip')
+
+    def test_highlights_link_follows_the_home_and_never_replaces_a_file(self):
+        home=self.base/'home';(home/'Movies').mkdir(parents=True);env={'CFFIXED_USER_HOME':str(home)}
+        self.call('status',env=env)
+        videos=self.root/'environment/drive_c/users/crossover/Documents/Overwatch/videos';videos.mkdir(parents=True)
+        # Fresh environment (the game never ran): folders and link are made, Movies › Overwatch too.
+        self.call('highlights',env=env)
+        self.assertEqual((videos/'overwatch').resolve(),(home/'Movies'/'Overwatch').resolve())
+        # A link from another home is pointed at this one.
+        other=self.base/'other';other.mkdir()
+        (videos/'overwatch').unlink();(videos/'overwatch').symlink_to(other)
+        self.call('highlights',env=env)
+        self.assertEqual((videos/'overwatch').resolve(),(home/'Movies'/'Overwatch').resolve())
+        # A file of that name is not Recall's to replace.
+        (videos/'overwatch').unlink();(videos/'overwatch').write_text('not a folder')
+        self.call('highlights',env=env)
+        self.assertEqual((videos/'overwatch').read_text(),'not a folder')
+        # Without a Windows profile there is nothing to link.
+        __import__('shutil').rmtree(self.root/'environment')
+        self.assertEqual([e['stage'] for e in self.call('highlights',env=env)],['highlights_ready'])
 
     def test_unowned_directory_is_never_adopted(self):
         self.root.mkdir();(self.root/'personal.txt').write_text('keep')
@@ -154,6 +204,38 @@ class NativeSetup(unittest.TestCase):
         state=self.call('status')[-1]['state']
         self.assertEqual(state['active_runtime'],'v1');self.assertNotIn('prepared_runtime',state)
         self.assertFalse((self.root/'incoming-runtime').exists());self.assertFalse((self.root/'replaced-runtime').exists())
+
+    def test_a_removed_file_stops_setup_until_repair_unpacks_it_again(self):
+        # REC-94 (#75): security software quarantined one of the engine's Windows files. Checking
+        # again, or installing the same version again (Try Again, a reinstalled app), fails the same
+        # way; only Repair puts the file back.
+        archive,digest=self.archive('v1')
+        self.call('install-runtime','--archive',archive,'--sha256',digest,'--version','v1')
+        (self.root/'runtimes/v1/lib/wine/x86_64-windows/kernel32.dll').unlink()
+        self.assertEqual(self.call('verify',success=False)[-1]['code'],'runtime_file_missing')
+        self.assertEqual(self.call('install-runtime','--archive',archive,'--sha256',digest,'--version','v1',success=False)[-1]['code'],'runtime_file_missing')
+        self.call('install-runtime','--archive',archive,'--sha256',digest,'--version','v1','--repair','1');self.call('verify')
+        self.assertTrue((self.root/'runtimes/v1/lib/wine/x86_64-windows/kernel32.dll').is_file())
+
+    def test_files_the_app_offers_to_repair_are_ones_the_worker_reports(self):
+        # REC-94: the failure screen makes Repair Game Files its main button for these codes.
+        app=(ROOT/'app/Sources/SetupService.swift').read_text()
+        codes=re.findall(r'"([a-z_]+)"',re.search(r'damagedFileCodes: Set<String>=\[(.*?)\]',app).group(1))
+        worker=(ROOT/'scripts/portable_setup.m').read_text()
+        self.assertIn('runtime_file_missing',codes)
+        for code in codes:self.assertIn(f'fail(@"{code}")',worker)
+
+    def test_a_kept_download_that_changed_is_removed_and_fetched_again(self):
+        # REC-94: a kept Battle.net installer that no longer matches its hash used to fail every
+        # retry (cached_download_hash_mismatch). It's removed and the download starts again; here
+        # the download itself can't connect.
+        self.call('status')
+        expected='a'*64
+        kept=self.root/'downloads'/expected
+        kept.parent.mkdir(exist_ok=True);kept.write_bytes(b'changed after it was kept')
+        code=self.call('download','--url','https://127.0.0.1:9/Battle.net-Setup.exe','--sha256',expected,success=False)[-1]['code']
+        self.assertEqual(code,'download_interrupted_retry_to_resume')
+        self.assertFalse(kept.exists())
 
     def test_updates_keep_only_the_active_and_previous_runtimes(self):
         for version in ('v1','v2','v3'):self.install(version)
@@ -339,6 +421,194 @@ class NativeSetup(unittest.TestCase):
         self.call('status');(other/'downloads'/'partial.part').write_text('keep')
         self.assertEqual(self.call('discard-unused',success=False)[-1]['code'],'location_in_use')
         self.assertEqual((other/'downloads'/'partial.part').read_text(),'keep')
+
+    # Move (REC-82, portable_move.h). The fixtures hold what a move must keep as it is: Wine's
+    # links (never followed: z: is a link to /), modes, dates, attributes and odd names.
+    def installation(self,files=0):
+        self.call('status')
+        env=self.root/'environment';game=env/'drive_c'/'Program Files (x86)'/'Overwatch'
+        (env/'dosdevices').mkdir(parents=True);game.mkdir(parents=True)
+        os.symlink('../drive_c',env/'dosdevices'/'c:');os.symlink('/',env/'dosdevices'/'z:');os.symlink('/dev/rdisk99s1',env/'dosdevices'/'e::')
+        # Link targets are kept byte for byte: a precomposed name (which a string would decompose)
+        # and one that is no text at all.
+        os.symlink('/Volumes/caf\u00e9 \uac8c\uc784'.encode(),os.fsencode(env/'dosdevices'/'f:'))
+        os.symlink(b'/Volumes/\xff\xfe',os.fsencode(env/'dosdevices'/'g:'))
+        (game/'data.bin').write_bytes(os.urandom(3*1024*1024+17));os.utime(game/'data.bin',(1700000000,1700000000))
+        subprocess.run(['xattr','-w','org.example.kept','value',str(game/'data.bin')],check=True)
+        (game/'empty').write_bytes(b'');(game/'한글 파일 é.txt').write_text('names')
+        # A file with a hole in it, as a download in progress leaves: its bytes are kept either way.
+        with open(game/'sparse.bin','wb') as sparse:sparse.seek(4<<20);sparse.write(b'end')
+        (game/'Overwatch.exe').write_bytes(b'MZ fixture');(game/'Overwatch.exe').chmod(0o755)
+        (game/'read-only.ini').write_text('keep');(game/'read-only.ini').chmod(0o444)
+        (env/'system.reg').write_text('WINE REGISTRY Version 2\n')
+        (self.root/'cache'/'shaders').mkdir();(self.root/'cache'/'shaders'/'learned.bin').write_bytes(os.urandom(70000))
+        for index in range(files):(self.root/'cache'/'shaders'/f'{index}.bin').write_bytes(os.urandom(4096))
+        (self.root/'state.json').write_text(json.dumps({'schema':1,'stage':'battlenet_started','onboarding_complete':True}))
+        return game
+
+    def snapshot(self,folder):
+        found={}
+        for path in sorted(folder.rglob('*')):
+            name=unicodedata.normalize('NFC',str(path.relative_to(folder)))
+            if path.is_symlink():found[name]=('link',os.readlink(os.fsencode(path)))
+            elif path.is_dir():found[name]=('folder',)
+            else:found[name]=('file',hashlib.sha256(path.read_bytes()).hexdigest(),path.stat().st_mode&0o777,int(path.stat().st_mtime))
+        return found
+
+    def assertMoved(self,before,target,events):
+        self.assertEqual([e['stage'] for e in events][-2:],['move_committed','moved'])
+        self.assertFalse(self.root.exists());self.assertTrue(Path(events[-1]['to']).samefile(target))
+        self.assertFalse(Path(str(target)+'.moving').exists());self.assertFalse((target/'.overwatch-2-mac-move').exists())
+        after=self.snapshot(target)
+        for name,value in before.items():self.assertEqual(after.get(name),value,name)
+        self.assertEqual(os.readlink(target/'environment'/'dosdevices'/'z:'),'/')
+        self.assertEqual(os.readlink(os.fsencode(target/'environment'/'dosdevices'/'f:')),'/Volumes/caf\u00e9 \uac8c\uc784'.encode())
+        self.assertEqual((target/'.overwatch-2-mac-owner').read_text(),'ow2-native-setup-v1\n')
+        # The worker takes the folder for its own from the new place.
+        self.root=target
+        self.assertTrue(self.call('status')[-1]['state']['onboarding_complete'])
+
+    def test_move_to_another_volume_copies_checks_and_trashes_the_original(self):
+        for filesystem,name in [('APFS','Move APFS'),('HFS+','Move HFS')]:
+            with self.subTest(filesystem=filesystem):
+                self.root=self.base/name/'Overwatch2Mac';self.root.parent.mkdir()
+                game=self.installation();before=self.snapshot(self.root);source=self.root
+                mount=self.volume(filesystem,name+' Volume');target=mount/'Overwatch2Mac'
+                events=self.call('move','--to',target)
+                progress=[e for e in events if e['stage']=='move_progress']
+                self.assertEqual([e['phase'] for e in progress][0],'copying');self.assertEqual(progress[-1]['phase'],'checking')
+                self.assertEqual(progress[-1]['bytes'],progress[-1]['total']);self.assertGreater(progress[-1]['total'],3*1024*1024)
+                self.assertEqual([e for e in events if e['stage']=='move_problem'],[])
+                self.assertTrue(events[-1]['copied']);trashed=Path(events[-1]['trashed'])
+                self.addCleanup(shutil.rmtree,trashed,ignore_errors=True)
+                self.assertTrue(trashed.is_relative_to(Path.home()/'.Trash'));self.assertTrue((trashed/'state.json').exists())
+                self.assertMoved(before,target,events)
+                moved=target/game.relative_to(source)/'data.bin'
+                self.assertEqual(subprocess.run(['xattr','-p','org.example.kept',str(moved)],capture_output=True,text=True).stdout.strip(),'value')
+
+    def test_move_on_the_same_volume_renames_the_folder(self):
+        self.installation();before=self.snapshot(self.root)
+        target=self.base/'Another Folder'/'Overwatch2Mac';target.parent.mkdir()
+        # An empty folder of that name (Finder's own note aside) is the destination itself.
+        target.mkdir();(target/'.DS_Store').write_bytes(b'finder')
+        events=self.call('move','--to',target)
+        self.assertFalse(events[-1]['copied']);self.assertNotIn('trashed',events[-1])
+        self.assertEqual([e for e in events if e['stage']=='move_progress'],[])
+        self.assertMoved(before,target,events)
+
+    def test_move_refuses_a_place_it_cannot_use_and_changes_nothing(self):
+        self.installation();before=self.snapshot(self.root)
+        def refused(target,code):
+            self.assertEqual(self.call('move','--to',target,success=False)[-1]['code'],code)
+            self.assertEqual({k:v for k,v in self.snapshot(self.root).items() if k in before},before)
+            self.assertFalse(Path(str(target)+'.moving').exists())
+        refused(self.root,'move_same_location')
+        refused(self.root/'cache'/'Overwatch2Mac','move_destination_inside_source')
+        refused(self.base/'Volumes'/'Unplugged SSD'/'Overwatch2Mac','move_destination_unavailable')
+        self.assertFalse((self.base/'Volumes').exists())
+        # The player's own files, and another installation, are never merged into or replaced.
+        personal=self.base/'Personal'/'Overwatch2Mac';personal.mkdir(parents=True);(personal/'notes.txt').write_text('keep')
+        refused(personal,'move_destination_in_use');self.assertEqual((personal/'notes.txt').read_text(),'keep')
+        apfs=self.volume('APFS','Refusals')
+        other=apfs/'Overwatch2Mac';other.mkdir();(other/'.overwatch-2-mac-owner').write_text('ow2-native-setup-v1\n')
+        refused(other,'move_destination_in_use')
+        # A folder named like a part copy that this worker didn't make.
+        foreign=apfs/'Games'/'Overwatch2Mac.moving';foreign.mkdir(parents=True);(foreign/'mine.txt').write_text('keep')
+        self.assertEqual(self.call('move','--to',apfs/'Games'/'Overwatch2Mac',success=False)[-1]['code'],'move_destination_in_use')
+        self.assertEqual(self.call('move','--to',apfs/'Games'/'Overwatch2Mac','--discard','1')[-1]['stage'],'move_discarded')
+        self.assertEqual((foreign/'mine.txt').read_text(),'keep')
+        for filesystem,name,code in [('ExFAT','NoExFAT','unsupported_volume_format'),('Case-sensitive APFS','NoCase','case_sensitive_volume')]:
+            refused(self.volume(filesystem,name)/'Overwatch2Mac',code)
+        # More than the drive has room for: refused before a file is copied, with nothing left there.
+        with open(self.root/'cache'/'large.bin','wb') as large:large.truncate(300<<20)
+        before=self.snapshot(self.root)
+        refused(apfs/'Room'/'Overwatch2Mac','move_destination_unavailable')
+        (apfs/'Room').mkdir();refused(apfs/'Room'/'Overwatch2Mac','move_destination_full')
+        self.assertEqual(list((apfs/'Room').iterdir()),[])
+        self.assertTrue(self.call('status')[-1]['state']['onboarding_complete'])
+
+    def test_a_part_copy_is_finished_by_the_next_move_and_checked_like_any_other(self):
+        game=self.installation();before=self.snapshot(self.root);inside=game.relative_to(self.root)
+        mount=self.volume('APFS','Resume');target=mount/'Overwatch2Mac';part=mount/'Overwatch2Mac.moving'
+        # What an interrupted move can leave: a file with the original's size and date but other
+        # bytes, a file the installation no longer has, and a folder where a file is now.
+        (part/inside).mkdir(parents=True);(part/'.overwatch-2-mac-move').write_text('ow2-move-v1\n')
+        (part/inside/'data.bin').write_bytes(bytes(3*1024*1024+17));os.utime(part/inside/'data.bin',(1700000000,1700000000))
+        (part/'removed-since.txt').write_text('old');(part/inside/'empty').mkdir();(part/inside/'empty'/'old').write_text('old')
+        # A marker from a move that stopped just before its last step, and a link where the
+        # installation has a folder: nothing is ever written through it.
+        (part/'.overwatch-2-mac-owner').write_text('ow2-native-setup-v1\n')
+        outside=self.base/'Outside';outside.mkdir();(outside/'mine.txt').write_text('keep')
+        (part/'cache').mkdir();os.symlink(outside,part/'cache'/'shaders')
+        events=self.call('move','--to',target)
+        self.assertEqual(sorted(p.name for p in outside.iterdir()),['mine.txt']);self.assertEqual((outside/'mine.txt').read_text(),'keep')
+        self.assertTrue((target/'cache'/'shaders').is_dir() and not (target/'cache'/'shaders').is_symlink())
+        # The file with other bytes was taken as copied, caught by the check and copied again.
+        self.assertEqual([e['file'] for e in events if e['stage']=='move_problem'],[str(inside/'data.bin')])
+        self.addCleanup(shutil.rmtree,events[-1]['trashed'],ignore_errors=True)
+        self.assertFalse((target/'removed-since.txt').exists())
+        self.assertMoved(before,target,events)
+
+    def moving(self,target,pause):
+        process=subprocess.Popen([str(self.binary),'move','--root',str(self.root),'--to',str(target)],stdout=subprocess.PIPE,text=True,
+                                 env={**os.environ,'OW2_SETUP_TEST_MOVE_PAUSE':str(pause)})
+        self.addCleanup(process.kill);self.addCleanup(process.stdout.close)
+        events=[]
+        for line in process.stdout:
+            events.append(json.loads(line))
+            if events[-1]['stage']=='move_progress' and events[-1]['bytes']>0:break
+        self.assertEqual(events[-1]['stage'],'move_progress',events)
+        self.assertLess(events[-1]['bytes'],events[-1]['total'])
+        return process,events
+
+    def test_cancelling_a_move_removes_the_part_copy_and_keeps_the_original(self):
+        self.installation(files=80);before=self.snapshot(self.root)
+        mount=self.volume('APFS','Cancel');target=mount/'Overwatch2Mac'
+        process,events=self.moving(target,40)
+        self.assertTrue((mount/'Overwatch2Mac.moving'/'.overwatch-2-mac-move').exists())
+        process.send_signal(signal.SIGTERM)
+        events+=[json.loads(line) for line in process.stdout]
+        self.assertNotEqual(process.wait(),0);self.assertEqual((events[-1]['stage'],events[-1]['code']),('error','cancelled'))
+        self.assertEqual([p.name for p in mount.iterdir() if not p.name.startswith('.')],[])
+        self.assertEqual({k:v for k,v in self.snapshot(self.root).items() if k in before},before)
+        self.assertTrue(self.call('status')[-1]['state']['onboarding_complete'])
+
+    def test_a_drive_unplugged_mid_move_keeps_the_original_and_the_next_move_goes_on(self):
+        self.installation(files=80);before=self.snapshot(self.root)
+        mount=self.volume('APFS','Unplugged');target=mount/'Overwatch2Mac'
+        process,events=self.moving(target,40)
+        subprocess.run(['hdiutil','detach','-force',str(mount)],check=True,capture_output=True)
+        events+=[json.loads(line) for line in process.stdout]
+        self.assertNotEqual(process.wait(),0);self.assertEqual((events[-1]['stage'],events[-1]['code']),('error','move_destination_disconnected'))
+        self.assertFalse(mount.exists())
+        self.assertEqual({k:v for k,v in self.snapshot(self.root).items() if k in before},before)
+        self.assertTrue(self.call('status')[-1]['state']['onboarding_complete'])
+        # Plugged back in: the part copy is still there, and the move finishes from it.
+        subprocess.run(['hdiutil','attach','-nobrowse','-mountpoint',str(mount),str(self.base/'Unplugged.sparseimage')],check=True,capture_output=True)
+        self.assertTrue((mount/'Overwatch2Mac.moving'/'.overwatch-2-mac-move').exists())
+        events=self.call('move','--to',target)
+        self.addCleanup(shutil.rmtree,events[-1]['trashed'],ignore_errors=True)
+        self.assertMoved(before,target,events)
+        # A move the player gives up on instead: --discard 1 removes the part copy.
+        self.root=self.base/'Second'/'Overwatch2Mac';self.root.parent.mkdir();self.installation(files=80)
+        (mount/'Given Up').mkdir()
+        process,events=self.moving(mount/'Given Up'/'Overwatch2Mac',40)
+        process.kill();process.wait()
+        self.assertTrue((mount/'Given Up'/'Overwatch2Mac.moving').exists())
+        # It needs no data folder: the installation's own drive may be the one that was unplugged.
+        self.root=self.base/'Volumes'/'Unplugged SSD'/'Overwatch2Mac'
+        self.assertEqual(self.call('status',success=False)[-1]['code'],'install_location_unavailable')
+        self.assertEqual(self.call('move','--to',mount/'Given Up'/'Overwatch2Mac','--discard','1')[-1]['stage'],'move_discarded')
+        self.assertEqual(list((mount/'Given Up').iterdir()),[]);self.assertFalse((self.base/'Volumes').exists())
+
+    def test_a_move_that_stopped_before_its_first_file_does_not_block_the_next(self):
+        self.installation();before=self.snapshot(self.root)
+        mount=self.volume('APFS','Empty Part');target=mount/'Overwatch2Mac'
+        # The part copy's folder was made and the move ended before its tag was written.
+        (mount/'Overwatch2Mac.moving').mkdir();(mount/'Overwatch2Mac.moving'/'.DS_Store').write_bytes(b'finder')
+        events=self.call('move','--to',target)
+        self.addCleanup(shutil.rmtree,events[-1]['trashed'],ignore_errors=True)
+        self.assertMoved(before,target,events)
 
 
 if __name__=='__main__':unittest.main()

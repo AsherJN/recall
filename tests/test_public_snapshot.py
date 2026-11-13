@@ -88,6 +88,12 @@ class PublicSnapshot(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit.audit_git(dest, forbidden=['confidential phrase'])
 
+    def test_macos_shared_folder_is_not_an_account_path(self):
+        # Built from parts so this test file, which is exported too, never matches.
+        audit.inspect_bytes('fixture', b'/Users/' + b'Shared/Games/Overwatch2Mac')
+        with self.assertRaises(ValueError):
+            audit.inspect_bytes('fixture', b'/Users/' + b'Sharedx/Games/Overwatch2Mac')
+
     def test_direct_tree_and_blob_refs_are_audited_outside_commit_ancestry(self):
         dest = self.root / 'direct-refs'
         dest.mkdir()

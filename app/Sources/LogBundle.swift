@@ -60,6 +60,8 @@ enum LogBundle {
         var logging:LoggingSetting
         var custom:String
         var since:Date?
+        /// Custom renderer settings' lines (REC-85), or nil with the setting off.
+        var renderer:[String]?=nil
         var now=Date()
         /// GitHub's attachment limit, for the zip.
         var limit=25_000_000
@@ -474,6 +476,8 @@ enum Summary {
                    L("{0} {1} · engine {2} · macOS {3} · {4} · {5} GB memory",Brand.name,input.appVersion,input.runtime,macOS,chip,String(info.physicalMemory>>30)),
                    input.logging.isOff ? L("Logging: off") : L("Logging: {0}",input.logging.title(custom:input.custom))]
         if let since=input.since,!input.logging.isOff { lines.append(L("Logging has been on since {0}.",since.formatted(date:.abbreviated,time:.shortened))) }
+        // REC-85: the player's own renderer lines change how Overwatch is drawn, so the summary names them.
+        if let renderer=input.renderer { lines.append(L("Custom renderer settings: on"));lines+=renderer.map { "  "+$0 } }
         // What Recall recorded is told from its record; Battle.net's and Overwatch's own logs of the
         // same moment are left out (and an Overwatch log that ends in a crash isn't a close).
         let recorded=Recorded(moments)

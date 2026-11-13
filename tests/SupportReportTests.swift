@@ -87,13 +87,21 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         for (upscaling,sharpening,expected) in [("YES","off","on"),("YES","high","on"),("NO","off","off"),("NO","low","off")] {
             let fields=try report(upscaling,sharpening)
             precondition(fields["schema"] as? Int == 7)
+            // Custom renderer settings (REC-85): off unless the player turns them on.
+            precondition(fields["custom_renderer"] as? String == "off" && fields["custom_renderer_lines"] == nil,"\(fields)")
+            // REC-94: security software isn't looked up until a failure or Help asks, and no repair ran.
+            precondition(fields["security_software"] as? String == "not_checked" && fields["repair"] as? String == "not_run","\(fields)")
+            // Display sync as this Mac's last launch used it (REC-93; RendererSettingsTests has the cases).
+            precondition(["on","off","not_launched"].contains(fields["display_sync"] as? String ?? ""),"\(fields)")
             // Game Mode (REC-51, REC-55): on unless the player turned it off.
             precondition(fields["game_mode"] as? String == "on","\(fields)")
             // The mouse (REC-52, REC-57): Standard unless the player chose another, with Input
             // Monitoring as macOS has it for this process.
             precondition(fields["mouse_input"] as? String == "standard","\(fields)")
-            // Mouse › Advanced (REC-63): every report unless the player lowers it.
+            // Every report (REC-63); 1.6.4 removed the setting that lowered it (REC-83).
             precondition(fields["mouse_rate"] as? String == "all","\(fields)")
+            // Faster key response (Settings › Advanced, PR #73): experimental, off by default.
+            precondition(fields["faster_keys"] as? String == "off","\(fields)")
             precondition(["allowed","denied","undecided"].contains(fields["input_monitoring"] as? String ?? ""),"\(fields)")
             // Discord (DiscordFeature.swift, schema 7): off until the player turns it on, no Discord talked to here, and never what the card shows.
             let discord=fields["discord_presence"] as? [String:Any]
@@ -117,10 +125,20 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
             let chosen=try report("NO","off",["-mouseInput",choice])
             precondition(chosen["mouse_input"] as? String == choice,"\(chosen)")
         }
-        for (chosen,expected) in [("500","500"),("250","250"),("8000","all")] {
+        let faster=try report("NO","off",["-fasterKeys","YES"])
+        precondition(faster["faster_keys"] as? String == "on","\(faster)")
+        // Mouse updates per second is gone (REC-83): a rate 1.6.1-1.6.3 saved no longer lowers anything.
+        for chosen in ["500","250","8000"] {
             let fields=try report("NO","off",["-mouseRate",chosen])
-            precondition(fields["mouse_rate"] as? String == expected,"\(chosen): \(fields)")
+            precondition(fields["mouse_rate"] as? String == "all","\(chosen): \(fields)")
         }
+        // Custom renderer settings (REC-85): on, the lines a launch adds, Recall's own left out; off,
+        // the lines are kept but not reported.
+        let lines="d3d11.preferredMaxFrameRate = 45\ndxgi.fullscreenCanvasWidth = 800\n# note"
+        let customOn=try report("NO","off",["-rendererCustomOn","YES","-rendererCustom",lines])
+        precondition(customOn["custom_renderer"] as? String == "on" && customOn["custom_renderer_lines"] as? [String] == ["d3d11.preferredMaxFrameRate = 45"],"\(customOn)")
+        let customOff=try report("NO","off",["-rendererCustomOn","NO","-rendererCustom",lines])
+        precondition(customOff["custom_renderer"] as? String == "off" && customOff["custom_renderer_lines"] == nil,"\(customOff)")
         // Build 76's switch is gone: its default no longer chooses anything.
         let old=try report("NO","off",["-highPrecisionMouse","YES"])
         precondition(old["mouse_input"] as? String == "standard" && old["high_precision_mouse"] == nil,"\(old)")
@@ -176,6 +194,6 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         for secret in ["IND","Player#1234","S-1-5-21","203.0.113.7","198.51.100.4","acct-","geoip","Agent.9824","C:/"] { precondition(!leaked.contains(secret),secret) }
         let fields=try report("NO","off")
         precondition((fields["battlenet"] as? [String:Any])?["recent_starts"] is [Any])
-        print("PASS: MetalFX on/off apart from sharpening; after-match outcomes (cancelled apart from failed), preparing vs waiting for the game to close; Battle.net's last starts")
+        print("PASS: MetalFX on/off apart from sharpening; custom renderer settings; security software and repair (REC-94); after-match outcomes (cancelled apart from failed), preparing vs waiting for the game to close; Battle.net's last starts")
     }
 }

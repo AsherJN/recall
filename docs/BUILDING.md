@@ -110,6 +110,11 @@ and need the pinned toolchain/runtime. For example, `tests/fullscreen/run.py
 The `--overlay` control is a known failing diagnostic, not release acceptance.
 No test licenses or distributes Blizzard game files.
 
+`tests/highlights/run.py` saves MP4 highlights through Media Foundation in Wine the way Overwatch does
+and checks each file with AVFoundation; it needs an engine with `winemacmf` (by default the one
+`app/Resources/release.json` pins) and the pinned LLVM-MinGW. `tests/run_highlights.py` checks the
+app's Highlights window and the Recall mark without Wine.
+
 ## Release build pipeline
 
 Each script prints its options with `--help`. Run them in order from a clean
@@ -207,6 +212,26 @@ Runtime `phase2-20261103.1` is `phase2-20261102.1` with only the Mac driver `win
 built with `patches/wine-winemac-activation.patch` (`scripts/build_wine_native.py winemac`, then
 `scripts/derive_runtime.py --native winemac`): coming back to the game re-reads the display list
 only when the displays changed while the player was away.
+
+Runtime `phase2-20261112.1` is `phase2-20261103.1` with DXMT built with
+`patches/dxmt-stream-output.patch` on top of the other DXMT patches (`scripts/build_portable_dxmt.py`,
+then `scripts/derive_runtime.py --stream-output <DXMT workspace>`): only `d3d11.dll` and
+`winemetal.so` (which holds DXMT's shader converter) are replaced. Built with the patch, DXMT's other
+files differ only in their build timestamps, so they stay as `phase2-20261103.1` ships them.
+
+Runtime `phase2-20261112.3` is `phase2-20261112.1` with Media Foundation built with
+`patches/wine-media-foundation.patch` (`scripts/build_wine_native.py media`, then
+`scripts/derive_runtime.py --media`): `mfreadwrite.dll`, `mfh264enc.dll` and `wine.inf` are replaced,
+and `winemacmf.dll` and its Unix library `winemacmf.so` are added. `build_wine_native.py` compiles
+`winemacmf` with the commands Wine's build uses for `mfh264enc` (the DLL), `winedmo` (the Unix
+library) and the Mac driver (its Objective-C file). Wine's `configure` doesn't list `dlls/winemacmf`,
+so the full build (`scripts/build_portable_runtime.py`) doesn't apply this patch.
+
+Runtime `phase2-20261113.1` is `phase2-20261112.3` with only the Mac driver `winemac.so` replaced,
+built with `patches/wine-winemac-activation.patch` (`scripts/build_wine_native.py winemac`, then
+`scripts/derive_runtime.py --native winemac`): with `WINEMAC_APPKIT_UPDATE_CYCLE=0` (Faster key
+response) AppKit's display-synchronized event loop is off, so input reaches the driver as it
+happens instead of once per display refresh. Without the variable, the driver behaves as before.
 
 Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
 replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py

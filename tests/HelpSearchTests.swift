@@ -33,6 +33,15 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         // Straight quotes find curly ones; bold markers don't split words.
         precondition(ids("won't start",troubleshooting) == ["start"])
         precondition(ids("Repair Game Files",troubleshooting) == ["start"])
+        // REC-86: the words players use for a game on another screen, or a key that pulls them out.
+        precondition(ids("game not showing",troubleshooting).first == "screen",ids("game not showing",troubleshooting).description)
+        precondition(ids("no window",troubleshooting).contains("screen"))
+        for query in ["sidecar","ipad","airplay","main display"] { precondition(ids(query,troubleshooting).first == "screen",query) }
+        for query in ["dictation","fn key","globe","🌐","control twice","microphone"] { precondition(ids(query,troubleshooting).contains("keys"),query) }
+        precondition(ids("dictation",troubleshooting).first == "keys" && ids("fn key",troubleshooting).first == "keys")
+        // REC-82: the words players use for moving the game to another drive.
+        for query in ["move","external drive","ssd","another drive","install location"] { precondition(ids(query,questions).contains("move"),query) }
+        precondition(ids("move overwatch",questions).first == "move")
         // Full-width letters and accents fold.
         precondition(ids("ＲＴＸ",questions) == ["gpu"])
         precondition(HelpTopic.folded("Rétx **Café**") == HelpTopic.folded("retx cafe"))

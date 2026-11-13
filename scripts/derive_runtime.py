@@ -60,10 +60,23 @@ recorded, MetalFX recovers after one, and a game whose GPU access macOS revoked 
 The patch changes only the pipeline cache, which only winemetal.so contains, so DXMT's other files
 stay as the base ships them.
 
+--stream-output DXMT_WORKSPACE (1.6.4) replaces the base's d3d11.dll and winemetal.so with the
+build_portable_dxmt.py build in that workspace (dxmt-stream-output.patch: stream output through a
+point pass-through geometry shader, which Overwatch's particle effects use, is no longer dropped).
+
 --audio (1.6) replaces Wine's mmdevapi.dll and Mac sound driver (winecoreaudio.so) with their
 build_wine_native.py builds (wine-audio-devices.patch): audio devices connected or removed while a
 program runs, and changes of the Mac's default devices, reach it as on Windows. Later builds of
 the same patch replace them with --native mmdevapi,winecoreaudio.
+
+--media (1.6.4) lets programs save MP4 files through Media Foundation (Overwatch's highlights,
+REC-53): build_wine_native.py media's five files, all from wine-media-foundation.patch, go in.
+mfreadwrite.dll (the sink writer: encoders inserted, samples encoded, Finalize), mfh264enc.dll (the
+RGB input the macOS encoder takes, registered) and share/wine/wine.inf (registers winemacmf.dll)
+replace the base's; winemacmf.dll and its Unix library winemacmf.so (H.264 on VideoToolbox, AAC on
+AudioToolbox, MPEG-4 files through AVFoundation's writer) are added, the library packaged and signed
+as the assembler treats Wine's Unix libraries. Every other file stays byte-identical. Later builds
+of the patch go in the same way, replacing all five.
 
 --services (1.6) replaces Wine's service manager (services.exe) and its client sechost.dll, in both
 architectures, with their build_wine_native.py builds (wine-service-security.patch): a service keeps
@@ -501,7 +514,7 @@ def replace_files(base, dest, base_version, version, identity, manifest, sources
             shutil.copy2(source, target)
             if relative in DXMT_FILES:
                 package_like_assembler(target)
-            if relative == PROFILE or target.suffix == '.dll':
+            if relative == PROFILE or target.suffix in ('.dll', '.inf'):
                 check_paths(target)
                 continue
             check_native(target, base / relative)
@@ -518,8 +531,20 @@ def replace_files(base, dest, base_version, version, identity, manifest, sources
         target = dest / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
+        if target.suffix == '.so':
+            # A new Wine Unix library: the rpaths its siblings ship with, signed as they are.
+            target.chmod(0o755)
+            check_native(target, base / UNIX_LIBRARY_REFERENCE)
+            check_paths(target)
+            restamp(target, parse_macos(manifest.get('minimum_macos', '26.0')))
+            run('codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity, target,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            run('codesign', '--verify', '--strict', target)
+            continue
         if target.suffix != '.dylib':
             target.chmod(0o644)
+            if target.suffix == '.dll':
+                check_paths(target)
             continue
         target.chmod(0o755)
         package_dependency(target)
@@ -561,6 +586,9 @@ def replace_files(base, dest, base_version, version, identity, manifest, sources
     if libraries and 'dependency_names' in result:
         result['dependency_names'] = sorted({*result['dependency_names'], *libraries})
         result['signed_native_components'] = result.get('signed_native_components', 0) + len(libraries)
+    unix_libraries = [r for r in additions if r.endswith('.so')]
+    if unix_libraries and 'signed_native_components' in result:
+        result['signed_native_components'] += len(unix_libraries)
     archive.with_suffix('.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))
 
@@ -787,6 +815,69 @@ def derive_experiment(base_version, version, identity, files):
     replace_files(base, dest, base_version, version, identity, manifest, sources, replaced)
 
 
+MEDIA_REPLACED = {'mfreadwrite': 'lib/wine/x86_64-windows/mfreadwrite.dll',
+                  'mfh264enc': 'lib/wine/x86_64-windows/mfh264enc.dll',
+                  'wine-inf': 'share/wine/wine.inf'}
+MEDIA_ADDED = {'winemacmf': 'lib/wine/x86_64-windows/winemacmf.dll',
+               'winemacmf-unix': 'lib/wine/x86_64-unix/winemacmf.so'}
+MEDIA_FILES = {**MEDIA_REPLACED, **MEDIA_ADDED}
+# A new Wine Unix library gets the rpaths this one ships with.
+UNIX_LIBRARY_REFERENCE = 'lib/wine/x86_64-unix/winedmo.so'
+
+
+def chain_record(version, relative):
+    """How the newest derivation in the chain that replaced or added RELATIVE did it ({} if none did)."""
+    for manifest in chain(version):
+        derived = manifest.get('derived_from', {})
+        record = derived.get('replaced', {}).get(relative, derived.get('added', {}).get(relative))
+        if record is not None:
+            return record
+    return {}
+
+
+def derive_media(base_version, version, identity):
+    """1.6.4 (REC-53): MP4 saving through Media Foundation, the five files of build_wine_native.py
+    media from one patch. The first derivation adds winemacmf.dll and winemacmf.so; later builds of
+    the patch replace those of the five that changed."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
+        raise ValueError('Invalid runtime version')
+    base, dest = ARTIFACTS / base_version, ARTIFACTS / version
+    if dest.exists() or Path(str(dest) + '.tar.gz').exists():
+        raise ValueError('Use a new version; existing artifact is never overwritten')
+    manifest = json.loads((base / 'runtime.json').read_text())
+    if manifest['version'] != base_version:
+        raise ValueError('The base artifact names a different version')
+    present = [relative in manifest['files'] for relative in MEDIA_ADDED.values()]
+    if any(present) and not all(present):
+        raise ValueError(f'{base_version} has only part of winemacmf')
+    sources, replaced, additions, patches = {}, {}, {}, set()
+    for component, relative in MEDIA_FILES.items():
+        build = json.loads((NATIVE / component / 'current/manifest.json').read_text())
+        built = NATIVE / component / 'current' / Path(relative).name
+        if build['sha256'] != sha(built) or build['patch_sha256'] != sha(ROOT / build['patch']):
+            raise ValueError(f'Rebuild {component}: its build manifest does not match the file or the patch')
+        patches.add((build['patch'], build['patch_sha256']))
+        record = {'build_sha256': build['sha256'], 'built_by': f'scripts/build_wine_native.py {component}',
+                  'patch': build['patch'], 'patch_sha256': build['patch_sha256']}
+        if relative not in manifest['files']:
+            additions[relative] = (built, record)
+            continue
+        if (build['sha256'] == manifest['files'][relative]['sha256']
+                or build['sha256'] == chain_record(base_version, relative).get('build_sha256')):
+            continue  # the build the base already ships
+        if component in MEDIA_ADDED or chain_replacement(base_version, relative):
+            # Already from this experiment: only a later build of the same patch replaces it.
+            if chain_record(base_version, relative).get('patch') != build['patch']:
+                raise ValueError(f'{base_version} has {relative} from elsewhere')
+        if component in MEDIA_REPLACED and build['base_sha256'] != chain_original(base_version, relative, build['patch']):
+            raise ValueError(f'{component} was built against a different base runtime')
+        sources[relative] = built
+        replaced[relative] = record
+    if len(patches) != 1:
+        raise ValueError(', '.join(MEDIA_FILES) + ' were built from different patches: rebuild them all')
+    replace_files(base, dest, base_version, version, identity, manifest, sources, replaced, additions=additions)
+
+
 WINEBUS = 'lib/wine/x86_64-unix/winebus.so'
 SDL2_LIBRARY = 'lib/libSDL2-2.0.0.dylib'
 SDL2_LICENSE = 'licenses/native/sdl2/LICENSE.txt'
@@ -968,6 +1059,44 @@ def derive_gpu_errors(base_version, version, identity, dxmt_workspace):
         replace_files(base, dest, base_version, version, identity, manifest, sources, replaced)
 
 
+# Stream output through a point pass-through geometry shader (1.6.4, REC-79, GitHub #57 and #74):
+# Overwatch fills the buffer behind many particle effects that way, and DXMT dropped every such
+# draw. The patch changes the Direct3D 11 front end (d3d11.dll, which links DXMT's core) and the
+# shader converter (airconv, inside winemetal.so); built with it, DXMT's other files differ from
+# the base's only in their build timestamps, so they stay as the base ships them.
+STREAM_OUTPUT_PATCHES = {**GPU_ERRORS_PATCHES, 'patches/dxmt-stream-output.patch': 'stream_output_patch_sha256'}
+STREAM_OUTPUT_REPLACED = {'lib/wine/x86_64-windows/d3d11.dll': 'x86_64-windows/d3d11.dll',
+                          'lib/wine/x86_64-unix/winemetal.so': 'x86_64-unix/winemetal.so'}
+
+
+def derive_stream_output(base_version, version, identity, dxmt_workspace):
+    """1.6.4: stream output. The DXMT build with the stream output patch on top of the GPU errors
+    build's patches gives the base a new d3d11.dll and winemetal.so, packaged as the assembler
+    packages DXMT's and signed; every other file stays byte-identical."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
+        raise ValueError('Invalid runtime version')
+    base, dest = ARTIFACTS / base_version, ARTIFACTS / version
+    if dest.exists() or Path(str(dest) + '.tar.gz').exists():
+        raise ValueError('Use a new version; existing artifact is never overwritten')
+    manifest = json.loads((base / 'runtime.json').read_text())
+    if manifest['version'] != base_version:
+        raise ValueError('The base artifact names a different version')
+    proof = json.loads((dxmt_workspace / 'dxmt-build-proof.json').read_text())
+    install = dxmt_workspace / 'dxmt-install'
+    for patch, key in STREAM_OUTPUT_PATCHES.items():
+        if proof.get(key) != sha(ROOT / patch):
+            raise ValueError(f'Rebuild DXMT: {patch} changed since the build')
+    record = {'built_by': 'scripts/build_portable_dxmt.py',
+              'patches': {patch: proof[key] for patch, key in STREAM_OUTPUT_PATCHES.items()}}
+    sources, replaced = {}, {}
+    for relative, built in STREAM_OUTPUT_REPLACED.items():
+        if proof['files'].get(built) != sha(install / built):
+            raise ValueError(f'DXMT build proof does not match {built}')
+        sources[relative] = install / built
+        replaced[relative] = dict(record, build_sha256=proof['files'][built])
+    replace_files(base, dest, base_version, version, identity, manifest, sources, replaced)
+
+
 def unsigned_identical(original, resigned):
     """True when the two files are the same once their signatures are removed."""
     with tempfile.TemporaryDirectory() as folder:
@@ -1099,6 +1228,12 @@ if __name__ == '__main__':
     parser.add_argument('--gpu-errors', type=Path, metavar='DXMT_WORKSPACE',
                         help="Replace DXMT's five files and its d3d12.dll stand-in with this build_portable_dxmt.py "
                              "workspace's GPU errors build")
+    parser.add_argument('--media', action='store_true',
+                        help="Add winemacmf and replace mfreadwrite.dll, mfh264enc.dll and wine.inf with "
+                             "build_wine_native.py media's builds (MP4 saving)")
+    parser.add_argument('--stream-output', type=Path, metavar='DXMT_WORKSPACE',
+                        help="Replace d3d11.dll and winemetal.so with this build_portable_dxmt.py workspace's "
+                             'stream output build')
     args = parser.parse_args()
     if args.repackage:
         repackage(args.base_version, args.version)
@@ -1120,6 +1255,10 @@ if __name__ == '__main__':
         derive_shader_pack(args.base_version, args.version, args.identity, args.shader_pack.resolve())
     elif args.gpu_errors:
         derive_gpu_errors(args.base_version, args.version, args.identity, args.gpu_errors.resolve())
+    elif args.media:
+        derive_media(args.base_version, args.version, args.identity)
+    elif args.stream_output:
+        derive_stream_output(args.base_version, args.version, args.identity, args.stream_output.resolve())
     elif args.minimum_macos:
         restamp_runtime(args.base_version, args.version, args.identity, args.minimum_macos)
     elif args.native:

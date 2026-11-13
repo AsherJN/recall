@@ -52,7 +52,15 @@ NOT_SCREEN_TEXT = {
     'Cancel requested for active operation - OP_UPDATE', "OP_UPDATE for '' done Canceling", 'done Canceling',
     # The graphics engine's GPU error lines (REC-76), which Save Logs puts on its timeline.
     'Device error at frame', 'MTLCommandBufferError code 4', '0x[0-9a-fA-F]+|[0-9a-fA-F]{8,}|(?<=frame )[0-9]+',
+    # The comment the worker writes before the player's renderer lines in dxmt.conf (REC-85), which
+    # Show Recall's settings reads back to leave them out.
+    '\n# Custom renderer settings',
+    # The state column of `systemextensionsctl list`, which SecuritySoftware reads (REC-94).
+    'activated enabled',
 }
+# Apple's names for its Macs. The Recall mark (MacName, REC-97) shows them as they are in every
+# language, as Apple does; they are names, not text to translate.
+PRODUCT_NAMES = {'MacBook Air', 'MacBook Pro', 'Mac mini', 'Mac Pro', 'Mac Studio'}
 # Text in Hangul or Han is shown as written (the Korean notice, 국服-style names).
 OWN_SCRIPT = re.compile(r'[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af\u4e00-\u9fff]')
 # A path ("Contents/Helpers/…", "/Library/…"), not a sentence.
@@ -192,7 +200,8 @@ class Translations(unittest.TestCase):
                     before, after = line[:match.start()], line[match.end():]
                     if NOT_TEXT.search(before) or after.startswith(':') or in_L_values(before):
                         continue
-                    if decode(text) in NOT_SCREEN_TEXT or OWN_SCRIPT.search(text) or PATH.search(text) or '\\"' in raw:
+                    if (decode(text) in NOT_SCREEN_TEXT or decode(text) in PRODUCT_NAMES or OWN_SCRIPT.search(text)
+                            or PATH.search(text) or '\\"' in raw):
                         continue
                     unwrapped.append(f'{path.name}:{number}: {raw[:80]}')
         self.assertEqual(unwrapped, [], 'sentences without L(); add them to NOT_SCREEN_TEXT only if they never reach the screen')

@@ -89,14 +89,15 @@ the process restarts and its last, half-drawn frame stays on screen.
 - Logged descriptions are cut to 600 characters: Wine's debug output takes
   lines of about 1,000 bytes.
 
-`dxmt-stream-output.patch` fixes flickering particle effects (Ana's sleep, Sombra's
-hack, mythic skins, highlight intros). Overwatch builds them with stream output
-through a geometry shader that passes points through unchanged, and DXMT dropped
-every such draw. DXMT's vertex-shader emulation of stream output now takes such a
-shader (DXMT's own pass-through checks, which never matched and now also require
-each move to copy an input unchanged, kept in the shader's reflection), a draw
-whose only output is stream output gets a pass without attachments, and point
-draws append instance after instance and draw after draw, as D3D does.
+`dxmt-stream-output.patch` (1.6.4) fixes flickering particle effects (Ana's
+sleep, Sombra's hack, mythic skins, highlight intros). Overwatch builds them with
+stream output through a geometry shader that passes points through unchanged,
+and DXMT dropped every such draw. DXMT's vertex-shader emulation of stream output
+now takes such a shader (DXMT's own pass-through checks, which never matched and
+now also require each move to copy an input unchanged, kept in the shader's
+reflection), a draw whose only output is stream output gets a pass without
+attachments, and point draws append instance after instance and draw after draw,
+as D3D does.
 
 ## Wine
 
@@ -147,10 +148,17 @@ Battle.net keeps 96.
 
 `wine-winemac-activation.patch` applies to the Mac driver after the two driver
 patches above:
-- AppKit's display-synchronized event loop is off, which executables built with
-  the macOS 26 SDK or later otherwise get: AppKit's copy of a click arrived about
-  2.4 ms sooner in Overwatch, and keys about 3 ms sooner in a standalone test
-  (`WINEMAC_APPKIT_UPDATE_CYCLE=1` leaves macOS's default);
+- `WINEMAC_APPKIT_UPDATE_CYCLE=0` turns AppKit's display-synchronized event
+  loop off (contributed by @Seglats; Recall's Faster key response, an
+  experimental switch in Settings › Advanced, off by default). Programs built
+  with the macOS 26 SDK or later get the loop by default, and it hands key
+  presses, clicks, scrolls and pointer motion to the program once per display
+  refresh. With it off they arrive as they happen: in Overwatch on a 144 Hz
+  display a key press reached the driver after a median of 5.5 ms instead of
+  8.5 ms in play. Pointer motion then arrives once per mouse report too, so a
+  mouse reporting 4,000 times a second kept the driver's main thread busy for
+  half of every second in the game's menus. Aim and clicks from raw input never
+  waited for the loop;
 - macOS announces the game as active again on every left click; the driver
   re-reads the display list only after the game had actually been inactive, so
   clicks no longer cost a frame;
@@ -265,6 +273,23 @@ program started, so headphones connected later never reached the game. Now:
 Battle.net's update agent checks its helper service on every start. With an empty descriptor or a
 forward-slash path it found the helper broken and reinstalled itself (about 14 MB) on the next start,
 so every other start downloaded it again.
+
+`wine-media-foundation.patch` (1.6.4) lets Overwatch save highlights as MP4. The game writes them
+with Media Foundation's sink writer (`mfreadwrite`), which could neither encode nor finish a file.
+Wine has no AAC encoder, and its H.264 encoder and MPEG-4 file sink hand the work to GStreamer, which
+this build doesn't include. The patch:
+- adds `winemacmf`, built on macOS's own frameworks: an H.264 encoder (VideoToolbox), an AAC encoder
+  (AudioToolbox) and an MPEG-4 file sink (AVFoundation) that writes the file's index first. They are
+  registered under the class IDs Wine's `mfh264enc` and `mfmp4srcsnk` forward to, and under Windows'
+  AAC encoder ID; `wine.inf` registers `winemacmf.dll`;
+- lets the sink writer put encoders and format converters between the game's frames and the file,
+  encode, drain at the end of a segment and finish the file (`Finalize`, with or without an
+  asynchronous callback);
+- passes the game's encoder settings (bit rate and rate control, quality, profile, keyframe interval,
+  B-frames) through `ICodecAPI`, and reads RGB frames bottom-up when their type gives no stride, as
+  Windows does;
+- lists RGB and I420 among the H.264 encoder's registered inputs.
+Saving as WebM, which the game encodes itself, is unchanged.
 
 Apply each patch once, in this order, first using `git apply --check`.
 Do not combine them with historical candidate patch variants.

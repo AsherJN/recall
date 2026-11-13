@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the native Wine components that v1.0 changes in the Phase 2 runtime.
 
-  build_wine_native.py wineserver|ntdll|win32u|winemac|winebus|mmdevapi|winecoreaudio [--base]
+  build_wine_native.py wineserver|ntdll|win32u|winemac|winebus|mmdevapi|winecoreaudio|...|media [--base]
 
 Developer tool only. Compiles a component from its experiment tree with the exact
 compiler and linker commands recorded in the Phase 2 Wine Makefile, applies the
@@ -72,7 +72,16 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               rebuild and wait, untimed, for explorer's desktop window to answer
               WM_DISPLAYCHANGE (no broadcast); every return paused drawing ~0.27 s (0.09 s
               without it), and on Seglats's Mac about one return in seven drew nothing for
-              8-13 s. A minimize asked for while the
+              8-13 s. WINEMAC_APPKIT_UPDATE_CYCLE=0 turns AppKit's display-synchronized
+              event loop off (PR #73, @Seglats, 1.6.4; Recall's experimental Faster key
+              response, off by default): Wine is built with the macOS 26.5 SDK, so AppKit
+              hands key presses, clicks and pointer motion over once per display refresh;
+              the driver then registers NSApplicationUpdateCycleEnabled=NO before
+              NSApplication starts. Keys reached the main thread 0.85-3 ms sooner at 144 Hz,
+              but every pointer event does too: a 4,000 Hz pointer in the game's menus cost
+              the main thread 517 ms a second instead of 43. The input statistics time each
+              key event from the keyboard to the main thread (key_delays_ms) and say which
+              loop it was (appkit_update_cycle). A minimize asked for while the
               window does leave fullscreen in the background waits for the animation to
               end (macOS brought the window back when it ended), at most 3 s, and a window
               minimized for Wine but still on screen is restored when it becomes key
@@ -87,6 +96,19 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               (portable_voice.h's launch rule, kept during play). mmdevapi.dll is a PE file:
               built with the Makefile's LLVM-MinGW commands and stripped of debug information
               as the assembler strips it, not signed.
+  media       runtime/source/wine-media (the Phase 2 tree's dlls/mfreadwrite, dlls/mfh264enc and
+              loader/wine.inf.in, plus the new dlls/winemacmf; one patch, 1.6.4). Programs save
+              MP4 files through Media Foundation's sink writer, which needs an H.264 encoder, an AAC
+              encoder and an MPEG-4 sink. Wine keeps the first and the last in GStreamer, which the
+              engine is built without, and has no AAC encoder. winemacmf.dll and its Unix library
+              winemacmf.so provide the three on VideoToolbox, AudioToolbox and AVFoundation's
+              writer (mfh264enc.dll and mfmp4srcsnk.dll create its classes, as they would
+              winegstreamer's); the sink writer gets the encoder insertion, encoding, draining and
+              Finalize it lacked; mfh264enc registers the RGB input the macOS encoder takes; and
+              wine.inf registers winemacmf.dll. Overwatch saves its highlights this way (REC-53).
+              winemacmf is not in the Phase 2 Makefile: its commands are those of mfh264enc (PE)
+              and winedmo and winemac.drv (Unix library), pointed at its sources. "media" builds
+              all five files (mfreadwrite, mfh264enc, winemacmf, winemacmf-unix, wine-inf).
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -152,6 +174,30 @@ COMPONENTS = {
                       pe=True, patch=ROOT / 'patches/wine-service-security.patch',
                       patch_directories=['dlls/sechost', 'programs/services']),
 }
+MEDIA_SOURCE = ROOT / 'runtime/source/wine-media'
+MEDIA_PATCH = ROOT / 'patches/wine-media-foundation.patch'
+MEDIA_DIRECTORIES = ['dlls/mfreadwrite', 'dlls/mfh264enc', 'dlls/winemacmf', 'loader']
+COMPONENTS.update({
+    'mfreadwrite': dict(rule='dlls/mfreadwrite/x86_64-windows/mfreadwrite.dll', directory='dlls/mfreadwrite',
+                        pristine=BASE, source=MEDIA_SOURCE, archived='lib/wine/x86_64-windows/mfreadwrite.dll',
+                        pe=True, patch=MEDIA_PATCH, patch_directories=MEDIA_DIRECTORIES),
+    'mfh264enc': dict(rule='dlls/mfh264enc/x86_64-windows/mfh264enc.dll', directory='dlls/mfh264enc',
+                      pristine=BASE, source=MEDIA_SOURCE, archived='lib/wine/x86_64-windows/mfh264enc.dll',
+                      pe=True, patch=MEDIA_PATCH, patch_directories=MEDIA_DIRECTORIES),
+    # Not in the Phase 2 Makefile: built from its siblings' commands (synthesize below).
+    'winemacmf': dict(synthesized='pe', name='winemacmf.dll', directory='dlls/winemacmf', source=MEDIA_SOURCE,
+                      archived=None, pe=True, patch=MEDIA_PATCH, patch_directories=MEDIA_DIRECTORIES),
+    'winemacmf-unix': dict(synthesized='unix', name='winemacmf.so', directory='dlls/winemacmf', source=MEDIA_SOURCE,
+                           archived=None, rpaths=['@loader_path', '@loader_path/../..'], patch=MEDIA_PATCH,
+                           patch_directories=MEDIA_DIRECTORIES),
+    'wine-inf': dict(synthesized='inf', name='wine.inf', directory='loader', source=MEDIA_SOURCE,
+                     archived='share/wine/wine.inf', patch=MEDIA_PATCH, patch_directories=MEDIA_DIRECTORIES),
+})
+MEDIA_COMPONENTS = ['mfreadwrite', 'mfh264enc', 'winemacmf', 'winemacmf-unix', 'wine-inf']
+WINEMACMF_PE_SOURCES = ['aac_encoder', 'h264_encoder', 'main', 'mpeg4_sink']
+WINEMACMF_UNIX_SOURCES = ['unixlib.c', 'macmf_cocoa.m']
+WINEMACMF_FRAMEWORKS = ['AVFoundation', 'AudioToolbox', 'CoreMedia', 'CoreVideo', 'VideoToolbox', 'Foundation',
+                        'CoreFoundation']
 LLVM_STRIP = ROOT / 'runtime/toolchains/llvm-mingw-20251216-ucrt-macos-universal/bin/llvm-strip'
 OUT = ROOT / 'runtime/build/wine-native'
 SDL2 = {'version': '2.32.10', 'library': PHASE2 / 'clean-deps/lib/libSDL2-2.0.0.dylib',
@@ -269,9 +315,92 @@ def compile_component(component, source, out, sdl2=False):
     return raw
 
 
+def retarget(command, template, directory, source):
+    """A sibling module's Phase 2 command, pointed at DIRECTORY in SOURCE."""
+    command = command.replace(str(BASE / template) + '/', str(source / directory) + '/')
+    command = command.replace('-I' + str(BASE / template) + ' ', '-I' + str(source / directory) + ' ')
+    return command.replace('-I' + template + ' ', '-I' + directory + ' ')
+
+
+def synthesize(component, source, out):
+    """Build a file the Phase 2 Makefile has no rule for, with its siblings' exact commands."""
+    makefile = (TREE / 'Makefile').read_text()
+    directory = component['directory']
+    objdir = out / 'obj'
+    objdir.mkdir(parents=True, exist_ok=True)
+    prefix_map = ' -ffile-prefix-map=' + str(source) + '=/build/overwatch-2-mac/sources/wine/sources/wine'
+
+    def shell(command, what):
+        result = subprocess.run(command, shell=True, cwd=TREE, env=ENV, capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError(f'{what} failed:\n' + result.stderr)
+        own = [line for line in result.stderr.splitlines() if 'warning:' in line and 'deprecated' not in line]
+        if own:
+            print('\n'.join(own), flush=True)
+
+    kind = component['synthesized']
+    raw = out / (component['name'] + '.raw')
+    if kind == 'inf':
+        command = expand_braces(recipe(makefile, 'loader/wine.inf'), makefile)
+        command = command.replace(str(BASE / 'loader/wine.inf.in'), str(source / 'loader/wine.inf.in'))
+        command = command.replace('>$@', '>' + str(raw))
+        shell(command, 'wine.inf')
+        return raw
+
+    if kind == 'pe':
+        template = 'dlls/mfh264enc'
+        compile_rule = recipe(makefile, template + '/x86_64-windows/mfh264enc.o')
+        objects = []
+        for name in WINEMACMF_PE_SOURCES:
+            target = objdir / (name + '.o')
+            command = compile_rule.replace(str(BASE / template / 'mfh264enc.c'), str(source / directory / (name + '.c')))
+            command = retarget(expand(expand_cross(command, makefile), target, makefile), template, directory, source)
+            command = command.replace('-I' + directory + ' ', '-I' + str(objdir) + ' ')
+            shell(command + prefix_map, name + '.o')
+            objects.append(str(target))
+        res = objdir / 'winemacmf_r.res'
+        command = recipe(makefile, template + '/x86_64-windows/mfh264enc_r.res')
+        command = command.replace(str(BASE / template / 'mfh264enc.idl'), str(source / directory / 'winemacmf.idl'))
+        command = retarget(expand(command, res, makefile), template, directory, source)
+        shell(command, 'winemacmf_r.res')
+        link = expand(expand_cross(recipe(makefile, template + '/x86_64-windows/mfh264enc.dll'), makefile), raw, makefile)
+        link = link.replace(str(BASE / template / 'mfh264enc.spec'), str(source / directory / 'winemacmf.spec'))
+        link = link.replace(template + '/x86_64-windows/mfh264enc.o', ' '.join(objects))
+        link = link.replace(template + '/x86_64-windows/mfh264enc_r.res', str(res))
+        shell(link, 'winemacmf.dll')
+        return raw
+
+    objects = []
+    for file in WINEMACMF_UNIX_SOURCES:
+        name, suffix = file.rsplit('.', 1)
+        template, sample = ('dlls/winemac.drv', 'cocoa_app') if suffix == 'm' else ('dlls/winedmo', 'unixlib')
+        target = objdir / (name + '.o')
+        command = recipe(makefile, f'{template}/{sample}.o')
+        command = command.replace(str(BASE / template / f'{sample}.{suffix}'), str(source / directory / file))
+        command = retarget(expand(command, target, makefile), template, directory, source)
+        command = command.replace('-I' + directory + ' ', '-I' + str(objdir) + ' ')
+        if suffix == 'm':
+            command += ' -fobjc-arc'
+        shell(command + prefix_map, file)
+        objects.append(str(target))
+    link = expand(recipe(makefile, 'dlls/winedmo/winedmo.so'), raw, makefile)
+    link = link.replace('@rpath/winedmo.so', '@rpath/winemacmf.so')
+    link = re.sub(r'dlls/winedmo/\w+\.o(?: dlls/winedmo/\w+\.o)*', ' '.join(objects), link, count=1)
+    if 'dlls/winedmo/' in link:
+        raise RuntimeError('winedmo objects remain in the winemacmf link: ' + link)
+    link += ''.join(' -framework ' + name for name in WINEMACMF_FRAMEWORKS)
+    shell(link, 'winemacmf.so')
+    return raw
+
+
 def package(component, raw, final):
     """The assemble_portable_runtime.py treatment, minus Developer ID signing."""
     shutil.copy2(raw, final)
+    if component.get('synthesized') == 'inf':
+        for value in (str(ROOT), '/Users/'):
+            if value.encode() in final.read_bytes():
+                raise ValueError('Development path remains in ' + final.name)
+        return final
     if component.get('pe'):
         run(LLVM_STRIP, '--strip-debug', final, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for value in (str(ROOT), '/Users/'):
@@ -311,17 +440,35 @@ def write_patch(component):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('component', choices=sorted(COMPONENTS))
+    parser.add_argument('component', choices=sorted([*COMPONENTS, 'media']))
     parser.add_argument('--base', action='store_true', help='Reproduce the shipped file from unmodified sources')
     args = parser.parse_args()
-    component = COMPONENTS[args.component]
-    shipped_raw = TREE / component['rule']
-    archived = ARTIFACT / component['archived']
-    for required in (TREE / 'Makefile', BASE / component['directory'], component['pristine'] / component['directory'],
-                     archived, shipped_raw, Path(ENV['SDKROOT'])):
-        if not required.exists():
-            parser.error('Missing Phase 2 build input: ' + str(required))
-    name = Path(component['rule']).name
+    if args.component == 'media':
+        if args.base:
+            parser.error('media has no --base: winemacmf is new')
+        for name in MEDIA_COMPONENTS:
+            build_one(parser, name, False)
+        return
+    build_one(parser, args.component, args.base)
+
+
+def build_one(parser, component_name, base_only):
+    component = COMPONENTS[component_name]
+    synthesized = component.get('synthesized')
+    if synthesized and base_only:
+        parser.error(component_name + ' has no Phase 2 build to reproduce')
+    archived = ARTIFACT / component['archived'] if component['archived'] else None
+    shipped_raw = None if synthesized else TREE / component['rule']
+    required = [TREE / 'Makefile', component['source'] / component['directory'], Path(ENV['SDKROOT'])]
+    if not synthesized:
+        required += [BASE / component['directory'], component['pristine'] / component['directory'], shipped_raw]
+    if archived:
+        required.append(archived)
+    for path in required:
+        if not path.exists():
+            parser.error('Missing Phase 2 build input: ' + str(path))
+    name = component['name'] if synthesized else Path(component['rule']).name
+    args = argparse.Namespace(component=component_name, base=base_only)
     if args.base:
         out = OUT / args.component / 'base'
         if out.exists():
@@ -362,14 +509,18 @@ def main():
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
-    raw = compile_component(component, source, out, sdl2=component.get('sdl2', False))
+    if synthesized:
+        raw = synthesize(component, source, out)
+    else:
+        raw = compile_component(component, source, out, sdl2=component.get('sdl2', False))
     final = package(component, raw, out / name)
-    if not component.get('pe'):
+    if not component.get('pe') and synthesized != 'inf':
         run('/usr/bin/codesign', '--force', '--sign', '-', final, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         run('/usr/bin/codesign', '--verify', '--strict', final)
     if before != snapshot():
         raise SystemExit('Sources changed during the build')
-    manifest = {'schema': 1, 'component': args.component, 'sha256': sha(final), 'base_sha256': sha(archived)}
+    manifest = {'schema': 1, 'component': args.component, 'sha256': sha(final),
+                'base_sha256': sha(archived) if archived else None}
     if component['patch']:
         write_patch(component)
         manifest.update(patch=str(component['patch'].relative_to(ROOT)), patch_sha256=sha(component['patch']))

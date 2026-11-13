@@ -135,8 +135,41 @@ class MouselookReport(unittest.TestCase):
         self.assertEqual(session.players_variant(), "precise")
         for key in ("WINEMAC_MOUSELOOK_INTERVAL_US", "WINEMAC_MOUSELOOK_RAW", "WINEMAC_MOUSELOOK_RAW_INTERVAL_US",
                     "WINEMAC_INPUT_VARIANTS", "WINEMAC_MOUSELOOK_SWITCH",
-                    "DXMT_ENABLE_NVEXT", "MTL_HUD_ENABLED", "WINEMAC_SCREEN_READBACK"):
+                    "DXMT_ENABLE_NVEXT", "MTL_HUD_ENABLED", "WINEMAC_SCREEN_READBACK",
+                    "WINEMAC_APPKIT_UPDATE_CYCLE"):
             self.assertNotIn(key, env)
+
+    def test_the_display_synchronized_event_loop_is_turned_off_only_when_asked(self):
+        # The driver keeps AppKit's display-synchronized event loop unless the variable is 0
+        # (Faster key response, PR #73); the control of an A/B leaves it out.
+        # The app's switch sets it as the worker does, and an A/B arm overrides the switch.
+        with tempfile.TemporaryDirectory() as temp:
+            control = session.environment(Path(temp), SETTINGS, appkit_update_cycle="default")
+            off = session.environment(Path(temp), SETTINGS, appkit_update_cycle="off")
+            switched = session.environment(Path(temp), dict(SETTINGS, faster_keys=True))
+            control_over_switch = session.environment(Path(temp), dict(SETTINGS, faster_keys=True),
+                                                      appkit_update_cycle="default")
+        self.assertNotIn("WINEMAC_APPKIT_UPDATE_CYCLE", control)
+        self.assertEqual(off["WINEMAC_APPKIT_UPDATE_CYCLE"], "0")
+        self.assertEqual(switched["WINEMAC_APPKIT_UPDATE_CYCLE"], "0")
+        self.assertNotIn("WINEMAC_APPKIT_UPDATE_CYCLE", control_over_switch)
+
+    def test_key_delays_are_summarised_over_the_seconds_the_game_was_frontmost(self):
+        def line(active, delays, moves=0, cycle="off"):
+            return {"app_active": active, "mac_moves": moves, "appkit_update_cycle": cycle,
+                    "key_events": len(delays), "key_delays_ms": delays,
+                    "key_delay_ms_avg": sum(delays) / len(delays) if delays else 0.0,
+                    "key_delay_ms_max": max(delays, default=0.0)}
+        keys = session.key_summary([line(True, [1.0, 2.0, 3.0], moves=1000), line(True, [4.0, 20.0], moves=900),
+                                    line(True, []), line(False, [99.0]), {"app_active": True, "mac_moves": 5}])
+        self.assertEqual(keys["appkit_update_cycle"], ["off"])
+        self.assertEqual((keys["key_events"], keys["timed_one_by_one"]), (5, 5))
+        self.assertEqual((keys["delay_ms_median"], keys["delay_ms_95th_percentile"], keys["delay_ms_max"]),
+                         (3.0, 20.0, 20.0))
+        self.assertEqual(keys["delay_ms_mean"], 6.0)
+        self.assertEqual(keys["mouse_events_per_second_moving"], 950)
+        # A driver without the counters (before 1.6.4) has nothing to say.
+        self.assertIsNone(session.key_summary([{"app_active": True, "mac_moves": 5}]))
 
     def test_launch_environment_follows_the_app_settings(self):
         settings = dict(SETTINGS, metalfx=True, metal_hud=True, game_mode=False, korean_support=True)

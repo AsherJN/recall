@@ -16,8 +16,9 @@ PATTERNS = [
     ('GitHub credential', rb'\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})\b'),
     ('AWS access key', rb'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'),
     ('Slack credential', rb'\bxox[baprs]-[A-Za-z0-9-]{20,}\b'),
-    # Placeholder accounts used by CI recipes and test fixtures are permitted.
-    ('macOS account path', rb'/Users/(?!runner/|example/)[A-Za-z0-9_.-]+/'),
+    # Placeholder accounts used by CI recipes and test fixtures are permitted, and so is
+    # /Users/Shared, macOS's folder for every account rather than one person's home.
+    ('macOS account path', rb'/Users/(?!runner/|example/|Shared/)[A-Za-z0-9_.-]+/'),
 ]
 
 

@@ -154,7 +154,7 @@ Yes. Set it as your main display in macOS System Settings, then choose its resol
 <details>
 <summary><b>Can I install the game on an external drive?</b></summary>
 
-Yes. Choose an external SSD during setup and keep it connected while you play. The [installation guide](docs/INSTALLATION.md) covers supported formats and setup.
+Yes. Choose an external SSD during setup, or move an existing setup there later with **Settings › General › Move…**; nothing downloads again. Keep the drive connected while you play. The [installation guide](docs/INSTALLATION.md) covers supported formats and setup.
 </details>
 
 <details>

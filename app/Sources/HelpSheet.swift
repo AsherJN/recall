@@ -26,7 +26,7 @@ enum HelpTab:String, CaseIterable, Identifiable {
 /// button to where the steps point. Short, plain sentences; **bold** marks what to choose.
 /// A topic with regions shows only to players on one of them (AppModel.currentRegion).
 struct HelpTopic:Identifiable {
-    enum Action { case settings(SettingsTab), displays, workshopCode, showFolder }
+    enum Action { case settings(SettingsTab), displays, keyboard, workshopCode, showFolder, highlights }
     let id:String
     let symbol:String
     let title:String
@@ -84,6 +84,13 @@ extension HelpTopic {
                          L("Play from {0}.",Brand.name)],
                   note:L("Battle.net picks up the setting when it opens. To hide the HUD, quit Overwatch, close Battle.net, turn the setting off and play again."),
                   action:.settings(.graphics)),
+        // REC-53, REC-96: Overwatch's Record saves an MP4 in Movies › Overwatch; Recall lists them.
+        HelpTopic(id:"highlights",symbol:"film.stack",title:L("How do I save and share highlights?"),
+                  steps:[L("In Overwatch, open **Career Profile › History › Highlights**."),
+                         L("Choose a highlight and select **Record**. Keep the format at **MP4**."),
+                         L("Open **Highlights** in {0} to watch, share or find the clip.",Brand.name)],
+                  note:L("Highlights are saved in **Movies › Overwatch** on your Mac. Overwatch keeps unsaved highlights only until it closes, so record the ones you want first."),
+                  action:.highlights),
         HelpTopic(id:"monitor",symbol:"rectangle.connected.to.line.below",title:L("How do I play on an external monitor?"),
                   steps:[L("In **System Settings › Displays**, select the monitor and set **Use as** to Main display."),
                          L("In Overwatch, choose the monitor’s resolution under **Options › Video**, for example 2560 × 1440 on a 1440p monitor.")],
@@ -125,6 +132,14 @@ extension HelpTopic {
                          L("Turn logging off again.")],
                   note:L("Logging can lower your FPS while it’s on. Save Logs also works with logging off, with the logs Battle.net and Overwatch keep. Before saving, {0} removes personal details such as your Mac’s name and your Battle.net account numbers.",Brand.name),
                   action:.settings(.advanced)),
+        // REC-85: Settings › Advanced › Custom renderer settings (RendererSettings).
+        HelpTopic(id:"renderer",symbol:"slider.horizontal.3",title:L("Can I change the renderer’s settings (dxmt.conf)?"),
+                  answer:L("{0} writes dxmt.conf afresh each time Overwatch starts, so changes to the file itself don’t last. Add your own lines in Settings instead, and {0} adds them at each launch.",Brand.name),
+                  steps:[L("Choose **Settings › Advanced › Custom renderer settings › Edit**."),
+                         L("Add one setting per line, written as name = value, and turn on **Use these settings**."),
+                         L("Choose **Save**, then press Play.")],
+                  note:L("These change how Overwatch is drawn and can cause stutter, input lag or a black screen. If something goes wrong, turn them off there. To cap your FPS, Overwatch’s own limit in **Options › Video › Frame Rate** usually adds less input lag."),
+                  action:.settings(.advanced)),
         HelpTopic(id:"china",symbol:"globe.asia.australia",title:L("How do I play on China’s Battle.net (国服)?"),
                   answer:L("China’s Battle.net uses NetEase accounts. Choose China when you set up {0}, or later in **Settings › General › Battle.net region**.",Brand.name),
                   note:L("Accounts don’t carry over between Global and China’s Battle.net, so switching sets up Battle.net and Overwatch again."),
@@ -139,6 +154,14 @@ extension HelpTopic {
                          L("Under **Applications**, add {0} and choose a language for it.",Brand.name),
                          L("Quit {0} and open it again.",Brand.name)],
                   note:L("Battle.net and Overwatch keep their own language settings, in Battle.net’s settings.")),
+        // REC-82: Settings › General › Move… (MoveInstallation.swift).
+        HelpTopic(id:"move",symbol:"externaldrive",title:L("How do I move Overwatch to another drive?"),
+                  answer:L("{0} moves Overwatch, Battle.net, your settings and learned shaders together to another drive or folder, such as an external SSD. Nothing downloads again. The drive must be formatted as APFS or Mac OS Extended.",Brand.name),
+                  steps:[L("Quit Overwatch."),
+                         L("Open **Settings › General** and choose **Move…** beside **Install location**."),
+                         L("Choose the drive or folder, then choose **Move**.")],
+                  note:L("{0} copies everything, checks the copy, then moves the earlier one to the Trash. Empty the Trash to free its space. If the move is interrupted, your game stays where it was. With the game on an external drive, keep the drive connected when you play.",Brand.name),
+                  action:.settings(.general)),
         HelpTopic(id:"macs",symbol:"laptopcomputer",title:L("Which Macs can play?"),
                   answer:L("Macs with Apple silicon on macOS 26.5 or later, with Rosetta. 16 GB of memory is recommended, and a new installation needs about 85–95 GB of storage.")),
         HelpTopic(id:"uninstall",symbol:"trash",title:L("How do I uninstall?"),
@@ -192,8 +215,25 @@ extension HelpTopic {
                   answer:L("When your Mac runs low on memory, Overwatch has to wait for it. Your movement and aim then respond late even though your FPS looks normal, most in your first minute in a map or when you come back from another app."),
                   steps:[L("Quit apps you aren’t using. When your Mac is low on memory, {0} lists the apps using the most on the Play screen, with a **Quit** button.",Brand.name),
                          L("If you haven’t restarted your Mac in days, restart it. Over time macOS itself can hold on to memory, and a restart frees it.")]),
+        // REC-86: keys Windows players press out of habit (Rhythm, November 4; Max, October 26).
+        HelpTopic(id:"keys",symbol:"keyboard.badge.ellipsis",title:L("A key takes me out of the game"),
+                  answer:L("Some keys start a macOS feature in the middle of a match. Pressing Control twice can start Dictation, which turns on your microphone and makes the game and its sound stutter. The fn key, also called 🌐 Globe, can open a macOS popup."),
+                  steps:[L("Open **System Settings › Keyboard**."),
+                         L("Under **Dictation**, change **Shortcut** to anything but **Press Control Key Twice**, or turn Dictation off."),
+                         L("Next to **Press 🌐 key to** (**Press fn key to** on some keyboards), choose **Do Nothing**.")],
+                  note:L("These settings are for your whole Mac, not only Overwatch."),
+                  action:.keyboard),
         HelpTopic(id:"window",symbol:"macwindow.on.rectangle",title:L("I can’t find the game window"),
                   answer:L("Choose **Show Overwatch** in {0}, or select Overwatch in the Dock. If it’s still hidden, check your other desktops.",Brand.name)),
+        // REC-86, GitHub #65: Overwatch opens on the main display (portable_preferences.h
+        // mainScreen), which can be a screen the player doesn't look at.
+        HelpTopic(id:"screen",symbol:"rectangle.on.rectangle.slash",title:L("Overwatch opens, but the game isn’t showing on my screen"),
+                  answer:L("Overwatch opens on your Mac’s main display, the one with the menu bar. If an extra screen is the main display, the game opens there, not on the screen you’re looking at, and you see no window."),
+                  steps:[L("In **System Settings › Displays**, select the screen you play on and set **Use as** to Main display."),
+                         L("Quit Overwatch: right-click it in the Dock and choose **Quit**."),
+                         L("Play again.")],
+                  note:L("An extra screen can be an iPad with Sidecar, an AirPlay screen, a virtual display from an app, or a monitor that’s off but still plugged in. macOS remembers the main display, so Overwatch keeps opening there."),
+                  action:.displays),
         // REC-58: a player's fix from Discord (October 24). Only its safe step is here: uninstalling
         // costs the whole download, and staying signed out of Battle.net is untried with Korea and China.
         HelpTopic(id:"missing",symbol:"questionmark.app",title:L("Overwatch is missing from Battle.net, or Play does nothing"),
@@ -451,12 +491,19 @@ struct HelpSheet:View {
         case .displays:
             Button(L("Open Displays in System Settings"),action:SettingsSheet.openDisplaySettings)
                 .buttonStyle(.bordered).buttonBorderShape(.capsule)
+        case .keyboard:
+            Button(L("Open Keyboard in System Settings")) {
+                NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.Keyboard-Settings.extension")!)
+            }.buttonStyle(.bordered).buttonBorderShape(.capsule)
         case .workshopCode:
             Button(copied == "code" ? L("Copied") : L("Copy Code {0}",FirstMatchTip.workshopCode)) {
                 copy(FirstMatchTip.workshopCode);copied="code"
             }.buttonStyle(.bordered).buttonBorderShape(.capsule)
         case .showFolder:
             Button(L("Show in Finder"),action:model.showFolder).buttonStyle(.bordered).buttonBorderShape(.capsule)
+        case .highlights:
+            Button(L("Open Highlights"),action:model.openHighlights).buttonStyle(.bordered).buttonBorderShape(.capsule)
+                .disabled(model.screen == .moveApp)
         }
     }
     /// Where to ask (the community, or GitHub on China's Battle.net) and how to report a bug

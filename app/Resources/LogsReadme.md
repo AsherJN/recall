@@ -59,10 +59,10 @@ Read `index.json` first. It has:
     back (another app most likely had the mouse).
   - `variant` is how clicks and timing work: `precise` for Standard and High-precision, `classic`
     for Classic (Recall 1.4's).
-  - `raw_interval_us`: the least time between deliveries to Overwatch, in microseconds, from
-    Settings › General › Mouse › Advanced. 0 is every report (the default from Recall 1.6.1);
-    1000 is 1,000 a second, as in 1.6.0 and always with Classic. Movement in between is added to
-    the next delivery.
+  - `raw_interval_us`: the least time between deliveries to Overwatch, in microseconds. 0 is every
+    report (Standard and High-precision from Recall 1.6.1); 1000 is 1,000 a second, as in 1.6.0
+    and always with Classic. Recall 1.6.1 to 1.6.3 also let players lower it under Settings ›
+    General › Mouse › Advanced. Movement in between is added to the next delivery.
   - `mac_dx`, `mac_dy`: how far the macOS pointer moved in points, which follows the pointer's speed
     and acceleration settings.
   - `moved_x`, `moved_y`, `moved_abs`: what reached Overwatch through Wine.

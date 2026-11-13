@@ -51,8 +51,8 @@ struct SettingsSheet:View {
     @State private var explainHighPrecision=false
     /// Mouse's info button.
     @State private var aboutMouse=false
-    /// Mouse › Advanced (REC-63): closed each time Settings opens.
-    @State private var mouseAdvanced=false
+    /// Advanced › Custom renderer settings' editor (RendererSettingsSheet, REC-85).
+    @State private var editRenderer=false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body:some View {
         VStack(spacing:16) {
@@ -98,6 +98,7 @@ struct SettingsSheet:View {
                 Button(L("Repair"),action:model.repair)
             } message: { Text(L("Overwatch and Battle.net must be closed. This reinstalls the files this app adds and refreshes the Windows environment. Overwatch, its settings and your Battle.net sign-in are kept.")) }
             .sheet(isPresented:$confirmKorean) { KoreanSupportSheet { model.chooseRegion(.korea) } }
+            .sheet(isPresented:$editRenderer) { RendererSettingsSheet(model:model) }
             .sheet(isPresented:$explainHighPrecision) {
                 HighPrecisionMouseSheet(access:model.inputMonitoring,confirm:model.turnOnHighPrecision)
             }
@@ -125,8 +126,9 @@ struct SettingsSheet:View {
             updates
             battleNet
             mouse
+            highlightMark
             if model.showsDiscord { discord }
-            if model.otherInstallation != nil { otherInstallation }
+            if !model.canChangeLocation || model.otherInstallation != nil { installLocation }
         case .display:
             display
             resetDisplay
@@ -178,6 +180,14 @@ struct SettingsSheet:View {
         default: return L("Version {0}",UpdateCheck.installed)
         }
     }
+    /// REC-97: the Recall mark in saved MP4 highlights, asked once (HighlightMarkSheet).
+    private var highlightMark:some View {
+        LauncherPanel(inset:16) {
+            SettingSwitch(title:L("{0} mark on highlights",Brand.name),
+                          detail:L("Adds “{0}” to the MP4 highlights you save. Highlights already marked keep it.",HighlightMark.text),
+                          isOn:Binding(get:{ model.highlightMark },set:{ model.highlightMark=$0;model.highlightMarkAsked=true }))
+        }
+    }
     private var discord:some View {
         LauncherPanel(inset:16) {
             SettingSwitch(title:L("Discord activity"),detail:L("Discord shows you’re playing Overwatch on Mac with {0}, and for how long.",Brand.name),
@@ -219,13 +229,12 @@ struct SettingsSheet:View {
     /// mouse is connected, first explains itself and why macOS will ask for Input Monitoring
     /// (HighPrecisionMouseSheet), whose Turn On chooses it and shows macOS's prompt the first time
     /// (AppModel.turnOnHighPrecision); once Input Monitoring is allowed, it's chosen at once. Until
-    /// then the mouse works as Standard does, so Standard is the tile lit, and the panel says what to
-    /// do; after, High-precision is lit and its title says so. The choice itself is kept, so it takes
-    /// effect as soon as macOS allows it; choosing Standard or Classic drops it.
+    /// then High-precision stays the tile lit, flagged as waiting for permission, the mouse works as
+    /// Standard does, and the panel says so and what to do (REC-83; owner, November 9 and 10: the
+    /// player's choice stays visible); after, its title says Input Monitoring is on.
     private var mouse:some View {
-        let chosen=model.mouseInput,allowed=model.inputMonitoring == .allowed
-        let waiting=chosen == .highPrecision && !allowed
-        let input:AppModel.MouseInput=waiting ? .standard : chosen
+        let input=model.mouseInput,allowed=model.inputMonitoring == .allowed
+        let waiting=input == .highPrecision && !allowed
         let needs=L("Needs Input Monitoring."),until=L("Until then, your mouse works as Standard does.")
         return LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:8) {
@@ -236,15 +245,16 @@ struct SettingsSheet:View {
                         .help(L("About the mouse settings")).accessibilityLabel(L("About the mouse settings"))
                         .infoPopover(isPresented:$aboutMouse) { MouseInfo() }
                     Spacer(minLength:8)
-                    if input == .highPrecision {
+                    if input == .highPrecision && allowed {
                         Text(L("Input Monitoring is on")).font(LauncherStyle.font(11,.medium)).foregroundStyle(.secondary).transition(.opacity)
                     }
                 }
                 HStack(spacing:4) {
                     MouseTile(title:L("Standard"),symbol:"cursorarrow",selected:input == .standard) { model.mouseInput = .standard }
                     MouseTile(title:L("Classic"),symbol:"clock.arrow.circlepath",selected:input == .classic) { model.mouseInput = .classic }
-                    MouseTile(title:L("High-precision"),symbol:"cursorarrow.motionlines",recommended:model.mouseConnected,selected:input == .highPrecision) {
-                        if allowed { model.mouseInput = .highPrecision } else { explainHighPrecision=true }
+                    MouseTile(title:L("High-precision"),symbol:"cursorarrow.motionlines",recommended:model.mouseConnected,waiting:waiting,
+                              selected:input == .highPrecision) {
+                        if input != .highPrecision { if allowed { model.mouseInput = .highPrecision } else { explainHighPrecision=true } }
                     }
                 }.padding(3).background(.primary.opacity(0.06),in:RoundedRectangle(cornerRadius:15,style:.continuous))
                     .disabled(model.running != nil).opacity(model.running != nil ? 0.6 : 1)
@@ -266,78 +276,46 @@ struct SettingsSheet:View {
                          : L("Overwatch reads your mouse directly, skipping macOS’s mouse layer."))
                         .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                 }
-                mouseRate
                 if let running=model.running { closeFirst(running,several:false) }
             }.animation(reduceMotion ? nil : .easeOut(duration:0.3),value:input)
                 .animation(reduceMotion ? nil : .easeOut(duration:0.3),value:waiting)
         }.onAppear { model.inputMonitoring=InputMonitoring.access }
     }
-    /// Mouse › Advanced (AppModel.MouseRate, REC-63), closed until the player opens it, since most
-    /// never need it (owner, October 25): how many times a second Overwatch gets the mouse's
-    /// movement, one row of choices, fewest first with All at the right end as Shader memory's
-    /// slider has. Each choice's tooltip says what it does; the panel's info button says when to
-    /// change it. Closed, it still names a lowered rate. Classic keeps 1.4's timing, so with
-    /// Classic chosen it says so in place of the row.
-    private var mouseRate:some View {
-        let rate=model.mouseRate,classic=model.mouseInput == .classic
-        return VStack(alignment:.leading,spacing:8) {
-            Divider().padding(.bottom,-2)
-            Button { withAnimation(reduceMotion ? nil : .easeOut(duration:0.15)) { mouseAdvanced.toggle() } } label: {
-                HStack(spacing:6) {
-                    Text(L("Advanced")).font(LauncherStyle.font(12,.medium))
-                    Image(systemName:"chevron.down").font(.system(size:10,weight:.semibold)).rotationEffect(.degrees(mouseAdvanced ? 180 : 0))
-                    if !mouseAdvanced && !classic && rate != .all {
-                        Text(verbatim:"·").font(LauncherStyle.font(12))
-                        Text(mouseRateLabel(rate)).font(LauncherStyle.font(12)).monospacedDigit()
-                    }
-                }.foregroundStyle(.secondary).contentShape(Rectangle())
-            }.buttonStyle(.plain)
-                .accessibilityHint(mouseAdvanced ? L("Hides the advanced mouse setting") : L("Shows how often Overwatch gets your mouse’s movement"))
-            if mouseAdvanced {
-                if classic {
-                    Text(L("Classic keeps the timing of {0} 1.4, so this setting doesn’t change it.",Brand.name))
-                        .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                } else {
-                    HStack(spacing:2) {
-                        Text(L("Mouse updates per second")).font(LauncherStyle.font(12,.semibold))
-                        Spacer(minLength:8)
-                        ForEach(AppModel.MouseRate.stops,id:\.self) { stop in
-                            let on=stop == rate
-                            Button(stop.perSecond?.formatted() ?? L("All")) { model.mouseRate=stop }.buttonStyle(.plain)
-                                .font(LauncherStyle.font(11,on ? .semibold : .medium)).monospacedDigit().foregroundStyle(on ? .primary : .secondary)
-                                .padding(.horizontal,9).padding(.vertical,4).background(on ? LauncherStyle.accent.opacity(0.26) : .clear,in:Capsule())
-                                .contentShape(Capsule())
-                                // VoiceOver says what the number counts ("250 a second"), not the bare number.
-                                .accessibilityLabel(mouseRateLabel(stop)).accessibilityAddTraits(on ? .isSelected : [])
-                                .help(stop.perSecond.map { L("Overwatch gets up to {0} updates a second. Movement in between is added to the next one, so none is lost.",$0.formatted()) }
-                                      ?? L("Overwatch gets every update your mouse sends, at its full polling rate, as on a Windows PC."))
-                        }
-                    }.disabled(model.running != nil)
-                        .accessibilityElement(children:.contain).accessibilityLabel(L("Mouse updates per second"))
-                }
-            }
-        }
-    }
-    private func mouseRateLabel(_ rate:AppModel.MouseRate) -> String {
-        rate.perSecond.map { L("{0} a second",$0.formatted()) } ?? L("Every update")
-    }
-    /// REC-44: the installation the player moved away from, after setup here has gone past the
-    /// setup screens that offer it.
-    private var otherInstallation:some View {
-        let name=model.otherInstallation.map(InstallLocation.driveName) ?? ""
+    /// Where Overwatch and Battle.net are, with Move… once there is an installation to move
+    /// (REC-82, MoveInstallation.swift). Under it, the installation the player moved away from,
+    /// after setup here has gone past the setup screens that offer it (REC-44).
+    private var installLocation:some View {
+        let other=model.otherInstallation.map(InstallLocation.driveName)
         return LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
-                HStack(alignment:.center,spacing:12) {
-                    VStack(alignment:.leading,spacing:2) {
-                        Text(L("Install location")).font(LauncherStyle.font(14,.semibold))
-                        Text(L("Your installation on “{0}” is still there.",name)).font(LauncherStyle.font(12))
-                            .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                if !model.canChangeLocation {
+                    HStack(alignment:.center,spacing:12) {
+                        VStack(alignment:.leading,spacing:2) {
+                            Text(L("Install location")).font(LauncherStyle.font(14,.semibold))
+                            Text(L("Overwatch and Battle.net are on “{0}”.",InstallLocation.title(model.root))).font(LauncherStyle.font(12))
+                                .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                        }
+                        Spacer(minLength:12)
+                        // Battle.net is closed for the player; Overwatch itself must be quit first.
+                        Button(L("Move…"),action:model.chooseMoveDestination).buttonStyle(.bordered).buttonBorderShape(.capsule)
+                            .disabled(model.busy || model.uninstall == .working || model.running == .game)
+                            .help(L("Move Overwatch and Battle.net to another drive or folder"))
                     }
-                    Spacer(minLength:12)
-                    Button(L("Use “{0}”…",name),action:model.chooseOtherInstallation).buttonStyle(.bordered).buttonBorderShape(.capsule)
-                        .disabled(model.busy || model.uninstall == .working || model.running != nil)
                 }
-                if let running=model.running { closeFirst(running,several:false) }
+                if let other {
+                    if !model.canChangeLocation { Divider().padding(.vertical,6) }
+                    HStack(alignment:.center,spacing:12) {
+                        VStack(alignment:.leading,spacing:2) {
+                            if model.canChangeLocation { Text(L("Install location")).font(LauncherStyle.font(14,.semibold)) }
+                            Text(L("Your installation on “{0}” is still there.",other)).font(LauncherStyle.font(12))
+                                .foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                        }
+                        Spacer(minLength:12)
+                        Button(L("Use “{0}”…",other),action:model.chooseOtherInstallation).buttonStyle(.bordered).buttonBorderShape(.capsule)
+                            .disabled(model.busy || model.uninstall == .working || model.running != nil)
+                    }
+                }
+                if let running=model.running,other != nil || running == .game { closeFirst(running,several:false) }
             }
         }
     }
@@ -747,21 +725,31 @@ struct SettingsSheet:View {
     }
     /// Rarely needed: a network that hands out its proxy automatically (Recall connects
     /// directly, issue #15). Battle.net and Overwatch carry it from when they start. Korean
-    /// accounts linked to Nexon (#16) are the Korea region, in General, from 1.4.1.
+    /// accounts linked to Nexon (#16) are the Korea region, in General, from 1.4.1. The player's own
+    /// renderer lines (REC-85) are edited in their own sheet and apply at the next Play.
+    /// Faster key response (AppModel.fasterKeys, PR #73) is experimental and off by default; its
+    /// line says the cost plainly (owner, November 12). Like the HUD, it changes while Battle.net is closed.
     private var advanced:some View {
         let locked=model.running != nil || !model.canChangeAdvanced
         return LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {
                 SettingSwitch(title:L("Detect network proxy automatically"),detail:L("Only needed on some work or school networks."),
                               isOn:Binding(get:{ model.proxyAutoDetect },set:{ model.setAdvanced(.proxyAutoDetect,$0) }),disabled:locked)
-                if let running=model.running { closeFirst(running,several:false) }
+                Divider().padding(.vertical,6)
+                SettingSwitch(title:L("Faster key response"),
+                              detail:L("Keys reach Overwatch 1 to 3 ms sooner. With a very fast mouse, menus may hitch slightly."),
+                              isOn:$model.fasterKeys,disabled:model.running != nil) { ExperimentalLabel() }
+                if let running=model.running { closeFirst(running,several:true) }
+                Divider().padding(.vertical,6)
+                action(L("Custom renderer settings"),detail:model.rendererCustomOn ? L("On. Your dxmt.conf lines are added at each launch.") : L("Your own dxmt.conf lines, added at each launch."),
+                       button:L("Edit…")) { editRenderer=true }
             }
         }
     }
 }
 /// A setting with its switch at the trailing edge, as in System Settings: title (and anything
 /// beside it, such as New) over an optional explanation.
-private struct SettingSwitch<Accessory:View>:View {
+struct SettingSwitch<Accessory:View>:View {
     let title:String
     var detail:String?=nil
     @Binding var isOn:Bool
@@ -789,12 +777,21 @@ extension SettingSwitch where Accessory == EmptyView {
         self.init(title:title,detail:detail,isOn:isOn,disabled:disabled) { EmptyView() }
     }
 }
+/// Marks a setting as experimental, beside its name: a small grey label (High-precision's in 1.6.0).
+private struct ExperimentalLabel:View {
+    var body:some View {
+        Text(L("Experimental")).font(LauncherStyle.font(11,.semibold)).foregroundStyle(.secondary)
+            .padding(.horizontal,7).padding(.vertical,2).background(Color.primary.opacity(0.08),in:Capsule())
+    }
+}
 /// One of Settings › General › Mouse's choices, as a tile: its symbol beside its name (and
-/// Recommended under it), the chosen one raised as Settings' tabs are. The whole tile chooses.
+/// Recommended under it, or, while the choice waits for macOS's permission, that it's waiting),
+/// the chosen one raised as Settings' tabs are. The whole tile chooses.
 private struct MouseTile:View {
     let title:String
     let symbol:String
     var recommended=false
+    var waiting=false
     let selected:Bool
     let choose:()->Void
     @Environment(\.colorScheme) private var scheme
@@ -806,8 +803,9 @@ private struct MouseTile:View {
                     .foregroundStyle(selected ? AnyShapeStyle(LauncherStyle.accent) : AnyShapeStyle(.secondary))
                 VStack(alignment:.leading,spacing:1) {
                     Text(title).font(LauncherStyle.font(12,selected ? .semibold : .medium)).foregroundStyle(selected ? .primary : .secondary)
-                    if recommended {
-                        Text(L("Recommended")).font(LauncherStyle.font(10,.semibold)).foregroundStyle(LauncherStyle.accentText(scheme))
+                    if waiting || recommended {
+                        Text(waiting ? L("Waiting for permission") : L("Recommended")).font(LauncherStyle.font(10,.semibold))
+                            .foregroundStyle(LauncherStyle.accentText(scheme)).minimumScaleFactor(0.85)
                     }
                 }
             }.lineLimit(1).frame(maxWidth:.infinity,minHeight:50)
@@ -886,8 +884,8 @@ struct HighPrecisionMouseSheet:View {
         }.accessibilityElement(children:.combine)
     }
 }
-/// Settings › General › Mouse's info button: what each of the three does and what Mouse updates
-/// per second does, which the panel itself leaves out.
+/// Settings › General › Mouse's info button: what each of the three does, which the panel itself
+/// says only briefly.
 struct MouseInfo:View {
     var body:some View {
         VStack(alignment:.leading,spacing:11) {
@@ -895,8 +893,6 @@ struct MouseInfo:View {
             section(L("Standard"),L("Your mouse goes through macOS’s mouse layer, as in any other app. No permission needed."))
             section(L("Classic"),L("The mouse as it worked in {0} 1.4. Try it if your mouse feels different since 1.5.",Brand.name))
             section(L("High-precision"),L("Overwatch reads your mouse directly, skipping macOS’s mouse layer, for the most precise aim. It needs Input Monitoring, which macOS calls “receive keystrokes” because one permission covers mice and keyboards. {0} reads only your mouse, never your keyboard. Until it’s on, your mouse works like **Standard**.",Brand.name))
-            // Named by where it is: closed under Advanced (owner, November 3).
-            section(L("Advanced")+" › "+L("Mouse updates per second"),L("**“All”** sends every update at your mouse’s full polling rate, as on a Windows PC. Pick **“250”** to **“2,000”** only if Overwatch slows down while you move your mouse. Movement in between is added to the next update, so none is lost."))
             Text(L("Change these while Battle.net is closed. You can switch back any time.")).font(LauncherStyle.font(11)).foregroundStyle(.secondary)
         }.font(LauncherStyle.font(12)).lineSpacing(2).padding(20).frame(width:400,alignment:.leading)
     }

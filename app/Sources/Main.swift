@@ -72,6 +72,7 @@ import Darwin
         app.addItem(.separator())
         if AppModel.playEnabled { add(L("Play Overwatch"),#selector(play),"p") }
         add(L("Open Battle.net"),#selector(launch),"o")
+        add(L("Highlights…"),#selector(highlights))
         app.addItem(.separator())
         add(L("Uninstall {0}…",Brand.name),#selector(uninstall))
         app.addItem(.separator())
@@ -110,7 +111,7 @@ import Darwin
     }
     func validateMenuItem(_ item:NSMenuItem)->Bool {
         // Still on the disk image: only moving to Applications, Help and About.
-        if model.screen == .moveApp,let action=item.action,[#selector(launch),#selector(forceQuit),#selector(play),#selector(settings),#selector(checkForUpdates),#selector(uninstall)].contains(action) { return false }
+        if model.screen == .moveApp,let action=item.action,[#selector(launch),#selector(forceQuit),#selector(play),#selector(settings),#selector(checkForUpdates),#selector(uninstall),#selector(highlights)].contains(action) { return false }
         if item.action == #selector(launch) || item.action == #selector(forceQuit) { return model.clientInstalled && !model.busy }
         if item.action == #selector(play) { return model.clientInstalled && model.gameInstalled && !model.busy }
         if item.action == #selector(settings) || item.action == #selector(checkForUpdates) { return model.uninstall != .working }
@@ -119,12 +120,13 @@ import Darwin
     // Right-clicking the Dock icon: start the game, or close a frozen one.
     func applicationDockMenu(_ sender:NSApplication)->NSMenu? {
         let menu=NSMenu()
-        for (title,action) in (AppModel.playEnabled ? [(L("Play Overwatch"),#selector(play))] : [])+[(L("Open Battle.net"),#selector(launch)),(L("Force Quit Overwatch & Battle.net…"),#selector(forceQuit))] {
+        for (title,action) in (AppModel.playEnabled ? [(L("Play Overwatch"),#selector(play))] : [])+[(L("Open Battle.net"),#selector(launch)),(L("Highlights…"),#selector(highlights)),(L("Force Quit Overwatch & Battle.net…"),#selector(forceQuit))] {
             let item=NSMenuItem(title:title,action:action,keyEquivalent:"");item.target=self;menu.addItem(item)
         }
         return menu
     }
     @objc func play() { show();model.play() }
+    @objc func highlights() { show();model.openHighlights() }
     @objc func checkForUpdates() { show();model.checkForUpdates(manual:true) }
     @objc func whatsNew() { show();model.sheet = .whatsNew }
     @objc func releaseNotes() { NSWorkspace.shared.open(Brand.releases) }

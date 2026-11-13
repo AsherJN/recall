@@ -419,6 +419,14 @@ class DisplaySetup(setup.NativeSetup):
         lowered=launched('--mouse','high-precision','--mouse-rate','500')
         self.assertEqual((lowered['WINEMAC_RAW_SOURCE'],lowered[rate]),('hid','2000'))
         self.assertNotIn(rate,launched('--mouse','classic','--mouse-rate','500'))
+        # Faster key response (Settings › Advanced, experimental, PR #73): only --faster-keys 1 has
+        # the window driver turn AppKit's display-synchronized event loop off.
+        cycle='WINEMAC_APPKIT_UPDATE_CYCLE'
+        self.assertNotIn(cycle,hud)
+        self.assertNotIn(cycle,launched('--faster-keys','0'))
+        self.assertNotIn(cycle,launched('--faster-keys','yes'))
+        faster=launched('--faster-keys','1','--mouse','high-precision')
+        self.assertEqual((faster[cycle],faster['WINEMAC_RAW_SOURCE'],faster['WINEMAC_MOUSELOOK']),('0','hid','Overwatch.exe'))
     def test_battlenet_keeps_windows_dpi_on_a_main_display_without_retina(self):
         # Without Retina mode (a main display that isn't Retina, portable_retina.h) a Windows
         # pixel is a point already: Battle.net at 192 DPI would come out twice its size.

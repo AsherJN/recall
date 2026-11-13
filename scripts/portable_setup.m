@@ -224,7 +224,9 @@ static BOOL busy(NSString *engine) {
 #include "portable_region.h"
 #include "portable_korea.h"
 #include "portable_metalfx.h"
+#include "portable_renderer.h"
 #include "portable_diagnostics.h"
+#include "portable_highlights.h"
 // Tests build the worker with a probe that fails, as on a Mac without Rosetta.
 #ifndef ROSETTA_PROBE
 #define ROSETTA_PROBE @"/usr/bin/arch"
@@ -248,8 +250,14 @@ static NSString *download(NSString *url, NSString *expected) {
     NSURL *u=[NSURL URLWithString:url];
     if(![u.scheme isEqual:@"https"] || !u.host.length || u.user || u.password)fail(@"https_download_required");
     NSString *dest=join(join(root,@"downloads"),expected);
+    // A kept download is named by its hash and was checked before it was kept. One that no longer
+    // matches was changed since (security software, REC-94): it's removed and downloaded again,
+    // where failing would stop every retry on the same file.
     if([fm fileExistsAtPath:dest]) {
-        if(![hashFile(dest) isEqual:expected])fail(@"cached_download_hash_mismatch");return dest;
+        struct stat kept;BOOL usable=!lstat(dest.fileSystemRepresentation,&kept) && S_ISREG(kept.st_mode);
+        if(usable) { int fd=open(dest.fileSystemRepresentation,O_RDONLY|O_NOFOLLOW);usable=fd>=0;if(fd>=0)close(fd); }
+        if(usable && [hashFile(dest) isEqual:expected])return dest;
+        if(![fm removeItemAtPath:dest error:nil])fail(@"cached_download_hash_mismatch");
     }
     space(3ULL<<30);
     NSString *part=[dest stringByAppendingString:@".part"];
@@ -405,19 +413,22 @@ static void prepare(void) {
     if(![fm fileExistsAtPath:join(prefix,@"system.reg")])fail(@"environment_registry_missing");
     configureRetina();
     // The player's network and Korean account choices (portable_network.h, portable_korea.h),
-    // the fonts for Chinese or Korean (portable_region.h), Overwatch's left Option key and
-    // Battle.net's room in memory (portable_network.h), before Battle.net's installer first goes
-    // online and opens Battle.net. The Korean certificate is required when chosen: stop here if
-    // it cannot be installed.
+    // the fonts for Chinese or Korean (portable_region.h), Overwatch's left Option key,
+    // Battle.net's room in memory and the browser links open in (portable_network.h), before
+    // Battle.net's installer first goes online and opens Battle.net. The Korean certificate is
+    // required when chosen: stop here if it cannot be installed.
     configureProxy(engine,proxyDetectionChosen());
     configureOptionKey(engine);
     configureBattleNetMemory(engine);
+    configureBrowserLinks(engine);
     if(koreanSupportChosen() && !configureKoreanCertificate(engine,YES,YES))fail(@"korean_support_failed");
     if(cjkFontsChosen())configureFonts(engine,YES);
     if(!registrySaved(engine,60))fail(@"environment_initialization_busy");
     // An update keeps a resolution chosen in the game since the last launch.
     NSInteger width,height;NSString *source;nextResolution(&width,&height,&source,YES);
     configureDisplay(width,height,[source isEqual:@"game_reset"] ? DisplayModeRemembered : DisplayModeKept);
+    // Saved highlights go to Movies › Overwatch (portable_highlights.h).
+    configureHighlights();
     NSMutableDictionary *s=state();s[@"prepared_runtime"]=s[@"active_runtime"];writeJSON(s,join(root,@"state.json"));
     saveStage(@"environment_ready");ownedPreparation=NO;
 }
@@ -630,8 +641,13 @@ static NSMutableDictionary *battleNetSize(NSMutableDictionary *env, NSString *in
  * With Standard and High-precision, launch --mouse-rate (Mouse › Advanced; REC-63) sets the most
  * deliveries a second: the driver's WINEMAC_MOUSELOOK_RAW_INTERVAL_US, 0 for every report (the
  * default, and anything unknown) or a million over 2000, 1000, 500 or 250. Classic leaves the
- * driver's own 1 ms, its 1.4 timing. */
+ * driver's own 1 ms, its 1.4 timing.
+ * And Faster key response (Settings › Advanced, experimental, off by default; launch --faster-keys 1;
+ * PR #73): WINEMAC_APPKIT_UPDATE_CYCLE=0 has the window driver turn AppKit's display-synchronized
+ * event loop off, so keys stop waiting for the next display refresh, at the cost of handling every
+ * pointer event macOS sends. */
 static NSString *mouseInput=@"standard",*mouseRate=@"all";
+static BOOL fasterKeys=NO;
 static NSString *mouseIntervalMicroseconds(void) {
     return [mouseRate isEqual:@"all"] ? @"0" : [NSString stringWithFormat:@"%d",1000000/mouseRate.intValue];
 }
@@ -644,6 +660,7 @@ static NSMutableDictionary *clientEnvironment(NSMutableDictionary *env, BOOL siz
         env[@"WINEMAC_MOUSELOOK_RAW_INTERVAL_US"]=mouseIntervalMicroseconds();
     }
     if(koreanSupportChosen())env[@"WINEMAC_SCREEN_READBACK"]=@"1";
+    if(fasterKeys)env[@"WINEMAC_APPKIT_UPDATE_CYCLE"]=@"0";
     if(!gameMode)[env removeObjectForKey:@"WINE_GAME_MODE"];
     if(hud)[env addEntriesFromDictionary:@{@"MTL_HUD_ENABLED":@"1",@"MTL_HUD_DISABLE_MENU_BAR":@"1",
         @"MTL_HUD_ELEMENTS":@"device,rosetta,layersize,memory,gamemode,fps,gputime,frameinterval,frameintervalgraph,shaders"}];
@@ -747,13 +764,15 @@ static void deleteShaders(void) {
     event(@"shaders_deleted",nil);
 }
 static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL gameMode, BOOL metalfx, NSString *sharpening,
-                         NSString *logging, NSString *loggingCustom) {
+                         NSString *logging, NSString *loggingCustom, NSString *rendererCustom) {
     // A logging setting Wine wouldn't understand stops the launch before anything starts.
     NSDictionary *logs=loggingEnvironment(logging,loggingCustom);
     requireRosetta();
     NSString *engine=runtime();if(![fm fileExistsAtPath:clientPath()])fail(@"battlenet_not_installed");
     // A Battle.net this launch opens is not the installer's (finish-installer).
     stopInstallerWatch();
+    // Saved highlights go to Movies › Overwatch; a launch restores the link if it went (portable_highlights.h).
+    configureHighlights();
     // Before anything else: an Overwatch started from a Battle.net already open reads it too.
     applyShaderMemory();
     NSArray *existing=sessionProcesses();
@@ -775,6 +794,8 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
         if(play && !game && koreanSupportChosen() && !configureKoreanCertificate(engine,YES,YES))fail(@"korean_support_failed");
         // Overwatch reads its default microphone when it starts; one already running keeps its own.
         if(!game)configureVoiceMicrophone(engine,nil,YES,NO);
+        // The player's renderer lines as they are now, for the Overwatch this starts (REC-85).
+        if(!game)rendererRefresh(rendererCustom);
         // Battle.net already open carries its own environment; this hands over the command only.
         if(play && !game)task(join(engine,@"bin/wine"),client,clientEnvironment(wineEnv(engine),sized,hud,gameMode,NO),@"battlenet-play.log");
         if(!game)task(NSProcessInfo.processInfo.arguments[0],watchArguments(engine,gameMode,state()[@"log_session"]),nil,[NSString stringWithFormat:@"client-monitor-%d.log",getpid()]);
@@ -800,7 +821,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
         event(@"display_fitted",@{@"width":@(gameWidth),@"height":@(gameHeight),@"chosen_width":@(width),@"chosen_height":@(height)});
     NSString *config=[NSString stringWithContentsOfFile:join(engine,@"config/dxmt.conf") encoding:NSUTF8StringEncoding error:nil];
     if(!config)fail(@"runtime_missing");
-    config=sharpeningProfile(canvasProfile(config,gameWidth,gameHeight),sharpness);
+    config=rendererProfile(sharpeningProfile(canvasProfile(config,gameWidth,gameHeight),sharpness),rendererCustom);
     if(![config writeToFile:join(root,@"dxmt.conf") atomically:YES encoding:NSUTF8StringEncoding error:nil])fail(@"settings_write_failed");
     NSString *pipeline=helperPath(@"ow2-pipeline");
     stopAfterSession();
@@ -820,6 +841,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     configureProxy(engine,proxyDetectionChosen());
     configureOptionKey(engine);
     configureBattleNetMemory(engine);
+    configureBrowserLinks(engine);
     if(koreanSupportChosen() && !configureKoreanCertificate(engine,YES,YES))fail(@"korean_support_failed");
     if(cjkFontsChosen())configureFonts(engine,YES);
     configureVoiceMicrophone(engine,nil,YES,YES);
@@ -830,7 +852,7 @@ static void launchClient(BOOL diagnostic, BOOL play, BOOL sized, BOOL hud, BOOL 
     NSMutableDictionary *record=[@{@"logging":loggingName(chosen),@"winedebug":env[@"WINEDEBUG"],@"dxmt_log_level":env[@"DXMT_LOG_LEVEL"],
         @"runtime":state()[@"active_runtime"],@"region":state()[@"battlenet_region"] ?: @"global",@"korean_support":@(koreanSupportChosen()),
         @"game_mode":@(gameMode),@"metalfx":@(metalfx),@"metal_hud":@(hud),@"mouse_input":mouseInput,
-        @"mouse_rate":[mouseInput isEqual:@"classic"] ? @"classic" : mouseRate} mutableCopy];
+        @"mouse_rate":[mouseInput isEqual:@"classic"] ? @"classic" : mouseRate,@"faster_keys":@(fasterKeys)} mutableCopy];
     if([chosen containsObject:@"custom"])record[@"logging_custom"]=loggingCustom;
     NSString *session=startSessionLog(record);
     // Mouse (REC-51): the window driver writes its report beside the session's record, one file per
@@ -881,6 +903,7 @@ static void closeClient(NSString *gameRunning) {
     }
     if(!closed)fail(@"client_close_failed");
 }
+#include "portable_move.h"
 static void uninstall(void) {
     // Everything this app created lives under the owned root: the Wine
     // environment holding Battle.net and Overwatch, runtimes, downloads, logs
@@ -917,6 +940,9 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         for(int i=2;i<argc;i+=2) {if(i+1>=argc || strncmp(argv[i],"--",2))fail(@"invalid_arguments");options[@(argv[i]+2)]=@(argv[i+1]);}
         NSString *defaultRoot=join([fm URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject.path,@"Overwatch2Mac");
         monitorMode=[command isEqual:@"watch"];
+        // Settings › General › Move…, given up on (--discard 1): the part copy beside --to goes. It
+        // needs no data folder, whose own drive may be the one that was unplugged (portable_move.h).
+        if([command isEqual:@"move"] && [options[@"discard"] isEqual:@"1"]) {moveDiscard(options[@"to"]);return 0;}
         ownRoot(options[@"root"] ?: defaultRoot);
         // Only the program Overwatch runs as (gameProgram) inside an installed engine of this data folder.
         NSString *gameApp=[options[@"game-app"] stringByStandardizingPath];
@@ -927,6 +953,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         if(monitorMode && validSessionName(options[@"session"]))monitorSession=options[@"session"];
         if([@[@"classic",@"high-precision"] containsObject:options[@"mouse"] ?: @""])mouseInput=options[@"mouse"];
         if([@[@"2000",@"1000",@"500",@"250"] containsObject:options[@"mouse-rate"] ?: @""])mouseRate=options[@"mouse-rate"];
+        fasterKeys=[options[@"faster-keys"] isEqual:@"1"];
         if([command isEqual:@"preflight"])preflight();
         else if([command isEqual:@"status"]) {
             // The resolution Overwatch opens at next on the main display.
@@ -947,6 +974,8 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         else if([command isEqual:@"keyboard"])configureOptionKey([options[@"apply"] isEqual:@"0"] ? nil : runtime());
         // Support and tests: Battle.net's 4 GB of room (portable_network.h), which setup and launches set.
         else if([command isEqual:@"battlenet-memory"])configureBattleNetMemory([options[@"apply"] isEqual:@"0"] ? nil : runtime());
+        // Support and tests: the clean environment links open the browser with (portable_network.h).
+        else if([command isEqual:@"browser-links"])configureBrowserLinks([options[@"apply"] isEqual:@"0"] ? nil : runtime());
         else if([command isEqual:@"onboarded"]) { NSMutableDictionary *s=state();s[@"onboarding_complete"]=@YES;writeJSON(s,join(root,@"state.json"));event(@"onboarding_complete",nil); }
         else if([command isEqual:@"session"])event(@"session",@{@"processes":sessionProcesses()});
         else if([command isEqual:@"watch"])watchClient();
@@ -1031,11 +1060,12 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         // --metal-hud 1 shows Apple's Metal Performance HUD over Overwatch (Settings); off by default.
         // --game-mode 0 starts Overwatch without macOS Game Mode (the app's switch, off by default from 1.6); on otherwise.
         // --metalfx 1 offers DLSS on MetalFX, with --sharpening off|low|high (Settings); off by default.
+        // --faster-keys 1 turns AppKit's display-synchronized event loop off (Settings › Advanced); off by default.
         // --logging off, or any of crashes,graphics,battlenet,mouse,custom joined with commas, with
         // --logging-custom <WINEDEBUG text> for custom (Settings › Advanced); off by default.
         // --mouse standard|classic|high-precision chooses how the game gets the mouse (Settings › General); standard by default.
-        else if([command isEqual:@"launch"])launchClient(NO,[options[@"play"] isEqual:@"1"],![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off",options[@"logging"] ?: @"off",options[@"logging-custom"]);
-        else if([command isEqual:@"diagnostic-launch"])launchClient(YES,NO,![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off",options[@"logging"] ?: @"off",options[@"logging-custom"]);
+        else if([command isEqual:@"launch"])launchClient(NO,[options[@"play"] isEqual:@"1"],![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off",options[@"logging"] ?: @"off",options[@"logging-custom"],options[@"renderer-custom"]);
+        else if([command isEqual:@"diagnostic-launch"])launchClient(YES,NO,![options[@"battlenet-scale"] isEqual:@"1"],[options[@"metal-hud"] isEqual:@"1"],![options[@"game-mode"] isEqual:@"0"],[options[@"metalfx"] isEqual:@"1"],options[@"sharpening"] ?: @"off",options[@"logging"] ?: @"off",options[@"logging-custom"],nil);
         // Support and tests: what launch --logging (and --logging-custom) gives Wine and the graphics layer,
         // and whether it turns on the mouse report.
         else if([command isEqual:@"logging"])event(@"logging",@{@"setting":loggingName(loggingChoice(options[@"setting"])),
@@ -1055,9 +1085,13 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
             NSString *amount=nil;configureMetalFX(runtime(),[options[@"enabled"] isEqual:@"1"],options[@"sharpening"] ?: @"off",apply,&amount);
         }
         else if([command isEqual:@"close-client"]) {closeClient(@"close_game_before_update");event(@"client_closed",nil);}
+        // Support and tests: points Overwatch's highlights folder at Movies › Overwatch, as setup and launches do.
+        else if([command isEqual:@"highlights"]) {configureHighlights();event(@"highlights_ready",@{@"folder":highlightsFolder()});}
         else if([command isEqual:@"parity-report"])event(@"parity_report",parityReport(runtime(),wineEnv(runtime())));
         else if([command isEqual:@"uninstall"])uninstall();
         else if([command isEqual:@"discard-unused"])discardUnused();
+        // Settings › General › Move…: the whole data folder to --to <folder> (portable_move.h).
+        else if([command isEqual:@"move"])moveInstallation(options[@"to"]);
         else if([command isEqual:@"stop"]) {NSString *engine=runtime();int code=waitTask(task(join(engine,@"bin/wineserver"),@[@"-k"],wineEnv(engine),@"stop.log"),15);if(code!=0 && code!=1)fail(@"stop_failed");event(@"environment_stopped",nil);}
         else fail(@"unknown_command");
         if(lockFD>=0)close(lockFD);return 0;

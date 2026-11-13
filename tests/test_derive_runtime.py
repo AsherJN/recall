@@ -344,6 +344,101 @@ class Audio(unittest.TestCase):
         self.assertFalse((self.artifacts / 'next').exists())
 
 
+class Media(unittest.TestCase):
+    """1.6.4 (REC-53): build_wine_native.py media's five files, from wine-media-foundation.patch: three
+    replace the base's, winemacmf.dll and winemacmf.so are added (the library signed with its siblings'
+    rpaths); later builds of the patch replace all five."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='ow2-media-')
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name)
+        for name, value in (('ARTIFACTS', folder / 'artifacts'), ('NATIVE', folder / 'native')):
+            self.addCleanup(setattr, derive_runtime, name, getattr(derive_runtime, name))
+            setattr(derive_runtime, name, value)
+        source = folder / 'probe.c'
+        source.write_text('int probe(void) { return 1; }\n')
+
+        def library(path, name):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['/usr/bin/clang', '-arch', 'x86_64', '-mmacosx-version-min=26.0', '-dynamiclib', source,
+                            '-install_name', '@rpath/' + name, '-Wl,-rpath,@loader_path',
+                            '-Wl,-rpath,@loader_path/../..', '-o', path], check=True)
+            return path
+        base = folder / 'artifacts/base'
+        library(base / derive_runtime.UNIX_LIBRARY_REFERENCE, 'winedmo.so')
+        for relative in derive_runtime.MEDIA_REPLACED.values():
+            (base / relative).parent.mkdir(parents=True, exist_ok=True)
+            (base / relative).write_bytes(b'MZ base ' + relative.encode())
+        (base / 'bin').mkdir(parents=True)
+        (base / 'bin/wine').write_text('wine')
+        files = {str(f.relative_to(base)): {'sha256': derive_runtime.sha(f)} for f in base.rglob('*') if f.is_file()}
+        (base / 'runtime.json').write_text(json.dumps({'version': 'base', 'minimum_macos': '15.0', 'files': files}))
+        write_archive(base)
+        (folder / 'artifacts/base.tar.json').write_text(json.dumps({'version': 'base', 'signed_native_components': 1}))
+        self.patch = 'patches/wine-media-foundation.patch'
+        self.builds = {}
+        for component, relative in derive_runtime.MEDIA_FILES.items():
+            built = folder / 'native' / component / 'current' / Path(relative).name
+            if relative.endswith('.so'):
+                library(built, 'winemacmf.so')
+            else:
+                built.parent.mkdir(parents=True)
+                built.write_bytes(b'MZ built ' + component.encode())
+            self.builds[component] = built
+            self.record(component, files.get(relative, {}).get('sha256'))
+        self.artifacts = folder / 'artifacts'
+
+    def record(self, component, base_sha256, patch=None):
+        patch = patch or self.patch
+        built = self.builds[component]
+        (built.parent / 'manifest.json').write_text(json.dumps(
+            {'component': component, 'sha256': derive_runtime.sha(built), 'base_sha256': base_sha256,
+             'patch': patch, 'patch_sha256': derive_runtime.sha(derive_runtime.ROOT / patch)}))
+
+    def test_three_files_are_replaced_and_winemacmf_is_added(self):
+        derive_runtime.derive_media('base', 'next', '-')
+        manifest = check_archive(self.artifacts / 'next.tar.gz')
+        next_ = self.artifacts / 'next'
+        self.assertEqual(sorted(manifest['derived_from']['replaced']), sorted(derive_runtime.MEDIA_REPLACED.values()))
+        self.assertEqual(sorted(manifest['derived_from']['added']), sorted(derive_runtime.MEDIA_ADDED.values()))
+        self.assertEqual((next_ / 'bin/wine').read_text(), 'wine')
+        self.assertEqual((next_ / 'share/wine/wine.inf').read_bytes(), b'MZ built wine-inf')
+        library = next_ / derive_runtime.MEDIA_ADDED['winemacmf-unix']
+        self.assertEqual(file_minimum(library)[1], parse_macos('15.0'))
+        subprocess.run(['codesign', '--verify', '--strict', library], check=True)
+        self.assertEqual(oct(library.stat().st_mode & 0o777), '0o755')
+        dll = next_ / derive_runtime.MEDIA_ADDED['winemacmf']
+        self.assertEqual(oct(dll.stat().st_mode & 0o777), '0o644')
+        proof = json.loads((self.artifacts / 'next.tar.json').read_text())
+        self.assertEqual(proof['signed_native_components'], 2)
+        self.assertEqual(sorted(proof['added']), sorted(derive_runtime.MEDIA_ADDED.values()))
+
+        # A later build of the patch replaces the files that changed; the others stay.
+        self.builds['winemacmf'].write_bytes(b'MZ rebuilt winemacmf')
+        self.record('winemacmf', None)
+        derive_runtime.derive_media('next', 'again', '-')
+        again = json.loads((self.artifacts / 'again/runtime.json').read_text())
+        self.assertIn(derive_runtime.MEDIA_ADDED['winemacmf'], again['derived_from']['replaced'])
+        self.assertNotIn(derive_runtime.MEDIA_REPLACED['wine-inf'], again['derived_from']['replaced'])
+        self.assertEqual((self.artifacts / 'again' / derive_runtime.MEDIA_ADDED['winemacmf']).read_bytes(),
+                         b'MZ rebuilt winemacmf')
+
+    def test_a_build_from_another_patch_or_a_stale_build_is_refused(self):
+        self.record('mfh264enc', None, 'patches/wine-audio-devices.patch')
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_media('base', 'next', '-')
+        self.record('mfh264enc', derive_runtime.sha(self.artifacts / 'base' / derive_runtime.MEDIA_REPLACED['mfh264enc']))
+        self.builds['winemacmf'].write_bytes(b'MZ rebuilt without its manifest')
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_media('base', 'next', '-')
+        self.assertFalse((self.artifacts / 'next').exists())
+
+    def test_a_build_against_another_base_is_refused(self):
+        self.record('mfreadwrite', '0' * 64)
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_media('base', 'next', '-')
+
+
 class Services(unittest.TestCase):
     """1.6 (REC-39): services.exe and both sechost.dll builds, from one patch, replace the base's."""
     def setUp(self):
@@ -682,6 +777,42 @@ class GPUErrors(unittest.TestCase):
         (self.base / 'runtime.json').write_text(json.dumps(manifest))
         with self.assertRaises(ValueError):
             derive_runtime.derive_gpu_errors('base', 'next', '-', self.workspace)
+        self.assertFalse((self.artifacts / 'next').exists())
+
+
+class StreamOutput(unittest.TestCase):
+    """1.6.4 (REC-79): the DXMT build with the stream output patch replaces only the base's d3d11.dll
+    and winemetal.so; DXMT's other files, the stand-ins and everything else stay byte-identical, and a
+    build without the patch is refused. The base and build are GPUErrors' (a 1.6.3-shaped runtime)."""
+    def setUp(self):
+        GPUErrors.setUp(self)
+        self.proof['stream_output_patch_sha256'] = derive_runtime.sha(derive_runtime.ROOT / 'patches/dxmt-stream-output.patch')
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+
+    def test_only_d3d11_and_winemetal_are_replaced(self):
+        derive_runtime.derive_stream_output('base', 'next', '-', self.workspace)
+        manifest = check_archive(self.artifacts / 'next.tar.gz')
+        base, next_ = self.base, self.artifacts / 'next'
+        replaced = sorted(derive_runtime.STREAM_OUTPUT_REPLACED)
+        self.assertEqual(replaced, ['lib/wine/x86_64-unix/winemetal.so', 'lib/wine/x86_64-windows/d3d11.dll'])
+        self.assertEqual(sorted(manifest['files']), sorted(json.loads((base / 'runtime.json').read_text())['files']))
+        self.assertEqual(sorted(manifest['derived_from']['replaced']), replaced)
+        patches = manifest['derived_from']['replaced']['lib/wine/x86_64-windows/d3d11.dll']['patches']
+        self.assertEqual(sorted(patches), sorted(derive_runtime.STREAM_OUTPUT_PATCHES))
+        self.assertIn('patches/dxmt-stream-output.patch', patches)
+        self.assertIn('patches/dxmt-gpu-errors.patch', patches)
+        for relative in manifest['files']:
+            if relative not in derive_runtime.STREAM_OUTPUT_REPLACED:
+                self.assertEqual((next_ / relative).read_bytes(), (base / relative).read_bytes(), relative)
+        self.assertEqual((next_ / 'lib/wine/x86_64-windows/d3d11.dll').read_bytes(), b'built x86_64-windows/d3d11.dll')
+        self.assertEqual(file_minimum(next_ / 'lib/wine/x86_64-unix/winemetal.so')[1], parse_macos('15.0'))
+        self.assertEqual(sorted(json.loads((self.artifacts / 'next.tar.json').read_text())['replaced']), replaced)
+
+    def test_a_build_without_the_patch_is_refused(self):
+        del self.proof['stream_output_patch_sha256']
+        (self.workspace / 'dxmt-build-proof.json').write_text(json.dumps(self.proof))
+        with self.assertRaises(ValueError):
+            derive_runtime.derive_stream_output('base', 'next', '-', self.workspace)
         self.assertFalse((self.artifacts / 'next').exists())
 
 

@@ -18,7 +18,8 @@ General (updates, opening Battle.net with the app, the mouse; Battle.net's size 
 display by itself, so there is no switch for it), Display (fullscreen
 resolution, Reset Display Settings), Graphics (MetalFX upscaling and Sharpening, with an
 info button explaining them; the Metal HUD; Game Mode; Shader memory), Audio (microphone; how Bluetooth headphones
-and the sound output are handled) and Advanced (Force Quit, Repair, Logging and Save Logs, proxy detection).
+and the sound output are handled) and Advanced (Force Quit, Repair, Logging and Save Logs, proxy detection,
+custom renderer settings).
 Uninstall stays at the foot of every tab. `HelpSheet.swift` owns Help &
 FAQ, in the same tabs (`LauncherTabs`): FAQ and Troubleshooting (`HelpTopic`: an answer, numbered
 steps, a note and a button to the setting the steps name, one topic open at a time) and Support
@@ -108,12 +109,42 @@ setup screens' note, the Install location menu and Settings › General take the
 `uninstall`, or stays and is offered back; `tests/OtherInstallationTests.swift`). The worker
 enforces the same drive rules for any new data folder and never creates a
 missing parent, so an unplugged drive cannot become a stray internal folder.
+Settings › General › Move… (`MoveInstallation.swift`, REC-82) takes an existing installation
+to another drive or folder with the worker's `move` (`scripts/portable_move.h`): a rename on the
+same volume; otherwise a copy into `<destination>.moving` that is read back and compared with
+the original before it gets the ownership marker and its final name, each synced to the drive
+(`fsync_volume_np`), after which the original goes to the Trash. The installation in use is
+untouched until then, so a cancelled or interrupted move changes nothing, and the next move to
+the same place goes on from the part copy. The app keeps the destination in
+`pendingInstallLocation` until it has taken the new place, so a move it didn't see finish is
+found when the app next works out where it is (`AppModel.followPendingMove` in `route`,
+`InstallLocation.pendingMove`), including once that drive is connected again. A part copy
+given up on while its drive was unplugged is remembered (`abandonedMoveLocation`) and removed
+when the drive is back (`tests/MoveInstallationTests.swift`, and the move tests in
+`tests/test_portable_setup.py`).
 When macOS won't let the worker create, own or write in the data folder (its
 `SetupFailure.folderAccessCodes`, such as `directory_creation_failed` under a locked
 Application Support), the failure screen says so: "Recall can't use its folder", the
 folder to fix (`InstallLocation.folderToFix`: the data folder, or the nearest folder above
 it that exists), Show in Finder, which selects it for File › Get Info, and Help's
 `folder-access` steps. Retry and reinstalling can't get past it (REC-54).
+
+Game components the worker checked at install that are now missing or changed
+(`SetupFailure.damagedFileCodes`, such as `runtime_file_missing`) stop setup at every Try Again
+and survive a reinstall of the app, since both only check the same files again. Security software
+that quarantines Windows files does this (#75, REC-94). The failure screen then says "Game files
+need repair" and makes Repair Game Files its main button (`AppModel.repairFromFailure`: the
+worker's `install-runtime --repair`, then a first setup carries on where it stopped; with
+Battle.net installed it ends on the Play screen, as Settings' Repair does). An error without its
+own message (`SetupFailure.repairOffer == .beside`) offers Repair beside Try Again; one whose
+message gives the fix offers none. `RepairNote` under the buttons says what Repair keeps and names
+security software: `SecuritySoftware` reads the Endpoint Security extensions from
+`systemextensionsctl list` (no administrator needed) and names the app the first came with, with
+the folder to add as an exception and Show in Finder; without one, a line for when it keeps
+happening. Files missing again after a repair since the app opened ("Game files missing again")
+point at the Mac and say so. Support reports carry `security_software` and `repair`. A kept
+download whose hash no longer matches is removed and fetched again, where it used to fail every
+retry (`cached_download_hash_mismatch`).
 
 The mouse (Settings › General › Mouse, `AppModel.MouseInput`, Standard unless the player
 chooses; setup doesn't ask) is one of three, passed as `launch --mouse`. Standard keeps the
@@ -127,31 +158,35 @@ let Recall "receive keystrokes", how to undo it and what macOS shows next. Its T
 (`AppModel.turnOnHighPrecision`) chooses it and shows macOS's prompt the first time, or after
 a no opens System Settings, since macOS asks only once; once Input Monitoring is allowed,
 Settings chooses it at once. Settings shows the three as tiles, High-precision marked
-Recommended while a mouse is connected, and says when Input Monitoring is on. Until it is, the
-tile lit is Standard, which is what the game gets, and the choice waits; its info button
-(`MouseInfo`) explains each and the update rate. The Play
-screen's card (`HighPrecisionCard`, `HighPrecisionInvite`) invites players to it once Overwatch is installed,
-while Battle.net is closed and a mouse is connected (the driver's rule, read from the I/O
-Registry, which needs no permission), and after it is chosen reminds them to finish the
-permission; closing it, or leaving High-precision, hides it for good. IOHID needs Input Monitoring,
-the app's permission as the microphone is (`InputMonitoring.swift`): until it is allowed, the
-panel asks for it while macOS hasn't (Allow…, which also lists Recall under Input Monitoring:
-an app that never asked isn't there to switch on), and otherwise links to the switch in System Settings, and the game's process, which the app
+Recommended while a mouse is connected, and says when Input Monitoring is on. Until it is,
+High-precision stays the tile lit, flagged as waiting for permission, and a strip under the
+tiles says the mouse works as Standard does until then (REC-83); its info button
+(`MouseInfo`) explains each and the update rate. The Play screen's card (`HighPrecisionCard`,
+`HighPrecisionInvite`) invites players to it once Overwatch is installed, while Battle.net is
+closed and a mouse is connected (the driver's rule, read from the I/O Registry, which needs no
+permission), and after it is chosen reminds them to finish the permission; closing it, or
+leaving High-precision, hides it for good. IOHID needs Input Monitoring, the app's permission
+as the microphone is (`InputMonitoring.swift`). An app is listed under Input Monitoring only
+once it has asked, so while macOS hasn't asked, the strip's and the card's button is Allow…,
+which shows macOS's prompt and lists Recall; after an answer it opens the switch in System
+Settings (`AppModel.requestInputMonitoring`, from PR #68). The game's process, which the app
 started, has the app's answer. Without it the driver keeps GCMouse and asks nothing. The
 driver opens only devices with a mouse collection, trackpads excepted, reads only X, Y and
 buttons, passes their input on only while macOS still gives the game mouse input of its own
 (so not while another app has the mouse), and counts GCMouse's input beside it for
 comparison (the Mouse logging preset's `hid_shadow_*`).
 
-Mouse › Advanced (`AppModel.MouseRate`, REC-63), closed until the player opens it, holds Mouse
-updates per second, a row of choices (each choice's tooltip says what it does), which sets at most how many times a second Overwatch gets the mouse's movement: every report (the default
-from 1.6.1), or 2,000, 1,000 (1.6.0's), 500 or 250, passed as `launch --mouse-rate`. The worker
-sets the window driver's `WINEMAC_MOUSELOOK_RAW_INTERVAL_US` (0, or a million over the rate);
-the driver adds up what comes in between, so no movement is lost, only later. Classic keeps
-the driver's own 1 ms, its 1.4 timing, so the worker leaves the variable out there and the
-section says so in place of the row. Closed, the section still names a lowered rate. In the owner's test of October 25 (4,000 Hz,
+With Standard and High-precision, Overwatch gets every mouse report (REC-63): the app passes no
+`launch --mouse-rate`, which the worker takes as all, and sets the window driver's
+`WINEMAC_MOUSELOOK_RAW_INTERVAL_US` to 0. In the owner's test of October 25 (4,000 Hz,
 High-precision) every report brought movement 1.6 ms sooner than 1,000 a second, at no FPS
-cost. The Support Report (`mouse_rate`) and the session record name the choice.
+cost. Classic keeps the driver's own 1 ms, its 1.4 timing, so the worker leaves the variable
+out there. Recall 1.6.1 to 1.6.3 also offered Mouse › Advanced › Mouse updates per second
+(2,000, 1,000, 500 or 250, with the driver adding up what came in between); 1.6.4 removed it
+(REC-83): players took it for their mouse's polling rate, which only the mouse's own software
+sets, and every value below all only made aim later. The worker still accepts `--mouse-rate`.
+The Support Report's `mouse_rate` is now always `all`; the session record's says `all` or
+`classic`.
 
 Overwatch's voice chat uses the app's microphone permission: to macOS the game runs
 as part of the app, and the app and Wine are signed with the microphone entitlement.
@@ -184,7 +219,10 @@ and Battle.net keep typing Option's characters. They also give Battle.net 4 GB o
 instead of 2 GB (`battlenet-memory`, CrossOver's `LargeAddressAware` under
 `AppDefaults\Battle.net.exe`, REC-75): Battle.net is a 32-bit program built without the
 large-address-aware flag, and on some Macs its built-in browser's pages ran out of room and
-Battle.net closed seconds after opening. On Global, the Play screens suggest the Korea
+Battle.net closed seconds after opening. And they have links from Battle.net and Overwatch
+start the Mac's browser with an empty environment (`browser-links`, `Browsers` and `Mailers`
+under Wine's `WineBrowser`, REC-84): Wine otherwise ran `open` with Recall's HOME and USER,
+and a Chrome it started found no keychain and deleted the player's sign-ins. On Global, the Play screens suggest the Korea
 region when the game folder holds Nexon's anti-cheat (`nexon_build`). Support reports name the
 failure code itself; anything that isn't a plain code stays `other_setup_error`.
 
@@ -239,6 +277,41 @@ see into the game's own record of it so it keeps the player's video settings, an
 the sharpening amount to the launch's `dxmt.conf`. With it off, it undoes each of those
 and clears a choice of DLSS. Like the Metal HUD, both settings change only while
 Battle.net is closed.
+
+Settings › Advanced › Custom renderer settings (`RendererSettings.swift`; REC-85, 1.6.4) holds
+the player's own `dxmt.conf` lines, kept in the app's defaults with a switch apart from the text,
+off by default. Recall writes `dxmt.conf` afresh before each launch, so edits to the file itself
+never lasted. The editor checks each line as it's typed against the settings this release's engine
+reads (`RendererEngineSettings.swift`, generated by `scripts/renderer_settings.py` from DXMT at its
+pinned commit with the build's patches; `tests/test_renderer_settings.py` fails when it's stale):
+an unknown name, with the nearest one the engine reads; a value its parser can't read; and the lines
+the worker leaves out. A flag never stops Save. The app passes the lines as `launch
+--renderer-custom`; the worker (`portable_renderer.h`) adds them at the end of the launch's
+`dxmt.conf`, in Overwatch's section after Recall's own lines, so the player's win. It leaves out the
+canvas size and MetalFX sharpening (Recall's resolution and Sharpening own them), section headers
+and anything that isn't `name = value`. A hand-over to a Battle.net already open rewrites them too,
+so a change applies at the next Play. Support reports (schema 7) and Save Logs' summary name the
+lines while the setting is on (`tests/RendererSettingsTests.swift`).
+
+On a Mac with an iPhone chip (the MacBook Neo's A18 Pro; REC-93, 1.6.4) the worker also turns
+display sync on in Recall's part of each launch's `dxmt.conf` (`dxgi.displaySyncEnabled = True`,
+ahead of the player's lines, once per file). DXMT otherwise asks macOS to show frames with vsync
+off. On those Macs alone, macOS keeps the screen's buffers for vsync off in memory it reserves, and
+WindowServer (macOS 26.6.2) can crash choosing among them. The player lands on the Mac's login
+screen while Overwatch runs on with no window. With display sync on, macOS never takes that path.
+Other Macs keep vsync off. The worker reads the chip from `machdep.cpu.brand_string` ("Apple A…";
+tests stand one in with `OW2_SETUP_TEST_CHIP`) and reports `display_sync`. The support report's
+`display_sync` gives the value the last launch's `dxmt.conf` ends on: `on`, `off` or
+`not_launched`. A player's own line in Custom renderer settings still wins, and the editor lists
+Recall's line among Recall's settings.
+
+Settings › Advanced › Faster key response (`AppModel.fasterKeys`; PR #73 by Seglats, 1.6.4) is
+experimental and off by default. On, the app passes `launch --faster-keys 1` and the worker adds
+`WINEMAC_APPKIT_UPDATE_CYCLE=0` to Battle.net's environment, so the Mac driver turns off AppKit's
+display-synchronized event loop: keys stop waiting for the next display refresh (1 to 3 ms sooner at
+144 Hz), and every pointer event macOS sends reaches the driver too, which a very fast mouse makes
+heavy in the game's menus. Like the Metal HUD, it changes only while Battle.net is closed. Support
+reports (schema 7) give `faster_keys`.
 
 The app has no network account, telemetry, player-side Python or runtime build
 step. Authentication and game downloads remain inside official Battle.net.

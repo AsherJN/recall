@@ -61,6 +61,36 @@ import Foundation
         precondition(InstallLocation.title(URL(fileURLWithPath:"/Volumes/Unplugged OW2 Test SSD/Overwatch2Mac")) == "Unplugged OW2 Test SSD")
         precondition(InstallLocation.holdsInstallation(unplugged),"a disconnected installation isn't offered back")
         precondition(InstallLocation.isStandard(InstallLocation.standard) && InstallLocation.problem(for:InstallLocation.standard) == nil)
-        print("PASS: install location accepts APFS and reconnects owned folders; refuses ExFAT, case-sensitive (with Help's way round), read-only and foreign folders; detects disconnected drives; finds the folder to fix")
+        // REC-82: where an installation can move. Never onto itself, into itself, or into a folder
+        // that holds another installation; the drive rules are setup's.
+        let home=base.appendingPathComponent("Home/Overwatch2Mac")
+        try fm.createDirectory(at:home,withIntermediateDirectories:true)
+        try "ow2-native-setup-v1\n".write(to:home.appendingPathComponent(".overwatch-2-mac-owner"),atomically:true,encoding:.utf8)
+        precondition(!InstallLocation.isInstallation(home),"a folder without saved state counts as an installation")
+        try "{}".write(to:home.appendingPathComponent("state.json"),atomically:true,encoding:.utf8)
+        precondition(InstallLocation.isInstallation(home) && !InstallLocation.isInstallation(unplugged))
+        precondition(InstallLocation.moveIssue(from:home,to:home)?.message.contains("already there") == true)
+        precondition(InstallLocation.moveIssue(from:home,to:home.appendingPathComponent("cache/Overwatch2Mac"))?.message.contains("inside the installation") == true)
+        precondition(InstallLocation.moveIssue(from:home,to:root)?.message.contains("already holds an installation") == true,"moved into another installation")
+        precondition(InstallLocation.moveIssue(from:home,to:foreign)?.message.contains("already contains") == true)
+        precondition(InstallLocation.moveIssue(from:home,to:exfat)?.message.contains("APFS or Mac OS Extended") == true)
+        precondition(InstallLocation.moveIssue(from:home,to:sensitive)?.helpTopic == InstallLocation.caseSensitiveTopic)
+        let games=InstallLocation.root(forChosen:apfs.appendingPathComponent("Games"))
+        precondition(InstallLocation.moveIssue(from:home,to:games) == nil,"a free folder on an APFS drive was refused")
+        try fm.createDirectory(at:base.appendingPathComponent("Elsewhere"),withIntermediateDirectories:true)
+        precondition(!InstallLocation.sameVolume(home,games) && InstallLocation.sameVolume(root,games) && InstallLocation.sameVolume(home,base.appendingPathComponent("Elsewhere/Overwatch2Mac")))
+        precondition(InstallLocation.partCopy(for:games).lastPathComponent == "Overwatch2Mac.moving" && (InstallLocation.freeBytes(at:games) ?? 0) > 0)
+        // A move the app didn't see finish: followed only to a whole installation, never to itself.
+        precondition(InstallLocation.pendingMove(current:home,pending:games) == .unfinished && InstallLocation.pendingMove(current:home,pending:home) == .unfinished)
+        // Its drive unplugged: it can't say yet. The app asks for the drive only if the folder in
+        // use holds no installation (and is on a drive that is there to say so).
+        precondition(InstallLocation.pendingMove(current:home,pending:unplugged) == .waiting(showsDrive:false))
+        precondition(InstallLocation.pendingMove(current:base.appendingPathComponent("Elsewhere/Overwatch2Mac"),pending:unplugged) == .waiting(showsDrive:true))
+        precondition(InstallLocation.pendingMove(current:URL(fileURLWithPath:"/Volumes/Another Unplugged SSD/Overwatch2Mac"),pending:unplugged) == .waiting(showsDrive:false))
+        try fm.createDirectory(at:games,withIntermediateDirectories:true)
+        for name in [".overwatch-2-mac-owner","state.json"] { try fm.copyItem(at:home.appendingPathComponent(name),to:games.appendingPathComponent(name)) }
+        precondition(InstallLocation.pendingMove(current:home,pending:games) == .finished(left:home))
+        precondition(InstallLocation.pendingMove(current:unplugged,pending:games) == .finished(left:nil))
+        print("PASS: install location accepts APFS and reconnects owned folders; refuses ExFAT, case-sensitive (with Help's way round), read-only and foreign folders; detects disconnected drives; finds the folder to fix; says where an installation can move")
     }
 }

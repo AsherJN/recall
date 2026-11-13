@@ -7,6 +7,10 @@ Developer/QA tool. Never modifies the installed app, its engine or its caches.
            space), swap in the driver from `build_wine_native.py winemac` with the
            engine's minimum macOS, and verify every other file against the engine's
            manifest.
+             --engine-source DIR  Clone this engine instead (an extracted release archive with
+                                  its runtime.json), e.g. a release the installed app is not on.
+             --driver FILE        Swap in this winemac.so instead of the current build (e.g. a
+                                  release's own driver, as the control of an A/B).
   play     Start Overwatch from that engine as the app's Play button does, against the
            installed Recall environment, with the app's exact environment and launch
            settings (Battle.net's size, Game Mode, MetalFX upscaling and the Metal HUD
@@ -24,6 +28,14 @@ Developer/QA tool. Never modifies the installed app, its engine or its caches.
                               fixed variants (Basso and Glass sounds).
              --raw-switch     The hotkey switches raw input off and on instead (Glass =
                               raw input, Basso = pointer events).
+             --wine-display-log  Wine's display log (win32u WINE_DISPLAY_LOG): every forced
+                              display-device update and display change notice, with its
+                              duration and a native backtrace, under the session.
+             --appkit-update-cycle off  Turn AppKit's display-synchronized event loop off
+                              (WINEMAC_APPKIT_UPDATE_CYCLE=0, Recall's Faster key response, PR #73):
+                              key events stop waiting for the next display refresh. 'default'
+                              (or leaving it out) keeps macOS's loop, as Recall does by default.
+             --engine-source, --driver  As for prepare.
   keep     Runs beside a session (play starts it): saves DXMT's rotated frame log segments,
            which it otherwise drops after about ten minutes of frames.
   report   For each mode or variant and mouse motion: FPS, hitches, raw input's rate, the
@@ -111,11 +123,18 @@ def app_state():
     return json.loads((APP_ROOT / 'state.json').read_text())
 
 
-def installed_engine():
-    """The installed app's active engine and its manifest."""
-    version = app_state().get('active_runtime')
-    engine = APP_ROOT / 'runtimes' / str(version)
-    manifest_path = engine / 'runtime.json'
+def installed_engine(source=None):
+    """The installed app's active engine (or the engine tree `source`) and its manifest."""
+    if source:
+        engine = Path(source).resolve()
+        manifest_path = engine / 'runtime.json'
+        if not manifest_path.is_file():
+            raise SystemExit(f'{engine} has no runtime.json; extract a release engine archive there.')
+        version = json.loads(manifest_path.read_text()).get('version')
+    else:
+        version = app_state().get('active_runtime')
+        engine = APP_ROOT / 'runtimes' / str(version)
+        manifest_path = engine / 'runtime.json'
     if not version or not manifest_path.is_file():
         raise SystemExit('The Recall app has no installed engine; run setup in the app first.')
     manifest = json.loads(manifest_path.read_text())
@@ -130,10 +149,11 @@ def minimum_field(text):
     return int(major) << 16 | int(minor) << 8
 
 
-def prepare():
-    if not DRIVER.is_file():
-        raise SystemExit('Build the driver first: python3 scripts/build_wine_native.py winemac')
-    source, manifest = installed_engine()
+def prepare(engine_source=None, driver=None):
+    driver = Path(driver).resolve() if driver else DRIVER
+    if not driver.is_file():
+        raise SystemExit(f'Build the driver first: python3 scripts/build_wine_native.py winemac ({driver})')
+    source, manifest = installed_engine(engine_source)
     if ENGINE.exists():
         current = ENGINE / 'runtime.json'
         version = json.loads(current.read_text()).get('version') if current.is_file() else None
@@ -159,7 +179,7 @@ def prepare():
             raise SystemExit('Test engine differs from the installed engine: ' + relative)
     target = ENGINE / DRIVER_PATH
     staged = target.with_name(target.name + '.new')
-    shutil.copy2(DRIVER, staged)
+    shutil.copy2(driver, staged)
     # Keep the engine's minimum macOS (derive_runtime.py does the same for a release).
     derive_runtime.restamp(staged, minimum_field(manifest.get('minimum_macos', '26.0')))
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(staged)], check=True,
@@ -169,7 +189,8 @@ def prepare():
     else:
         staged.replace(target)
     return {'engine': str(ENGINE), 'engine_version': manifest['version'], 'driver_sha256': sha(target),
-            'build_sha256': sha(DRIVER), 'shipped_driver_sha256': manifest['files'][DRIVER_PATH]['sha256']}
+            'build_sha256': sha(driver), 'driver_source': str(driver),
+            'shipped_driver_sha256': manifest['files'][DRIVER_PATH]['sha256']}
 
 
 def processes():
@@ -208,16 +229,17 @@ def preflight(stop_running):
 
 
 def app_settings():
-    """The app's launch settings (AppModel.swift: --metal-hud, --metalfx, hidden gameMode)."""
+    """The app's launch settings (AppModel.swift: --metal-hud, --metalfx, gameMode, --faster-keys)."""
     def flag(key, default):
         value = subprocess.run(['/usr/bin/defaults', 'read', APP_DOMAIN, key], capture_output=True, text=True)
         return value.stdout.strip() == '1' if value.returncode == 0 else default
     return {'metal_hud': flag('metalHUD', False), 'metalfx': flag('metalFXUpscaling', False),
-            'game_mode': flag('gameMode', True), 'korean_support': bool(app_state().get('korean_support'))}
+            'game_mode': flag('gameMode', True), 'korean_support': bool(app_state().get('korean_support')),
+            'faster_keys': flag('fasterKeys', False)}
 
 
 def environment(session, settings, variant=None, switch=None, raw=True, raw_interval_us=None, blind=None,
-                trace_rawinput=False, display_log=False):
+                trace_rawinput=False, display_log=False, wine_display_log=False, appkit_update_cycle=None):
     """The app's environment (portable_setup.m wineEnv and clientEnvironment) with the test
     engine, plus diagnostics."""
     root = APP_ROOT
@@ -235,6 +257,8 @@ def environment(session, settings, variant=None, switch=None, raw=True, raw_inte
         env.update(contract['metalfx_environment'])
     if settings['korean_support']:
         env['WINEMAC_SCREEN_READBACK'] = '1'
+    if settings.get('faster_keys'):
+        env['WINEMAC_APPKIT_UPDATE_CYCLE'] = '0'
     if not settings['game_mode']:
         env.pop('WINE_GAME_MODE', None)
     if settings['metal_hud']:
@@ -263,6 +287,15 @@ def environment(session, settings, variant=None, switch=None, raw=True, raw_inte
         # the mouse moves: on macOS 26 a hidden cursor can tie presentation to the display refresh
         # while the mouse moves (upstream Wine MR !11880).
         env['DXMT_DISPLAY_LOG'] = str(session / 'display')
+    if wine_display_log:
+        # win32u's display log (wine-win32u-display-log.patch): <prefix>.<pid> per process.
+        env['WINE_DISPLAY_LOG'] = str(session / 'wine-display')
+    # An A/B arm overrides the app's Faster key response: the driver keeps AppKit's
+    # display-synchronized event loop unless this is 0.
+    if appkit_update_cycle == 'off':
+        env['WINEMAC_APPKIT_UPDATE_CYCLE'] = '0'
+    elif appkit_update_cycle == 'default':
+        env.pop('WINEMAC_APPKIT_UPDATE_CYCLE', None)
     return env
 
 
@@ -280,7 +313,7 @@ def blind_sequence(variants, rng=random):
 
 def play(args):
     preflight(args.stop_running)
-    runtime = prepare()
+    runtime = prepare(args.engine_source, args.driver)
     settings = app_settings()
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     session = LOGS / stamp
@@ -295,11 +328,12 @@ def play(args):
                  'warmup_s': args.warmup_seconds}
     switch = 'timing' if args.timing_switch else '1' if args.raw_switch else None
     env = environment(session, settings, args.variant, switch, not args.raw_off, args.raw_interval_us, blind,
-                      args.trace_rawinput, args.display_log)
+                      args.trace_rawinput, args.display_log, args.wine_display_log, args.appkit_update_cycle)
     record = dict(runtime, started=stamp, app_settings=settings, variant=args.variant or players_variant(),
                   switch=env.get('WINEMAC_MOUSELOOK_SWITCH'), raw_input=not args.raw_off,
                   raw_interval_us=args.raw_interval_us, blind=blind, winedebug=env['WINEDEBUG'],
-                  display_log=args.display_log,
+                  display_log=args.display_log, wine_display_log=args.wine_display_log,
+                  appkit_update_cycle=args.appkit_update_cycle,
                   contract_profile=candidate_contract.load()['profile'])
     (session / 'session.json').write_text(json.dumps(record, indent=2) + '\n')
     with (session / 'battlenet.log').open('w') as log:
@@ -890,6 +924,28 @@ thread took to answer a request.</p>
     return path
 
 
+def key_summary(lines):
+    """How long key events took from the keyboard to the driver's main thread (key_delays_ms: each
+    second's first 16, repeats left out), over the seconds the game was frontmost, and whether
+    AppKit's display-synchronized event loop was off."""
+    lines = [line for line in lines if line.get('app_active') and 'key_events' in line]
+    delays = sorted(delay for line in lines for delay in line.get('key_delays_ms', ()))
+    events = sum(line['key_events'] for line in lines)
+    if not lines:
+        return None
+    return {'appkit_update_cycle': sorted({line.get('appkit_update_cycle', 'unknown') for line in lines}),
+            'key_events': events, 'timed_one_by_one': len(delays),
+            'delay_ms_median': round(statistics.median(delays), 2) if delays else None,
+            'delay_ms_95th_percentile': round(percentile(delays, 0.95), 2) if delays else None,
+            'delay_ms_mean': round(sum(line['key_delay_ms_avg'] * line['key_events'] for line in lines) / events, 2)
+            if events else None,
+            'delay_ms_max': round(max((line['key_delay_ms_max'] for line in lines), default=0), 2),
+            # AppKit's pointer events a second while the mouse moved: about the display's refresh rate
+            # with the display-synchronized event loop, the mouse's own rate without it.
+            'mouse_events_per_second_moving': round(statistics.median(
+                [line['mac_moves'] for line in lines if line['mac_moves'] >= MOVING] or [0]))}
+
+
 def report(args):
     session = Path(args.session) if args.session else max(LOGS.glob('2*'), default=None)
     if not session or not session.is_dir():
@@ -936,6 +992,9 @@ def report(args):
                               'delivered_x': sum(line.get('moved_x', 0) for line in lines),
                               'delivered_y': sum(line.get('moved_y', 0) for line in lines)}
     result['raw_mice'] = max((line.get('raw_mice', 0) for line in lines), default=0)
+    keys = key_summary(lines)
+    if keys:
+        result['keys'] = keys
     result['game_behaviour'] = seen
     if blind and any(line.get('stretch') for line in lines):
         result['blind'] = blind_report(lines, frames, marks, blind)
@@ -964,6 +1023,12 @@ def report(args):
     for mode in sorted({mode for mode, _ in groups}):
         if f'{mode}_fps_drop_while_moving_percent' in result:
             print(f'{mode}: FPS drop while moving {result[f"{mode}_fps_drop_while_moving_percent"]}%')
+    if result.get('keys'):
+        k = result['keys']
+        print(f'Keys: AppKit event loop {"/".join(k["appkit_update_cycle"])}; {k["key_events"]} key events, keyboard to '
+              f'driver median {k["delay_ms_median"]} ms, 95th percentile {k["delay_ms_95th_percentile"]} ms, mean '
+              f'{k["delay_ms_mean"]} ms, longest {k["delay_ms_max"]} ms; pointer events while the mouse moved '
+              f'{k["mouse_events_per_second_moving"]}/s.')
     if 'blind' in result:
         print_blind(result)
         page = write_html(session, result, lines, frames, marks)
@@ -975,8 +1040,11 @@ def report(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
-    commands.add_parser('prepare', help='Create or refresh the test engine')
+    preparer = commands.add_parser('prepare', help='Create or refresh the test engine')
     launch = commands.add_parser('play', help='Start a play-test session')
+    for sub in (preparer, launch):
+        sub.add_argument('--engine-source', help="Clone this engine tree instead of the installed app's")
+        sub.add_argument('--driver', help='Swap in this winemac.so instead of the current build')
     launch.add_argument('--stop-running', action='store_true', help='Close a running Battle.net session first')
     switches = launch.add_mutually_exclusive_group()
     switches.add_argument('--blind', action='store_true',
@@ -999,6 +1067,10 @@ def main():
                         help="Log Wine's raw input calls: which thread reads the mouse, how and how often")
     launch.add_argument('--display-log', action='store_true',
                         help='Log when each frame was requested and when it reached the screen')
+    launch.add_argument('--wine-display-log', action='store_true',
+                        help="Log Wine's display-device updates and display change notices")
+    launch.add_argument('--appkit-update-cycle', choices=('off', 'default'), default=None,
+                        help="'off' turns AppKit's display-synchronized event loop off (Faster key response)")
     keeper = commands.add_parser('keep', help="Save a session's rotated frame log segments until it ends")
     keeper.add_argument('session')
     keeper.add_argument('--hours', type=float, default=4)
@@ -1006,7 +1078,7 @@ def main():
     summary_parser.add_argument('session', nargs='?', help='Session directory (default: latest)')
     args = parser.parse_args()
     if args.command == 'prepare':
-        print(json.dumps(prepare(), indent=2))
+        print(json.dumps(prepare(args.engine_source, args.driver), indent=2))
     elif args.command == 'play':
         play(args)
     elif args.command == 'keep':

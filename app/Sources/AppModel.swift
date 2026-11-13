@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 @MainActor @Observable
 final class AppModel {
     enum Screen: String, CaseIterable { case welcome, moveApp, checking, battleNet, readyToInstall, preparing, launching, installer, ready, running, driveMissing, failure }
-    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate, macOSShaders, china, korea, changeRegion, otherInstallation, highPrecision; var id: String { rawValue } }
+    enum Sheet: String, Identifiable { case settings, help, about, uninstall, update, whatsNew, shaderUpdate, macOSShaders, china, korea, changeRegion, otherInstallation, moveInstallation, highPrecision, highlights, highlightMark; var id: String { rawValue } }
     enum UninstallState: Equatable { case idle, working, done(appRemoved: Bool), failed(String) }
     enum UpdateState: Equatable { case idle, checking, upToDate, available(AvailableUpdate), downloading(Double), installing, failed(String) }
     var uninstall: UninstallState = .idle
@@ -27,6 +27,35 @@ final class AppModel {
     /// Battle.net is closed (see running).
     var metalHUD=UserDefaults.standard.bool(forKey:"metalHUD") {
         didSet { UserDefaults.standard.set(metalHUD,forKey:"metalHUD") }
+    }
+    /// Overwatch's saved highlights in Movies › Overwatch (Highlights.swift; REC-53, REC-96).
+    let highlights=HighlightLibrary()
+    /// The Recall mark in the player's saved MP4 highlights (REC-97). Off until the player says yes
+    /// to the one question (HighlightMarkSheet); Settings › General changes it. While it's on, Recall
+    /// marks each MP4 Overwatch saves (HighlightLibrary.markSaved).
+    var highlightMark=UserDefaults.standard.bool(forKey:"highlightMark") {
+        didSet {
+            UserDefaults.standard.set(highlightMark,forKey:"highlightMark")
+            if highlightMark != oldValue,!isPreview { highlights.markSaved(highlightMark) }
+        }
+    }
+    /// Whether the player has answered the mark's question.
+    var highlightMarkAsked=UserDefaults.standard.bool(forKey:"highlightMarkAsked") {
+        didSet { UserDefaults.standard.set(highlightMarkAsked,forKey:"highlightMarkAsked") }
+    }
+    /// Asked once, the first time the player has a highlight the mark can go on (an MP4).
+    var shouldAskAboutMark:Bool { !highlightMarkAsked && highlights.clips.contains(where:\.playable) }
+    func answerMark(_ on:Bool) {
+        highlightMark=on
+        highlightMarkAsked=true
+    }
+    func openHighlights() { sheet = .highlights }
+    /// Back in Recall with a first saved highlight: the question, once, on the home or running
+    /// screen and never over another pop-up.
+    func checkHighlightMark() {
+        highlights.reload()
+        guard sheet == nil,screen == .ready || screen == .running,shouldAskAboutMark else { return }
+        sheet = .highlightMark
     }
     /// macOS Game Mode for Overwatch (Settings › Graphics; worker: launch --game-mode). On, Overwatch
     /// runs as the engine's game app, which macOS treats as a game and gives priority while it fills
@@ -57,19 +86,19 @@ final class AppModel {
             if oldValue == .highPrecision && mouseInput != .highPrecision { highPrecisionInviteClosed=true }
         }
     }
-    /// At most how many times a second Overwatch is sent the mouse's movement (Settings › General ›
-    /// Mouse › Advanced; worker: launch --mouse-rate; REC-63). The window driver adds up what comes in
-    /// between, so none is lost, only later. Every report unless the player lowers it (owner, October
-    /// 25: at 4,000 Hz it brought movement 1.6 ms sooner than 1.6.0's 1,000 a second, at no FPS cost).
-    /// Standard and High-precision only: Classic keeps 1.4's timing.
-    enum MouseRate:String, CaseIterable {
-        case all, perSecond2000="2000", perSecond1000="1000", perSecond500="500", perSecond250="250"
-        /// The slider's stops, fewest first; All at the right end, as Shader memory's.
-        static var stops:[MouseRate] { allCases.reversed() }
-        var perSecond:Int? { Int(rawValue) }
-    }
-    var mouseRate=MouseRate(rawValue:UserDefaults.standard.string(forKey:"mouseRate") ?? "") ?? .all {
-        didSet { UserDefaults.standard.set(mouseRate.rawValue,forKey:"mouseRate") }
+    // Standard and High-precision send Overwatch every mouse report: launch passes no --mouse-rate,
+    // which the worker takes as all (REC-63; owner, October 25: at 4,000 Hz, movement 1.6 ms sooner
+    // than 1,000 a second, at no FPS cost). 1.6.1-1.6.3 let players lower it under Mouse › Advanced;
+    // 1.6.4 removed that (REC-83; owner, November 10): players took it for their mouse's polling rate,
+    // and every value below All only made aim later. The old "mouseRate" default is no longer read.
+    /// Faster key response (Settings › Advanced, experimental; worker: launch --faster-keys; PR #73,
+    /// @Seglats): the window driver turns off AppKit's display-synchronized event loop, so keys stop
+    /// waiting for the next display refresh. Off by default (owner, November 12): keys arrived 1-3 ms
+    /// sooner at 144 Hz, which the owner couldn't feel in a blind test, and every pointer event macOS
+    /// sends then reaches the driver too, which made a 4,000 Hz mouse hitch the menus slightly. Like
+    /// the HUD, Battle.net carries it from when it opens.
+    var fasterKeys=UserDefaults.standard.bool(forKey:"fasterKeys") {
+        didSet { UserDefaults.standard.set(fasterKeys,forKey:"fasterKeys") }
     }
     /// MetalFX upscaling (worker: launch --metalfx, portable_metalfx.h): Overwatch offers NVIDIA
     /// DLSS in its Video settings, and Recall runs it on Apple's MetalFX. Off by default. Like the
@@ -99,6 +128,21 @@ final class AppModel {
         didSet { UserDefaults.standard.set(loggingCustom,forKey:"loggingCustom") }
     }
     var loggingSince:Date? { UserDefaults.standard.object(forKey:"loggingSince") as? Date }
+    /// Settings › Advanced › Custom renderer settings (REC-85; RendererSettings; worker: launch
+    /// --renderer-custom). Off unless the player turns it on; the lines are kept while it's off, so
+    /// turning it off rules them out without losing them. A launch writes them into dxmt.conf, also
+    /// for a Battle.net already open, so a change applies the next time the player presses Play.
+    var rendererCustomOn=UserDefaults.standard.bool(forKey:"rendererCustomOn") {
+        didSet { UserDefaults.standard.set(rendererCustomOn,forKey:"rendererCustomOn") }
+    }
+    var rendererCustom=UserDefaults.standard.string(forKey:"rendererCustom") ?? "" {
+        didSet { UserDefaults.standard.set(rendererCustom,forKey:"rendererCustom") }
+    }
+    /// The lines a launch passes on: none with the setting off.
+    var rendererLines:[String] { rendererCustomOn ? RendererSettings.used(rendererCustom) : [] }
+    func saveRendererCustom(on:Bool, text:String) { rendererCustom=text;rendererCustomOn=on }
+    /// What Recall itself gave the last launch, for the editor's Show Recall's settings.
+    var rendererRecallsLines:[String] { RendererSettings.recallsLines(root:root,runtime:state["active_runtime"] as? String) }
     /// What the open Battle.net logs, as its session's record says (portable_logs.h): it keeps the
     /// setting it opened with. Read with the session (syncSession, checkRunning).
     var sessionLogging:LoggingSetting?
@@ -156,7 +200,9 @@ final class AppModel {
     }
     /// macOS's prompt while it hasn't been answered (which also lists Recall under Input Monitoring;
     /// an app that never asked isn't there to switch on), otherwise System Settings at Input Monitoring.
+    /// From Turn On, the Settings strip and the home screen's card (REC-83). A preview asks nothing.
     func requestInputMonitoring() {
+        guard !isPreview else { return }
         switch InputMonitoring.access {
         case .undecided: InputMonitoring.ask()
         case .denied: InputMonitoring.ask();NSWorkspace.shared.open(InputMonitoring.privacySettings)
@@ -313,6 +359,10 @@ final class AppModel {
         case .changeRegion:
             if regionChange == .working { return false }
             regionChange = .idle
+        case .moveInstallation:
+            // A move under way has its own Cancel, and one that failed asks what to do with it.
+            if move.staysOpen { return false }
+            move = .idle
         default: break
         }
         sheet=nil
@@ -445,7 +495,9 @@ final class AppModel {
     /// The version offerUpdate already showed this launch.
     private var offeredUpdate: String?
     var screen: Screen = .welcome
-    var sheet: Sheet?
+    /// A move under way, or one that failed and asks what to do, keeps its sheet: a menu command
+    /// (Settings, About, Uninstall…) can't put another in its place (REC-82).
+    var sheet: Sheet? { didSet { if move.staysOpen && sheet != .moveInstallation { sheet = .moveInstallation } } }
     var busy=false { didSet { if oldValue && !busy { offerUpdate() } } }
     var stage=""
     var failure=SetupFailure(code:"")
@@ -518,6 +570,13 @@ final class AppModel {
               InstallLocation.holdsInstallation(otherRoot) else { return nil }
         return otherRoot
     }
+    /// REC-82: Settings › General › Move… (MoveInstallation.swift). The move as the sheet shows it,
+    /// how far its copy has come, and Cancel pressed while the worker winds down.
+    var move=InstallMove.idle
+    var moveProgress=MoveProgress()
+    var moveCancelling=false
+    /// The folder in use before the app began waiting for the drive a move went to (followPendingMove).
+    var rootBeforePending: URL?
     /// Its note shows where setup waits for the player, not while a step runs.
     var offersOtherInstallation: Bool { otherInstallation != nil && [.welcome,.battleNet,.readyToInstall,.failure].contains(screen) }
     var driveName: String { InstallLocation.driveName(root) }
@@ -547,6 +606,7 @@ final class AppModel {
             case "download_hash_mismatch", "client_installer_hash_mismatch", "cached_download_hash_mismatch": return L("Download verification failed")
             case "run_from_installed_app", "app_move_failed", "app_name_taken": return L("Move {0} to Applications",Brand.name)
             case _ where failure.isFolderAccess: return L("{0} can’t use its folder",Brand.name)
+            case _ where failure.filesDamaged: return filesMissingAgain ? L("Game files missing again") : L("Game files need repair")
             default: return L("Setup needs attention")
             }
         }
@@ -623,6 +683,8 @@ final class AppModel {
                 failure=paused ? SetupFailure(code:"cancelled") : (error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error"))
                 screen = failure.code == "install_location_unavailable" ? .driveMissing : .failure
                 if sheet != nil { notice=failure.message }
+                // REC-94: Repair's note names security software this Mac has, checked afresh.
+                if screen == .failure && failure.repairOffer != .none { checkSecuritySoftware() }
             }
         }
     }
@@ -633,9 +695,11 @@ final class AppModel {
         if release?.distribution == "private-preview",let i=CommandLine.arguments.firstIndex(of:"--preview-state"),CommandLine.arguments.indices.contains(i+1),let preview=Screen(rawValue:CommandLine.arguments[i+1]) {
             isPreview=true;previewScreen(preview);return
         }
+        // With the Recall mark on, Overwatch's saved MP4s get it (REC-97); 1.6.4 RC1's copies go.
+        highlights.markSaved(highlightMark)
         // Plugging the drive back in retries without another click.
         mountObserver=NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didMountNotification,object:nil,queue:.main) { [weak self] _ in
-            Task { @MainActor in if self?.screen == .driveMissing { self?.recheck() } }
+            Task { @MainActor in if self?.screen == .driveMissing { self?.recheck() } else { self?.driveConnected() } }
         }
         // An app the busy note names has quit (its Quit button, or the player elsewhere).
         quitObserver=NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didTerminateApplicationNotification,object:nil,queue:.main) { [weak self] note in
@@ -721,7 +785,10 @@ final class AppModel {
         }
     }
     private func route(autoLaunch:Bool) async throws {
+        // REC-82: a move the app didn't see finish, and a part copy still to remove.
+        followPendingMove()
         guard InstallLocation.isAvailable(root) else { screen = .driveMissing;return }
+        await discardRememberedPartCopy()
         try await refresh()
         let updated=isNewVersion(existing:clientInstalled || state["onboarding_complete"] as? Bool == true)
         if !updated { markVersionSeen() }
@@ -851,7 +918,7 @@ final class AppModel {
     func recheck() {
         perform { self.screen = .checking;try await self.route(autoLaunch:false) }
     }
-    private func setRoot(_ value:URL) {
+    func setRoot(_ value:URL) {
         root=value;service.root=value
         if otherRoot?.standardizedFileURL.path == value.standardizedFileURL.path { otherRoot=nil }
         UserDefaults.standard.removeObject(forKey:"privatePreviewDataRoot")
@@ -893,6 +960,8 @@ final class AppModel {
     /// away (otherInstallation): a player who pressed this by mistake goes back without
     /// setting up again (REC-44).
     func useThisMac() {
+        // No longer waiting for the drive a move went to: it stays one choice away like any other.
+        UserDefaults.standard.removeObject(forKey:InstallLocation.pendingKey);rootBeforePending=nil
         otherRoot=root
         setRoot(InstallLocation.standard);notice="";recheck()
     }
@@ -945,6 +1014,12 @@ final class AppModel {
         if let i=args.firstIndex(of:"--preview-high-precision"),args.indices.contains(i+1) { previewInvite=HighPrecisionInvite(rawValue:args[i+1]) }
         // The failure screen for another code, e.g. directory_creation_failed (REC-54).
         if let i=args.firstIndex(of:"--preview-failure"),args.indices.contains(i+1) { failure=SetupFailure(code:args[i+1]) }
+        // REC-94: Repair's note with security software found (names joined by commas, or "none"),
+        // and the failure screen after a repair this session.
+        if let i=args.firstIndex(of:"--preview-security"),args.indices.contains(i+1) {
+            securityCheck = .found(args[i+1] == "none" ? [] : args[i+1].split(separator:",").map(String.init))
+        }
+        if args.contains("--preview-repaired") { repairedThisSession=true }
         // The first-matches tip at a number of learned shaders (FirstMatchTip).
         if let i=args.firstIndex(of:"--preview-learned"),args.indices.contains(i+1),let learned=Int(args[i+1]) { learnedShaders=learned > 0 ? learned : nil }
         if let i=args.firstIndex(of:"--preview-tip"),args.indices.contains(i+1),let hidden=FirstMatchTip.Hidden(rawValue:args[i+1]) { stutterTipHidden=hidden }
@@ -956,6 +1031,11 @@ final class AppModel {
         if value == .battleNet { clientInstalled=false;gameInstalled=false }
         preparingAfterMatch=args.contains("--preview-after-match") || args.contains("--preview-shader-update") || args.contains("--preview-optimizing")
         updatingShaderCache=args.contains("--preview-shader-update") || args.contains("--preview-optimizing") || args.contains("--preview-rebuilding")
+        // A pop-up open over the screen, e.g. highlights or highlightMark (REC-96, REC-97).
+        if let i=args.firstIndex(of:"--preview-sheet"),args.indices.contains(i+1),let open=Sheet(rawValue:args[i+1]) {
+            if open == .highlightMark { highlights.reload() }
+            DispatchQueue.main.async { self.sheet=open }
+        }
         // Settings › Graphics › Rebuild Shaders under way.
         rebuildingShaders=args.contains("--preview-rebuilding")
         if rebuildingShaders { preparingAfterMatch=true }
@@ -996,6 +1076,8 @@ final class AppModel {
             if preview == .update {
                 update = .available(AvailableUpdate(version:"1.0.1",notes:[L("Fixes an issue that could stop Battle.net from opening after a Blizzard update."),L("Smoother first matches after installing.")],page:Brand.releases,download:Brand.releases,size:242_000_000,sha256:"",checksum:nil))
             }
+            // The move sheet at a point in a move (MoveInstallation.swift).
+            if preview == .moveInstallation { previewMove(args.firstIndex(of:"--preview-move").flatMap { args.indices.contains($0+1) ? args[$0+1] : nil } ?? "ready") }
             DispatchQueue.main.async { self.sheet=preview }
         }
     }
@@ -1170,21 +1252,64 @@ final class AppModel {
     }
     /// Reinstalls the game components from this app and refreshes the Windows
     /// environment. Overwatch, its settings and the Battle.net sign-in are kept.
-    func repair() {
-        perform {
-            guard let release=self.release else { throw SetupFailure(code:"release_unavailable") }
-            let processes=try await self.service.run("session").last?["processes"] as? [[String:Any]] ?? []
-            guard processes.isEmpty else { throw SetupFailure(code:"close_game_before_maintenance") }
-            self.sheet=nil;self.repairing=true;self.screen = .preparing
-            defer { self.repairing=false }
-            _ = try await self.service.run("install-runtime",["--archive",self.resources.appendingPathComponent(release.runtimeArchive).path,"--sha256",release.runtimeSHA256,"--version",release.runtimeVersion,"--repair","1"],event:self.receive)
-            _ = try await self.service.run("prepare",event:self.receive)
-            try await self.refresh()
-            self.screen = .ready
-            self.notice=L("Repair finished. Overwatch, its settings and your Battle.net sign-in were kept.")
+    func repair() { perform { try await self.repairSteps(fromFailure:false) } }
+    /// REC-94: Repair Game Files on the failure screen. A first setup then carries on where it
+    /// stopped, as Try Again would (setup prepares the environment again); with Battle.net
+    /// installed it ends on the Play screen, as Settings' Repair does.
+    func repairFromFailure() { perform { try await self.repairSteps(fromFailure:true) } }
+    private func repairSteps(fromFailure:Bool) async throws {
+        guard let release else { throw SetupFailure(code:"release_unavailable") }
+        let processes=try await service.run("session").last?["processes"] as? [[String:Any]] ?? []
+        guard processes.isEmpty else { throw SetupFailure(code:"close_game_before_maintenance") }
+        sheet=nil;repairing=true;repairedThisSession=true;screen = .preparing
+        defer { repairing=false }
+        lastRepair=["from":fromFailure ? "failure_screen" : "settings","result":"running"]
+        do {
+            _ = try await service.run("install-runtime",["--archive",resources.appendingPathComponent(release.runtimeArchive).path,"--sha256",release.runtimeSHA256,"--version",release.runtimeVersion,"--repair","1"],event:receive)
+            if fromFailure && !clientInstalled {
+                lastRepair["result"]="repaired";repairing=false
+                try await setupSteps()
+                return
+            }
+            _ = try await service.run("prepare",event:receive)
+            try await refresh()
+        } catch {
+            if lastRepair["result"] == "running" { lastRepair["result"]=(error as? SetupFailure)?.reportCode ?? "unexpected_setup_error" }
+            throw error
         }
+        lastRepair["result"]="repaired"
+        screen = .ready
+        notice=L("Repair finished. Overwatch, its settings and your Battle.net sign-in were kept.")
     }
     var repairing=false
+    /// REC-94: a repair ran since the app opened. Files missing again after one point to something
+    /// on the Mac removing them, so the failure screen says so more firmly.
+    var repairedThisSession=false
+    /// How the last repair went, for the support report: where it started and "repaired", "running"
+    /// or the code it stopped on.
+    var lastRepair:[String:String]=[:]
+    var filesMissingAgain:Bool { failure.filesDamaged && repairedThisSession }
+    var securityCheck=SecuritySoftware.Check.notChecked
+    private var checkingSecurity=false
+    func checkSecuritySoftware() {
+        guard !isPreview,!checkingSecurity else { return }
+        checkingSecurity=true
+        Task { securityCheck=await SecuritySoftware.check();checkingSecurity=false }
+    }
+    /// The failure screen's message: after a repair, files missing again say so.
+    var failureMessage:String { filesMissingAgain ? L("{0} repaired its files, but some are missing or damaged again.",Brand.name) : failure.message }
+    /// Repair's note about security software: the app this Mac has (the first found; the support
+    /// report lists them all), or a line for when it keeps happening.
+    var securityNote:String {
+        guard let app=securityCheck.names.first else {
+            return filesMissingAgain ? L("Something on this Mac is likely removing them. If you use security software, add this folder to its exceptions, then repair again.")
+                                     : L("If this keeps happening, security software may be removing {0}’s files.",Brand.name)
+        }
+        return filesMissingAgain ? L("This is likely {0}. Add this folder to its exceptions, then repair again.",app)
+                                 : L("{0} can remove files {1} needs. Add this folder to its exceptions so it doesn’t happen again.",app,Brand.name)
+    }
+    /// The note asks for an exception, so it shows the folder and Show in Finder.
+    var repairNoteNamesFolder:Bool { filesMissingAgain || !securityCheck.names.isEmpty }
     /// The installer watch's next step, and Continue's. A Battle.net still open here is the
     /// installer's (no one has signed in to it), so it's closed, and Battle.net opens with a launch.
     func finishInstaller() {
@@ -1213,8 +1338,9 @@ final class AppModel {
         do {
             launchEvents=try await service.run("launch",(play ? ["--play","1"] : [])+["--metal-hud",metalHUD ? "1" : "0",
                 "--metalfx",metalFXUpscaling ? "1" : "0","--sharpening",metalFXSharpening.rawValue,"--game-mode",gameMode ? "1" : "0",
-                "--mouse",mouseInput.rawValue,"--mouse-rate",mouseRate.rawValue] +
-                logging.launchArguments(custom:loggingCustom),event:receive)
+                "--mouse",mouseInput.rawValue,"--faster-keys",fasterKeys ? "1" : "0"] +
+                logging.launchArguments(custom:loggingCustom) +
+                (rendererLines.isEmpty ? [] : ["--renderer-custom",rendererLines.joined(separator:"\n")]),event:receive)
         } catch {
             guard stopLaunchWait else { throw error }
             canCancel=false;screen = .ready;notice=L("Cancelled. Battle.net wasn’t opened.")
@@ -1514,6 +1640,8 @@ final class AppModel {
     /// Help, on the tab that fits: Troubleshooting after a failed step, otherwise the
     /// questions; Report a Problem… asks for Support. The report is made fresh.
     func openHelp(_ tab:HelpTab?=nil, topic:String?=nil) {
+        // The support report names security software (REC-94); Copy and Save make it again.
+        if securityCheck == .notChecked { checkSecuritySoftware() }
         makeReport()
         helpTab=tab ?? (screen == .failure ? .troubleshooting : .questions)
         helpTopic=topic
@@ -1589,13 +1717,22 @@ final class AppModel {
         // Schema 4 (1.5.0): other_apps, what the busy note saw at the last launch and now (REC-5).
         // Schema 5 (1.6.0): game_mode; logging.setting may name several presets (REC-51); mouse_input
         // and input_monitoring (REC-52, REC-57).
-        // Schema 6 (1.6.1): mouse_rate, "all" or the most a second (REC-63); Classic ignores it.
+        // Schema 6 (1.6.1): mouse_rate, "all" or the most a second (REC-63); Classic ignores it. Always
+        // "all" from 1.6.4, which removed the setting (REC-83).
+        // Schema 7 (1.6.4): custom_renderer, "on" or "off", and with it on custom_renderer_lines, the
+        // lines a launch adds to dxmt.conf (REC-85); display_sync, as the last launch used it (REC-93);
+        // discord_presence (DiscordFeature.report); security_software, the apps found that scan files
+        // as they're written, or none, unavailable or not_checked, and repair, where the last repair
+        // since the app opened started and how it ended, or not_run (REC-94); faster_keys, "on" or
+        // "off" (Settings › Advanced, PR #73).
         let fresh=loadChecked.map { Date().timeIntervalSince($0) < 15 } ?? false
         let otherApps:[String:Any]=["at_last_launch":launchLoad ?? "none","now":fresh ? macLoad.report as Any : "not_checked"]
-        // Schema 7: discord_presence (DiscordFeature.report).
-        let data:[String:Any]=["schema":7,"discord_presence":discord.report,"game_mode":gameMode ? "on" : "off",
-                                "mouse_input":mouseInput.rawValue,"mouse_rate":mouseRate.rawValue,"input_monitoring":InputMonitoring.access.rawValue,
+        var data:[String:Any]=["schema":7,"discord_presence":discord.report,"game_mode":gameMode ? "on" : "off","custom_renderer":rendererCustomOn ? "on" : "off","display_sync":RendererSettings.displaySync(root:root),
+                                "mouse_input":mouseInput.rawValue,"mouse_rate":"all","faster_keys":fasterKeys ? "on" : "off","input_monitoring":InputMonitoring.access.rawValue,
                                 "other_apps":otherApps,"logging":logs,"battlenet":battleNet,"app_language":AppLanguage.current,"default_browser":browser,"main_display":display,"app_version":release?.appVersion ?? "unknown","runtime_version":state["active_runtime"] as? String ?? "not_installed","macos":ProcessInfo.processInfo.operatingSystemVersionString,"memory_gib":ProcessInfo.processInfo.physicalMemory>>30,"architecture":"arm64","free_gib":freeBytes>>30,"game_installed":gameInstalled,"display_resolution":"\(resolution.width)x\(resolution.height)","metalfx_upscaling":metalFXUpscaling ? "on" : "off","metalfx_sharpening":metalFXSharpening.rawValue,"install_location":InstallLocation.isStandard(root) ? "default" : (InstallLocation.isInternal(root) ? "other_internal" : "external"),"recent_stages":lastEvents,"last_error":failure.reportCode,"shaders":ShaderRecord.read(root:root),"shader_memory":shaderMemory]
+        if rendererCustomOn { data["custom_renderer_lines"]=rendererLines }
+        data["security_software"]=securityCheck.report
+        data["repair"]=lastRepair.isEmpty ? "not_run" as Any : lastRepair as Any
         report=String(data:(try? JSONSerialization.data(withJSONObject:data,options:[.prettyPrinted,.sortedKeys])) ?? Data(),encoding:.utf8) ?? ""
     }
     /// Save Logs (Settings › Advanced, Help › Support): the zip LogBundle makes, saved where the
@@ -1609,7 +1746,7 @@ final class AppModel {
         guard panel.runModal() == .OK,let url=panel.url else { return }
         makeReport()
         let input=LogBundle.Input(root:root,report:report,appVersion:release?.appVersion ?? "unknown",runtime:state["active_runtime"] as? String ?? "not_installed",
-                                  logging:logging,custom:loggingCustom,since:loggingSince,readme:Bundle.main.url(forResource:"LogsReadme",withExtension:"md"))
+                                  logging:logging,custom:loggingCustom,since:loggingSince,renderer:rendererCustomOn ? rendererLines : nil,readme:Bundle.main.url(forResource:"LogsReadme",withExtension:"md"))
         savingLogs=true;savedLogs=nil
         Task {
             let result=await Task.detached(priority:.userInitiated) { Result { try LogBundle.save(input,to:url) } }.value

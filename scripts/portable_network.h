@@ -171,3 +171,40 @@ static BOOL configureBattleNetMemory(NSString *engine) {
     event(@"battlenet_memory",details);
     return ok;
 }
+
+/* Links opened from Battle.net or Overwatch (REC-84; GitHub #69). Windows programs open a web or
+ * email link through Wine's winebrowser.exe, which runs the Mac command named in WineBrowser's
+ * Browsers (Mailers for email) with the link added (programs/winebrowser/main.c; each entry is
+ * split into arguments as a Windows command line is). Without them Wine runs /usr/bin/open, and
+ * a Mac program Wine starts inherits Recall's environment: HOME and TMPDIR inside the data folder,
+ * USER "player", and Wine's, DXMT's and the Metal HUD's settings. LaunchServices hands a browser
+ * that wasn't running the environment of the program that opened it, so Chrome started with
+ * Recall's HOME, found no keychain, and deleted every sign-in it could no longer decrypt.
+ * Started with an empty environment, open leaves LaunchServices to give the browser the
+ * player's own session, as a link clicked anywhere else on the Mac does. A browser already
+ * running only receives the link. */
+static NSString *const browserLinksKey=@"Software\\Wine\\WineBrowser";
+static NSString *const browserLinksCommand=@"/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/open";
+/* Without ENGINE it only reports whether either value differs. The registry tool runs only for a
+ * value that does. Never fails: setup and launches go on, and the next launch tries again.
+ * Reports browser_links. */
+static BOOL configureBrowserLinks(NSString *engine) {
+    NSDictionary *values=userRegistryValues(browserLinksKey);
+    NSString *expected=[NSString stringWithFormat:@"\"%@\"",browserLinksCommand];
+    NSMutableArray *missing=[NSMutableArray array];
+    for(NSString *name in @[@"Browsers",@"Mailers"])if(![values[name] isEqual:expected])[missing addObject:name];
+    BOOL ok=YES,changed=NO;
+    NSMutableDictionary *details=[@{@"clean_environment":@YES,@"changed":@NO} mutableCopy];
+    if(!values)details[@"registry"]=@"unreadable";
+    if(engine) {
+        for(NSString *name in missing) {
+            if(registryTool(engine,@[@"add",[@"HKCU\\" stringByAppendingString:browserLinksKey],@"/v",name,@"/t",@"REG_SZ",@"/d",browserLinksCommand,@"/f"],@"browser-links.log"))changed=YES;
+            else ok=NO;
+        }
+        details[@"changed"]=@(changed);
+        if(!ok)details[@"failed"]=@YES;
+    }
+    else details[@"changed"]=@((BOOL)(missing.count>0));
+    event(@"browser_links",details);
+    return ok;
+}

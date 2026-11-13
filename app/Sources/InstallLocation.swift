@@ -108,6 +108,59 @@ enum InstallLocation {
         let fm=FileManager.default
         return fm.fileExists(atPath:root.appendingPathComponent(".overwatch-2-mac-owner").path) && fm.fileExists(atPath:root.appendingPathComponent("state.json").path)
     }
+    /// REC-82: where a move under way is going, kept until the app has taken the new place.
+    static let pendingKey="pendingInstallLocation"
+    /// A folder that is an installation now: its drive is there, with the app's marker and saved state.
+    static func isInstallation(_ root:URL)->Bool {
+        let fm=FileManager.default
+        return isAvailable(root) && fm.fileExists(atPath:root.appendingPathComponent(".overwatch-2-mac-owner").path) && fm.fileExists(atPath:root.appendingPathComponent("state.json").path)
+    }
+    /// The part copy of a move the player gave up on while its drive was unplugged: it goes when
+    /// the drive is next connected (AppModel.discardRememberedPartCopy).
+    static let discardKey="abandonedMoveLocation"
+    /// A move the app didn't see finish (it quit or crashed, or lost power, as the copy took its
+    /// final name). The worker gives the copy its marker and final name only once it is whole and
+    /// checked, so an installation at the pending place is the one to use.
+    enum PendingMove:Equatable {
+        /// The installation is at the pending place. `left` is the folder it came from, if that is
+        /// still an installation (it hadn't reached the Trash).
+        case finished(left:URL?)
+        /// The pending place's drive isn't connected, so it can't say. `showsDrive`: the folder in
+        /// use holds no installation either, so the app asks for the drive instead of setting up anew.
+        case waiting(showsDrive:Bool)
+        /// The drive is there with no installation at the pending place: the move never finished.
+        case unfinished
+    }
+    static func pendingMove(current:URL,pending:URL)->PendingMove {
+        if pending.standardizedFileURL.path == current.standardizedFileURL.path { return .unfinished }
+        guard isAvailable(pending) else { return .waiting(showsDrive:isAvailable(current) && !isInstallation(current)) }
+        guard isInstallation(pending) else { return .unfinished }
+        return .finished(left:isInstallation(current) ? current : nil)
+    }
+    /// The part copy a move that didn't finish leaves beside its destination (portable_move.h).
+    static func partCopy(for destination:URL)->URL { URL(fileURLWithPath:destination.standardizedFileURL.path+".moving") }
+    /// Two folders on one volume: a move between them is a rename, with nothing to copy.
+    static func sameVolume(_ a:URL,_ b:URL)->Bool {
+        let volume={ (url:URL) in (try? existing(url).resourceValues(forKeys:[.volumeURLKey]).volume)?.standardizedFileURL.path }
+        guard let first=volume(a),let second=volume(b) else { return false }
+        return first == second
+    }
+    /// Free room where a folder is or will be, as Finder counts it (with what macOS clears on demand).
+    static func freeBytes(at root:URL)->Int64? {
+        guard let values=try? existing(root).resourceValues(forKeys:[.volumeAvailableCapacityForImportantUsageKey,.volumeAvailableCapacityKey]) else { return nil }
+        return max(values.volumeAvailableCapacityForImportantUsage ?? 0,Int64(values.volumeAvailableCapacity ?? 0))
+    }
+    /// Why the installation at `root` can't move to a chosen folder, or nil. The drive rules are
+    /// setup's (issue(for:)); a folder that already holds an installation is never merged into.
+    static func moveIssue(from root:URL,to destination:URL)->Issue? {
+        let from=root.standardizedFileURL.resolvingSymlinksInPath().path,to=destination.standardizedFileURL.resolvingSymlinksInPath().path
+        if to == from { return Issue(message:L("Overwatch and Battle.net are already there. Choose another location.")) }
+        if to.hasPrefix(from+"/") { return Issue(message:L("That folder is inside the installation itself. Choose another location.")) }
+        if FileManager.default.fileExists(atPath:destination.appendingPathComponent(".overwatch-2-mac-owner").path) {
+            return Issue(message:L("That location already holds an installation. Choose another location."))
+        }
+        return issue(for:destination)
+    }
     /// What a folder takes on its drive (symbolic links, such as Wine's drive letters, aren't
     /// followed), for the question before it moves to the Trash.
     static func size(_ root:URL)->Int64 {
