@@ -413,15 +413,35 @@ final class AppModel {
     var sharingShaders=false
     func shareShaders(importing:Bool) {
         guard !busy,!sharingShaders,running == nil else { return }
-        let panel=NSOpenPanel();panel.canChooseDirectories=true;panel.canChooseFiles=false;panel.canCreateDirectories = !importing
-        panel.title=importing ? "Import and merge shader learning" : "Export shader learning to an empty folder"
-        guard panel.runModal() == .OK,let folder=panel.url else { return }
+        let folder:URL
+        if importing {
+            let panel=NSOpenPanel();panel.canChooseDirectories=true;panel.canChooseFiles=true;panel.allowsMultipleSelection=false
+            panel.title="Import shader ZIP or folder"
+            guard panel.runModal() == .OK,let selected=panel.url else { return };folder=selected
+        } else {
+            let panel=NSSavePanel();panel.nameFieldStringValue="Recall-Shaders.zip";panel.allowedContentTypes=[.zip]
+            panel.title="Export shader learning as ZIP"
+            guard panel.runModal() == .OK,let selected=panel.url else { return };folder=selected
+        }
         sharingShaders=true;shaderShareProgress=nil
         shaderShareStatus=importing ? "Validating shader import…" : "Validating shaders for export…"
         Task {
             busy=true
             defer { busy=false;sharingShaders=false }
             do {
+                if importing {
+                    let preview=try await service.run("preview-shaders",["--folder",folder.path]).last ?? [:]
+                    let manifest=preview["manifest"] as? [String:Any] ?? [:]
+                    let producer=manifest["producer"] as? [String:Any] ?? [:]
+                    let compatibility=manifest["compatibility"] as? [String:Any] ?? [:]
+                    let compatible=preview["compatible"] as? Bool == true
+                    let alert=NSAlert();alert.messageText=compatible ? "Import and merge shader learning?" : "Incompatible shader package"
+                    alert.informativeText="Source Recall: \(producer["recall_version"] ?? "unknown")\nSource GPU: \(producer["metal_device"] ?? "unknown")\nRuntime: \(compatibility["runtime"] ?? "unknown")\nmacOS: \(compatibility["os"] ?? "unknown")\nThis macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\nDifferent GPUs are allowed. Existing learning is preserved. Import only from someone you trust."
+                    alert.addButton(withTitle:compatible ? "Import and Merge" : "OK")
+                    if compatible { alert.addButton(withTitle:"Cancel") }
+                    let answer=alert.runModal()
+                    guard compatible,answer == .alertFirstButtonReturn else { shaderShareStatus="Import cancelled.";return }
+                }
                 let events=try await service.run(importing ? "import-shaders" : "export-shaders",["--folder",folder.path],event:{ event in
                     guard event["stage"] as? String == "shader_share_progress",let total=event["total"] as? Int,let completed=event["completed"] as? Int else { return }
                     self.shaderShareProgress=Double(completed)/Double(max(1,total))
@@ -430,7 +450,7 @@ final class AppModel {
                 let result=events.last ?? [:]
                 notice="Shader learning: \(result["added"] ?? 0) files added, \(result["kept"] ?? 0) already present."
                 shaderShareProgress=1
-                shaderShareStatus=importing ? "Import complete. " + notice : "Export complete — you can send this folder. " + notice
+                shaderShareStatus=importing ? "Import complete. " + notice : "Export complete — you can send this ZIP. " + notice
                 if importing {
                     _ = try await service.run("prepare-shaders",["--game-mode",gameMode ? "1" : "0"])
                     notice += " Local shader preparation started. Wait for it to finish before playing."

@@ -88,7 +88,7 @@ static void shareMerge(NSString *source, NSString *destination, NSDictionary *fi
         if((*added+*kept)%32==0 || *added+*kept==files.count)event(@"shader_share_progress",@{@"completed":@(*added+*kept),@"total":@(files.count)});
     }
 }
-static void shaderShare(BOOL importing, NSString *requested) {
+static void shaderShareFolder(BOOL importing, NSString *requested) {
     if(![requested isAbsolutePath])fail(@"shader_share_invalid");
     NSString *folder=requested.stringByStandardizingPath;shareDirectory(folder);
 #ifndef RECALL_SHADER_SHARE_FIXTURE
@@ -118,7 +118,70 @@ static void shaderShare(BOOL importing, NSString *requested) {
         if([fm contentsOfDirectoryAtPath:folder error:nil].count)fail(@"shader_share_export_not_empty");
         mkdirs(join(folder,@"recipes"));mkdirs(join(folder,@"libraries"));
         shareMerge(local,folder,files,&added,&kept);
-        writeJSON(@{@"schema":@1,@"compatibility":compatibility,@"files":files},manifestPath);
+        id<MTLDevice> device=MTLCreateSystemDefaultDevice();
+        writeJSON(@{@"schema":@1,@"compatibility":compatibility,@"files":files,
+            @"producer":@{@"recall_version":NSProcessInfo.processInfo.environment[@"RECALL_APP_VERSION"] ?: @"unknown",@"metal_device":device.name ?: @"unknown",@"architecture":@"arm64",@"created_at":[NSISO8601DateFormatter.new stringFromDate:NSDate.date]}},manifestPath);
     }
     event(importing?@"shaders_imported":@"shaders_exported",@{@"added":@(added),@"kept":@(kept)});
+}
+
+static BOOL shareArchiveName(NSString *name) {
+    return [name isEqual:@"recall-shaders.json"] || matches(name,@"^(recipes/[a-f0-9]{64}[.]json|libraries/[a-f0-9]{64}[.]air)$");
+}
+static void shareUnzip(NSString *source, NSString *destination) {
+    struct stat st;if(lstat(source.fileSystemRepresentation,&st)||!S_ISREG(st.st_mode)||st.st_size>2ll*1024*1024*1024)fail(@"shader_share_invalid");
+    struct archive *a=archive_read_new();archive_read_support_format_zip(a);
+    @try {
+        if(archive_read_open_filename(a,source.fileSystemRepresentation,131072)!=ARCHIVE_OK)fail(@"shader_share_invalid");
+        struct archive_entry *entry;int result;uint64_t total=0;NSUInteger count=0;NSMutableSet *seen=[NSMutableSet set];
+        mkdirs(join(destination,@"recipes"));mkdirs(join(destination,@"libraries"));
+        while((result=archive_read_next_header(a,&entry))==ARCHIVE_OK) {
+            const char *raw=archive_entry_pathname(entry);NSString *name=raw?[NSString stringWithUTF8String:raw]:nil;
+            if(!name||[seen containsObject:name]||archive_entry_symlink(entry)||archive_entry_hardlink(entry)||++count>98310)fail(@"shader_share_invalid");
+            [seen addObject:name];
+            if(archive_entry_filetype(entry)==AE_IFDIR && ([@[@"recipes/",@"libraries/",@"recipes",@"libraries"] containsObject:name]))continue;
+            if(archive_entry_filetype(entry)!=AE_IFREG||!shareArchiveName(name))fail(@"shader_share_invalid");
+            uint64_t limit=[name isEqual:@"recall-shaders.json"]?32*1024*1024:([name hasPrefix:@"recipes/"]?131072:8*1024*1024);
+            la_int64_t size=archive_entry_size(entry);if(size<=0||(uint64_t)size>limit)fail(@"shader_share_limit");
+            NSMutableData *bytes=[NSMutableData data];char buffer[65536];la_ssize_t n;
+            while((n=archive_read_data(a,buffer,sizeof(buffer)))>0) {
+                total+=(uint64_t)n;if(total>2ull*1024*1024*1024||bytes.length+(NSUInteger)n>limit)fail(@"shader_share_limit");
+                [bytes appendBytes:buffer length:(NSUInteger)n];
+            }
+            if(n<0||bytes.length!=(NSUInteger)size)fail(@"shader_share_invalid");
+            if(![bytes writeToFile:join(destination,name) options:NSDataWritingWithoutOverwriting error:nil])fail(@"shader_share_write_failed");
+        }
+        if(result!=ARCHIVE_EOF)fail(@"shader_share_invalid");
+    } @finally {archive_read_free(a);}
+}
+static void shaderSharePreview(NSString *requested) {
+    NSString *temporary=nil,*folder=requested;
+    @try {
+        if([requested.pathExtension.lowercaseString isEqual:@"zip"]) {
+            temporary=join(NSTemporaryDirectory(),[@"recall-preview-" stringByAppendingString:NSUUID.UUID.UUIDString]);mkdirs(temporary);
+            shareUnzip(requested,temporary);folder=temporary;
+        }
+        shareDirectory(folder);
+        NSDictionary *manifest=shareJSON(shareRead(join(folder,@"recall-shaders.json"),32*1024*1024));
+        NSDictionary *files=shareInventory(folder);if(![files isEqual:manifest[@"files"]])fail(@"shader_share_invalid");
+        event(@"shader_share_preview",@{@"manifest":manifest,@"compatible":@([manifest[@"schema"] isEqual:@1] && [manifest[@"compatibility"] isEqual:shareCompatibility()])});
+    } @finally {if(temporary)[fm removeItemAtPath:temporary error:nil];}
+}
+static void shaderShare(BOOL importing, NSString *requested) {
+    if(![requested.pathExtension.lowercaseString isEqual:@"zip"]) {shaderShareFolder(importing,requested);return;}
+    NSString *temporary=join(NSTemporaryDirectory(),[@"recall-shaders-" stringByAppendingString:NSUUID.UUID.UUIDString]);
+    mkdirs(temporary);
+    @try {
+        if(importing) {shareUnzip(requested,temporary);shaderShareFolder(YES,temporary);}
+        else {
+            if(!requested.isAbsolutePath||![requested.pathExtension.lowercaseString isEqual:@"zip"]||[fm fileExistsAtPath:requested])fail(@"shader_share_export_not_empty");
+            shareDirectory(requested.stringByDeletingLastPathComponent);
+            shaderShareFolder(NO,temporary);
+            NSString *archivePath=[temporary stringByAppendingString:@".zip"];
+            NSTask *zip=task(@"/usr/bin/ditto",@[@"-c",@"-k",@"--norsrc",@"--noextattr",temporary,archivePath],nil,@"shader-export-zip.log");
+            if(waitTask(zip,600))fail(@"shader_share_write_failed");
+            if(![fm copyItemAtPath:archivePath toPath:requested error:nil])fail(@"shader_share_write_failed");
+            event(@"shaders_exported",@{@"zip":@YES});
+        }
+    } @finally {[fm removeItemAtPath:[temporary stringByAppendingString:@".zip"] error:nil];[fm removeItemAtPath:temporary error:nil];}
 }

@@ -92,3 +92,22 @@ class ShaderShare(unittest.TestCase):
         library.unlink()
         library.symlink_to(self.base / 'outside')
         self.assertEqual(self.call('import-shaders', '--folder', folder, success=False)[-1]['code'], 'shader_share_invalid')
+
+    def test_zip_import_preview_and_path_traversal_rejection(self):
+        import zipfile
+        self.initialize()
+        self.recipe('first')
+        folder = self.export('export')
+        archive = self.base / 'shaders.zip'
+        with zipfile.ZipFile(archive, 'w') as z:
+            for path in folder.rglob('*'):
+                if path.is_file():
+                    z.write(path, path.relative_to(folder))
+        preview = self.call('preview-shaders', '--folder', archive)[-1]
+        self.assertTrue(preview['compatible'])
+        self.assertIn('producer', preview['manifest'])
+        self.assertEqual(self.call('import-shaders', '--folder', archive)[-1]['added'], 0)
+        malicious = self.base / 'malicious.zip'
+        with zipfile.ZipFile(malicious, 'w') as z:
+            z.writestr('../outside', 'bad')
+        self.assertEqual(self.call('import-shaders', '--folder', malicious, success=False)[-1]['code'], 'shader_share_invalid')

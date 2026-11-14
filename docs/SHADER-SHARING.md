@@ -2,10 +2,10 @@
 
 In Settings → Graphics, use Share shader learning. Close Battle.net and Overwatch on both Macs.
 
-1. Export to a new empty folder. Send the entire folder to the other Mac.
-2. Import and Merge on the destination. Existing recipes are kept; new content-addressed recipes and AIR libraries are added.
+1. Export ZIP to a new file. Send the ZIP to the other Mac. The worker also retains legacy empty-folder export for compatibility.
+2. Import and Merge accepts a ZIP or an extracted folder. A validated preview shows source Recall version, Metal GPU name, runtime and macOS before confirmation. Incompatible runtime/macOS packages cannot be accepted. Existing recipes are kept; new content-addressed recipes and AIR libraries are added.
 3. Import starts local pipeline preparation. Wait for preparation to finish before playing; do not assume that accepting the import means every pipeline compiled successfully. The existing preparation system has budgets and may prepare only a subset.
-4. Export the combined collection to another empty folder and send it back. Repeated imports deduplicate rather than overwrite.
+4. Export the combined collection to another ZIP and send it back. Repeated imports deduplicate rather than overwrite.
 
 Only recipe JSON and referenced AIR libraries are exported. GPU binary archives, account information, game files, logs and absolute source paths are excluded. Both Macs must use the same Recall runtime and exact macOS version. GPU identity intentionally differs: each Mac receives the learning in its own device namespace. Matching game versions and settings are recommended; game build identity is not currently checked by the importer.
 

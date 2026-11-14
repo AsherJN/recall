@@ -999,6 +999,7 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         else if([command isEqual:@"repair-retina"])configureRetina();
         // Settings › Graphics › Shader memory: --limit all|first|<MiB>. Overwatch reads it when it
         // next starts, so it can change while Battle.net or the game is open.
+        else if([command isEqual:@"preview-shaders"])shaderSharePreview(options[@"folder"]);
         else if([command isEqual:@"export-shaders"])shaderShare(NO,options[@"folder"]);
         else if([command isEqual:@"import-shaders"])shaderShare(YES,options[@"folder"]);
         else if([command isEqual:@"shader-memory"]) {

@@ -103,6 +103,7 @@ final class SetupService {
     func run(_ command: String, _ args: [String] = [], event: @escaping @MainActor ([String:Any])->Void = { _ in }) async throws -> [[String:Any]] {
         guard process == nil else { throw SetupFailure(code:"app_worker_busy") }
         let p=Process(), pipe=Pipe()
+        p.environment=ProcessInfo.processInfo.environment.merging(["RECALL_APP_VERSION":Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"]) { _,new in new }
         p.executableURL=helper; p.arguments=[command,"--root",root.path]+args
         p.standardOutput=pipe; p.standardError=FileHandle.nullDevice
         p.environment=["PATH":"/usr/bin:/bin:/usr/sbin:/sbin","HOME":NSHomeDirectory()]

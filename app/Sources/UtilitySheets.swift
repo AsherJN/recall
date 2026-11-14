@@ -436,7 +436,7 @@ struct SettingsSheet:View {
                 Text("Exchange pipeline recipes and intermediate shaders, not GPU binaries or account data. Import merges without replacing your learning and starts compilation for this Mac. Both Macs must use the same runtime and macOS. Use only folders from someone you trust. Close Battle.net and Overwatch first.")
                     .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                 HStack {
-                    Button("Export to Folder…") { model.shareShaders(importing:false) }
+                    Button("Export ZIP…") { model.shareShaders(importing:false) }
                     Button("Import and Merge…") { model.shareShaders(importing:true) }
                 }.disabled(model.busy || model.sharingShaders || model.running != nil)
                 if !model.shaderShareStatus.isEmpty {
