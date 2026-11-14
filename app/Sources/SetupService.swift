@@ -36,6 +36,12 @@ struct SetupFailure: Error {
         if isFolderAccess { return L("macOS isn’t letting {0} create or change the folder that holds its files. Reinstalling won’t help: the folder’s permissions need fixing first.",Brand.name) }
         if filesDamaged { return L("Some of the files {0} installed are missing or damaged. Repair puts them back.",Brand.name) }
         switch code {
+        case "shader_share_invalid", "shader_share_conflict": return "The shader folder is incomplete, corrupt, or contains conflicting files. Existing shader learning was not replaced."
+        case "shader_share_incompatible": return "This shader export uses a different Recall runtime or macOS version. Match versions on both Macs first."
+        case "shader_share_empty", "shader_share_no_device": return "No shader learning is available for this Mac yet. Play with DXMT first, then export."
+        case "shader_share_export_not_empty": return "Choose an empty folder for the export. Existing exports are never overwritten."
+        case "shader_share_limit": return "This shader collection exceeds the supported file count or size. Nothing was replaced."
+        case "shader_share_write_failed": return "The shader transfer could not finish. Check folder access and free space. Import is additive and can be retried."
         case "cancelled": return L("Setup is paused. Continue when you’re ready; completed steps are saved.")
         case "apple_silicon_required": return L("This version requires a Mac with Apple Silicon (M1 or later).")
         case "macos_26_5_required": return L("Overwatch needs macOS 26.5 or later. Update macOS, then check again.")

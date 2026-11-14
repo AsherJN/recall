@@ -137,6 +137,7 @@ struct SettingsSheet:View {
             metalHUD
             gameModeSetting
             shaderMemory
+            shaderSharing
             clearShaderCache
         case .audio:
             microphone
@@ -428,6 +429,25 @@ struct SettingsSheet:View {
     }
     /// MetalFX upscaling and its sharpening. Battle.net carries both from when it opens, like
     /// the HUD; sharpening applies only with upscaling on, so it waits until then.
+    private var shaderSharing:some View {
+        LauncherPanel(inset:16) {
+            VStack(alignment:.leading,spacing:8) {
+                Text("Share shader learning (Experimental)").font(LauncherStyle.font(14,.semibold))
+                Text("Exchange pipeline recipes and intermediate shaders, not GPU binaries or account data. Import merges without replacing your learning and starts compilation for this Mac. Both Macs must use the same runtime and macOS. Use only folders from someone you trust. Close Battle.net and Overwatch first.")
+                    .font(LauncherStyle.font(12)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                HStack {
+                    Button("Export to Folder…") { model.shareShaders(importing:false) }
+                    Button("Import and Merge…") { model.shareShaders(importing:true) }
+                }.disabled(model.busy || model.sharingShaders || model.running != nil)
+                if !model.shaderShareStatus.isEmpty {
+                    if let progress=model.shaderShareProgress { ProgressView(value:progress).progressViewStyle(.linear) }
+                    else if model.sharingShaders { ProgressView().controlSize(.small) }
+                    Text(model.shaderShareStatus).font(LauncherStyle.font(12)).fixedSize(horizontal:false,vertical:true).textSelection(.enabled)
+                }
+                if model.running != nil { Text("Close Battle.net and Overwatch to export or import.").font(LauncherStyle.font(12)).foregroundStyle(.secondary) }
+            }
+        }
+    }
     private var upscaling:some View {
         LauncherPanel(inset:16) {
             VStack(alignment:.leading,spacing:6) {

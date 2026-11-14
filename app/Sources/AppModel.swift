@@ -408,6 +408,36 @@ final class AppModel {
     func playWithoutOptimizing() { sheet=nil;launch() }
     /// Settings › Graphics › Rebuild Shaders: every learned shader built again now, in the
     /// background, keeping what Overwatch has learned (for graphics glitches or a drop in FPS).
+    var shaderShareStatus=""
+    var shaderShareProgress:Double?
+    var sharingShaders=false
+    func shareShaders(importing:Bool) {
+        guard !busy,!sharingShaders,running == nil else { return }
+        let panel=NSOpenPanel();panel.canChooseDirectories=true;panel.canChooseFiles=false;panel.canCreateDirectories = !importing
+        panel.title=importing ? "Import and merge shader learning" : "Export shader learning to an empty folder"
+        guard panel.runModal() == .OK,let folder=panel.url else { return }
+        sharingShaders=true;shaderShareProgress=nil
+        shaderShareStatus=importing ? "Validating shader import…" : "Validating shaders for export…"
+        Task {
+            busy=true
+            defer { busy=false;sharingShaders=false }
+            do {
+                let events=try await service.run(importing ? "import-shaders" : "export-shaders",["--folder",folder.path],event:{ event in
+                    guard event["stage"] as? String == "shader_share_progress",let total=event["total"] as? Int,let completed=event["completed"] as? Int else { return }
+                    self.shaderShareProgress=Double(completed)/Double(max(1,total))
+                    self.shaderShareStatus="Transferring shaders: \(completed) / \(total) files"
+                })
+                let result=events.last ?? [:]
+                notice="Shader learning: \(result["added"] ?? 0) files added, \(result["kept"] ?? 0) already present."
+                shaderShareProgress=1
+                shaderShareStatus=importing ? "Import complete. " + notice : "Export complete — you can send this folder. " + notice
+                if importing {
+                    _ = try await service.run("prepare-shaders",["--game-mode",gameMode ? "1" : "0"])
+                    notice += " Local shader preparation started. Wait for it to finish before playing."
+                }
+            } catch { notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message;shaderShareProgress=nil;shaderShareStatus="Transfer failed: " + notice }
+        }
+    }
     func rebuildShaders() { updateShaderCache(rebuild:true) }
     func updateShaderCache(rebuild:Bool=false) {
         sheet=nil
