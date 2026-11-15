@@ -148,6 +148,13 @@ Battle.net keeps 96.
 
 `wine-winemac-activation.patch` applies to the Mac driver after the two driver
 patches above:
+- Diablo III's first exclusive display-mode request is applied before returning,
+  even if macOS has not activated the new game process yet. Queuing it until
+  the first click let the game initialize fullscreen geometry using the old
+  desktop mode, then shrink or crop its 4K picture on activation. This applies
+  only to the exact executable basename `Diablo III64.exe` (case-insensitive);
+  after its first activation, background requests defer as before. The existing
+  capture, failure and desktop-mode restoration paths are used;
 - `WINEMAC_APPKIT_UPDATE_CYCLE=0` turns AppKit's display-synchronized event
   loop off (contributed by @Seglats; Recall's Faster key response, an
   experimental switch in Settings › Advanced, off by default). Programs built

@@ -11,7 +11,7 @@ index 4da4676..49a6d47 100644
      - (BOOL) handleEvent:(NSEvent*)anEvent;
      - (void) didSendEvent:(NSEvent*)anEvent;
 diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
-index ce6a702..94e1f1a 100644
+index ce6a702..3778c1c 100644
 --- a/dlls/winemac.drv/cocoa_app.m
 +++ b/dlls/winemac.drv/cocoa_app.m
 @@ -25,8 +25,12 @@
@@ -1055,7 +1055,123 @@ index ce6a702..94e1f1a 100644
          event = macdrv_create_event(DISPLAYS_CHANGED, nil);
          event->displays_changed.activating = activating;
  
-@@ -1805,30 +2678,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
+@@ -1146,110 +2019,114 @@
+     - (BOOL) setMode:(CGDisplayModeRef)mode forDisplay:(CGDirectDisplayID)displayID
+     {
+         BOOL ret = FALSE;
+         NSNumber* displayIDKey = [NSNumber numberWithUnsignedInt:displayID];
+         CGDisplayModeRef originalMode;
+ 
+         originalMode = (CGDisplayModeRef)originalDisplayModes[displayIDKey];
+ 
+         if (originalMode && [self mode:mode matchesMode:originalMode])
+         {
+             if ([originalDisplayModes count] == 1) // If this is the last changed display, do a blanket reset
+             {
+                 CGRestorePermanentDisplayConfiguration();
+                 if (!displaysCapturedForFullscreen)
+                     CGReleaseAllDisplays();
+                 [originalDisplayModes removeAllObjects];
+                 ret = TRUE;
+             }
+             else // ... otherwise, try to restore just the one display
+             {
+                 for (id modeObject in [self modesMatchingMode:mode forDisplay:displayID])
+                 {
+                     mode = (CGDisplayModeRef)modeObject;
+                     if (CGDisplaySetDisplayMode(displayID, mode, NULL) == CGDisplayNoErr)
+                     {
+                         [originalDisplayModes removeObjectForKey:displayIDKey];
+                         ret = TRUE;
+                         break;
+                     }
+                 }
+             }
+         }
+         else
+         {
+             CGDisplayModeRef currentMode;
+             NSArray* modes;
+ 
+             currentMode = CGDisplayModeRetain((CGDisplayModeRef)latentDisplayModes[displayIDKey]);
+             if (!currentMode)
+                 currentMode = CGDisplayCopyDisplayMode(displayID);
+             if (!currentMode) // Invalid display ID
+                 return FALSE;
+ 
+             if ([self mode:mode matchesMode:currentMode]) // Already there!
+             {
+                 CGDisplayModeRelease(currentMode);
+                 return TRUE;
+             }
+ 
+             CGDisplayModeRelease(currentMode);
+             currentMode = NULL;
+ 
+             modes = [self modesMatchingMode:mode forDisplay:displayID];
+             if (!modes.count)
+                 return FALSE;
+ 
+             [self transformProcessToForeground:YES];
+ 
+-            BOOL active = [NSApp isActive];
++            /* Diablo requests exclusive fullscreen before its first activation.
++               Deferring that initial mode while reporting success lets later
++               geometry queries use the old desktop coordinates. Realize it now;
++               after first activation, keep the usual background deferral. */
++            BOOL active = [NSApp isActive] || (diablo_eager_initial_mode && !beenActive);
+ 
+             if ([originalDisplayModes count] || displaysCapturedForFullscreen ||
+                 !active || CGCaptureAllDisplays() == CGDisplayNoErr)
+             {
+                 if (active)
+                 {
+                     // If we get here, we have the displays captured.  If we don't
+                     // know the original mode of the display, the current mode must
+                     // be the original.  We should re-query the current mode since
+                     // another process could have changed it between when we last
+                     // checked and when we captured the displays.
+                     if (!originalMode)
+                         originalMode = currentMode = CGDisplayCopyDisplayMode(displayID);
+ 
+                     if (originalMode)
+                     {
+                         for (id modeObject in modes)
+                         {
+                             mode = (CGDisplayModeRef)modeObject;
+                             if (CGDisplaySetDisplayMode(displayID, mode, NULL) == CGDisplayNoErr)
+                             {
+                                 ret = TRUE;
+                                 break;
+                             }
+                         }
+                     }
+                     if (ret && !(currentMode && [self mode:mode matchesMode:currentMode]))
+                         [originalDisplayModes setObject:(id)originalMode forKey:displayIDKey];
+                     else if (![originalDisplayModes count])
+                     {
+                         CGRestorePermanentDisplayConfiguration();
+                         if (!displaysCapturedForFullscreen)
+                             CGReleaseAllDisplays();
+                     }
+ 
+                     if (currentMode)
+                         CGDisplayModeRelease(currentMode);
+                 }
+                 else
+                 {
+                     [latentDisplayModes setObject:(id)mode forKey:displayIDKey];
+                     ret = TRUE;
+                 }
+             }
+         }
+ 
+         if (ret)
+             [self adjustWindowLevels];
+ 
+         return ret;
+     }
+@@ -1805,30 +2682,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
      {
          static int unscaled = -1;
          double scale = retina_on ? 2.0 : 1.0;
@@ -1118,7 +1234,7 @@ index ce6a702..94e1f1a 100644
              scale /= macdrv_v1_canvas_scale(mouselookWindow);
  
          // deltaY is already top-down, like Windows.
-@@ -1869,6 +2769,7 @@ - (void) startRawInput
+@@ -1869,6 +2773,7 @@ - (void) startRawInput
      {
          const char* setting = getenv("WINEMAC_MOUSELOOK_RAW");
          const char* interval = getenv("WINEMAC_MOUSELOOK_RAW_INTERVAL_US");
@@ -1126,7 +1242,7 @@ index ce6a702..94e1f1a 100644
          NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
          NSString* const* connected;
          NSString* const* disconnected;
-@@ -1880,6 +2781,32 @@ - (void) startRawInput
+@@ -1880,6 +2785,32 @@ - (void) startRawInput
              return;
          rawStarted = TRUE;
  
@@ -1159,7 +1275,7 @@ index ce6a702..94e1f1a 100644
          framework = dlopen("/System/Library/Frameworks/GameController.framework/GameController", RTLD_LAZY | RTLD_LOCAL);
          mouseClass = NSClassFromString(@"GCMouse");
          connected = framework ? dlsym(framework, "GCMouseDidConnectNotification") : NULL;
-@@ -1900,6 +2827,9 @@ - (void) startRawInput
+@@ -1900,6 +2831,9 @@ - (void) startRawInput
          dispatch_source_set_timer(raw_timer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
          dispatch_resume(raw_timer);
  
@@ -1169,7 +1285,7 @@ index ce6a702..94e1f1a 100644
          rawMice = [[NSMutableArray alloc] init];
          [center addObserverForName:*connected object:nil queue:[NSOperationQueue mainQueue]
                          usingBlock:^(NSNotification* note){ [self attachRawMouse:note.object]; }];
-@@ -1920,22 +2850,120 @@ - (void) attachRawMouse:(GCMouse*)mouse
+@@ -1920,22 +2854,120 @@ - (void) attachRawMouse:(GCMouse*)mouse
          // "Magic Trackpad").
          if ([mouse.vendorName rangeOfString:@"Trackpad" options:NSCaseInsensitiveSearch].location != NSNotFound)
              return;
@@ -1293,7 +1409,7 @@ index ce6a702..94e1f1a 100644
      /* Raw input delivers to the mouselook window unless it is unavailable or
         switched off. */
      - (void) updateRawInput
-@@ -1951,19 +2979,22 @@ - (void) updateRawInput
+@@ -1951,19 +2983,22 @@ - (void) updateRawInput
          [previous release];
      }
  
@@ -1322,7 +1438,7 @@ index ce6a702..94e1f1a 100644
          }
          if (!enabled || !mouselook_allowed || [anEvent keyCode] != kVK_ANSI_M)
              return NO;
-@@ -1978,16 +3009,57 @@ - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
+@@ -1978,16 +3013,57 @@ - (BOOL) handleMouselookSwitch:(NSEvent*)anEvent
              return NO;
  
          mouselookHotkeyDown = TRUE;
@@ -1382,7 +1498,7 @@ index ce6a702..94e1f1a 100644
      /* WINEMAC_INPUT_STATS=<prefix>: one JSON line per second to
         <prefix>-<pid>.jsonl while this process is frontmost or has input
         activity. */
-@@ -2007,7 +3079,13 @@ - (void) startInputStats
+@@ -2007,7 +3083,13 @@ - (void) startInputStats
      - (void) reportInputStats:(NSTimer*)timer
      {
          struct macdrv_input_stats wine;
@@ -1396,7 +1512,7 @@ index ce6a702..94e1f1a 100644
          const char* handler = !clipCursorHandler ? "none" :
              [clipCursorHandler isKindOfClass:[WineConfinementClipCursorHandler class]] ? "confinement" : "eventtap";
          WineWindow* key = (WineWindow*)[NSApp keyWindow];
-@@ -2016,6 +3094,14 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2016,6 +3098,14 @@ - (void) reportInputStats:(NSTimer*)timer
  #define TAKE(field) wine.field = __atomic_exchange_n(&macdrv_input_stats.field, 0, __ATOMIC_RELAXED)
          TAKE(moves_delivered); TAKE(deliver_ns); TAKE(setpos_calls); TAKE(setpos_fast); TAKE(setpos_ns);
          TAKE(setpos_max_ns); TAKE(getpos_calls); TAKE(getpos_ns); TAKE(clip_calls);
@@ -1411,7 +1527,7 @@ index ce6a702..94e1f1a 100644
  #undef TAKE
          wine.consumer_tid = macdrv_input_stats.consumer_tid;
          wine.setpos_tid = macdrv_input_stats.setpos_tid;
-@@ -2023,16 +3109,47 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2023,16 +3113,47 @@ - (void) reportInputStats:(NSTimer*)timer
              dispatch_sync(raw_queue, ^{
                  raw = raw_stats;
                  memset(&raw_stats, 0, sizeof(raw_stats));
@@ -1460,7 +1576,7 @@ index ce6a702..94e1f1a 100644
          fprintf(inputStatsFile,
                  "{\"schema\":1,\"unix_ms\":%.0f,\"pid\":%d,\"exe\":\"%s\",\"allowed\":%s,\"mode\":\"%s\","
                  "\"app_active\":%s,\"hidden\":%s,\"transparent\":%s,\"clipping\":%s,\"hidden_warp\":%s,\"clip_handler\":\"%s\","
-@@ -2041,12 +3158,39 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2041,12 +3162,39 @@ - (void) reportInputStats:(NSTimer*)timer
                  "\"posted_absolute\":%llu,\"posted_relative\":%llu,\"dropped_after_warp\":%llu,"
                  "\"warps\":%llu,\"warp_us\":%.1f,\"mouselook_moves\":%llu,\"mouselook_posted\":%llu,"
                  "\"mouselook_enters\":%llu,\"mouselook_exits\":%llu,\"clicks\":%llu,\"switches\":%llu,"
@@ -1501,7 +1617,7 @@ index ce6a702..94e1f1a 100644
                  [[NSDate date] timeIntervalSince1970] * 1000, getpid(), mouselook_process,
                  mouselook_allowed ? "true" : "false",
                  __atomic_load_n(&raw_on, __ATOMIC_ACQUIRE) ? "raw" : mouselookWindow ? "mouselook" : "legacy",
-@@ -2058,14 +3202,46 @@ - (void) reportInputStats:(NSTimer*)timer
+@@ -2058,14 +3206,46 @@ - (void) reportInputStats:(NSTimer*)timer
                  cocoa_stats.posted_absolute, cocoa_stats.posted_relative, cocoa_stats.dropped_after_warp,
                  cocoa_stats.warps, cocoa_stats.warp_ns / 1e3, cocoa_stats.mouselook_moves, cocoa_stats.mouselook_posted,
                  cocoa_stats.mouselook_enters, cocoa_stats.mouselook_exits, cocoa_stats.clicks, cocoa_stats.switches,
@@ -1549,7 +1665,7 @@ index ce6a702..94e1f1a 100644
      }
  
      - (BOOL) isKeyPressed:(uint16_t)keyCode
-@@ -2439,6 +3615,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
+@@ -2439,6 +3619,11 @@ - (void) handleMouseButton:(NSEvent*)theEvent
                  unmatchedMouseDowns &= ~downMask;
              }
  
@@ -1561,7 +1677,7 @@ index ce6a702..94e1f1a 100644
              if (process)
              {
                  macdrv_event* event;
-@@ -2657,6 +3838,19 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+@@ -2657,6 +3842,19 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
          BOOL ret = FALSE;
          NSEventType type = [anEvent type];
  
@@ -1581,7 +1697,7 @@ index ce6a702..94e1f1a 100644
          if (type == NSEventTypeFlagsChanged)
              self.lastFlagsChanged = anEvent;
          else if (type == NSEventTypeMouseMoved || type == NSEventTypeLeftMouseDragged ||
-@@ -2664,6 +3858,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+@@ -2664,6 +3862,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
          {
              unsigned long long start = macdrv_stat_clock();
  
@@ -1590,7 +1706,7 @@ index ce6a702..94e1f1a 100644
              [self handleMouseMove:anEvent];
              ret = mouseCaptureWindow && ![windowsBeingDragged count];
              if (macdrv_input_stats_on)
-@@ -2678,6 +3874,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
+@@ -2678,6 +3878,8 @@ - (BOOL) handleEvent:(NSEvent*)anEvent
                   type == NSEventTypeRightMouseDown || type == NSEventTypeRightMouseUp ||
                   type == NSEventTypeOtherMouseDown || type == NSEventTypeOtherMouseUp)
          {
@@ -1599,7 +1715,7 @@ index ce6a702..94e1f1a 100644
              [self handleMouseButton:anEvent];
              ret = mouseCaptureWindow && ![windowsBeingDragged count];
          }
-@@ -2848,6 +4046,11 @@ - (void) setupObservations
+@@ -2848,6 +4050,11 @@ - (void) setupObservations
                      name:(NSString*)kTISNotifyEnabledKeyboardInputSourcesChanged
                    object:nil];
  
@@ -1611,7 +1727,7 @@ index ce6a702..94e1f1a 100644
          /* CW Hack 22310 */
          [dnc addObserver:self
                  selector:@selector(handleExternalQuitRequest:)
-@@ -2895,6 +4098,7 @@ - (void) setupObservations
+@@ -2895,6 +4102,7 @@ - (void) setupObservations
                      usingBlock:^(NSNotification *note){
              if (displaysTemporarilyUncapturedForDialog)
              {
@@ -1619,7 +1735,7 @@ index ce6a702..94e1f1a 100644
                  [self applicationDidBecomeActive:nil];
  
                  displaysTemporarilyUncapturedForDialog = FALSE;
-@@ -3235,9 +4439,18 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3235,9 +4443,18 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          [self updateFullscreenWindows];
          [self adjustWindowLevels:YES];
  
@@ -1638,7 +1754,7 @@ index ce6a702..94e1f1a 100644
  
          // If a Wine process terminates abruptly while it has the display captured
          // and switched to a different resolution, Mac OS X will uncapture the
-@@ -3248,8 +4461,27 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3248,8 +4465,27 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          //
          // To solve this, we synthesize a displays-changed event whenever we're
          // activated.  This will provoke a re-synchronization of Wine's notion of
@@ -1668,7 +1784,7 @@ index ce6a702..94e1f1a 100644
  
          // The cursor probably moved while we were inactive.  Accumulated mouse
          // movement deltas are invalidated.  Make sure the next mouse move event
-@@ -3257,11 +4489,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
+@@ -3257,11 +4493,13 @@ - (void)applicationDidBecomeActive:(NSNotification *)notification
          forceNextMouseMoveAbsolute = TRUE;
  
          [self updateMouselook];
@@ -1682,7 +1798,7 @@ index ce6a702..94e1f1a 100644
          [self sendDisplaysChanged:FALSE];
          [self adjustWindowLevels];
  
-@@ -3276,6 +4510,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
+@@ -3276,6 +4514,9 @@ - (void)applicationDidResignActive:(NSNotification *)notification
          macdrv_event* event;
          WineEventQueue* queue;
  
@@ -1692,7 +1808,7 @@ index ce6a702..94e1f1a 100644
          [self updateMouselook];
          [self invalidateGotFocusEvents];
          [self releasePressedKeys];
-@@ -3791,10 +5028,38 @@ void macdrv_quit_reply(int reply)
+@@ -3791,10 +5032,38 @@ void macdrv_quit_reply(int reply)
  bool macdrv_using_input_method(void)
  {
      __block bool ret;
@@ -2883,10 +2999,19 @@ index 5735ff7..48ccc7b 100644
  extern void macdrv_window_resize_ended(HWND hwnd);
  extern void macdrv_window_restore_requested(HWND hwnd, const macdrv_event *event);
 diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
-index 4d4efaa..59fc37f 100644
+index 4d4efaa..4303679 100644
 --- a/dlls/winemac.drv/macdrv_cocoa.h
 +++ b/dlls/winemac.drv/macdrv_cocoa.h
-@@ -249,12 +249,45 @@ static inline CGPoint cgpoint_win_from_mac(CGPoint point)
+@@ -144,6 +144,8 @@
+ extern bool use_precise_scrolling;
+ extern int gl_surface_mode;
+ extern CFDictionaryRef localized_strings;
++/* Set once from the PEB executable basename before the Cocoa thread starts. */
++extern bool diablo_eager_initial_mode;
+ extern bool retina_enabled;  /* Whether Retina mode is enabled via registry setting. */
+ extern bool retina_on;       /* Whether Retina mode is currently active (enabled and display is in default mode). */
+ extern bool enable_app_nap;
+@@ -249,12 +251,45 @@ static inline CGPoint cgpoint_win_from_mac(CGPoint point)
      unsigned long long setpos_calls, setpos_fast, setpos_ns, setpos_max_ns;
      unsigned long long getpos_calls, getpos_ns;
      unsigned long long clip_calls;
@@ -2932,7 +3057,7 @@ index 4d4efaa..59fc37f 100644
  static inline unsigned long long macdrv_stat_clock(void)
  {
      return macdrv_input_stats_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
-@@ -419,6 +452,7 @@ static inline unsigned long long macdrv_stat_clock(void)
+@@ -419,6 +454,7 @@ static inline unsigned long long macdrv_stat_clock(void)
              int             y;
              bool            drag;
              unsigned long   time_ms;
@@ -2940,7 +3065,7 @@ index 4d4efaa..59fc37f 100644
          }                                           mouse_moved;
          struct {
              int             x_scroll;
-@@ -453,6 +487,9 @@ static inline unsigned long long macdrv_stat_clock(void)
+@@ -453,6 +489,9 @@ static inline unsigned long long macdrv_stat_clock(void)
              bool    in_resize;
              bool    skip_size_move_loop;
          }                                           window_frame_changed;
@@ -2950,6 +3075,34 @@ index 4d4efaa..59fc37f 100644
          struct {
              unsigned long   serial;
              void           *tried_windows;
+diff --git a/dlls/winemac.drv/macdrv_main.c b/dlls/winemac.drv/macdrv_main.c
+index 8f0dbed..32f1dc5 100644
+--- a/dlls/winemac.drv/macdrv_main.c
++++ b/dlls/winemac.drv/macdrv_main.c
+@@ -62,6 +62,7 @@ char mouselook_process[64];
+ struct macdrv_input_stats macdrv_input_stats;
+ bool macdrv_input_stats_on = false;
+ int gl_surface_mode = GL_SURFACE_IN_FRONT_OPAQUE;
++bool diablo_eager_initial_mode = false;
+ bool retina_enabled = false;
+ bool enable_app_nap = false;
+ 
+@@ -318,6 +319,7 @@ static void setup_mouselook(const WCHAR *appname)
+ static void setup_options(void)
+ {
+     static const WCHAR macdriverW[] = {'\\','M','a','c',' ','D','r','i','v','e','r',0};
++    static const WCHAR diablo3W[] = {'D','i','a','b','l','o',' ','I','I','I','6','4','.','e','x','e',0};
+     WCHAR buffer[MAX_PATH + 16], *p, *appname;
+     HKEY hkey, appkey = 0;
+     DWORD len;
+@@ -330,6 +332,7 @@ static void setup_options(void)
+     appname = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+     if ((p = wcsrchr(appname, '/'))) appname = p + 1;
+     if ((p = wcsrchr(appname, '\\'))) appname = p + 1;
++    diablo_eager_initial_mode = !wcsicmp(appname, diablo3W);
+     len = lstrlenW(appname);
+     setup_mouselook(appname);
+ 
 diff --git a/dlls/winemac.drv/mouse.c b/dlls/winemac.drv/mouse.c
 index 59f891e..40d60d1 100644
 --- a/dlls/winemac.drv/mouse.c
