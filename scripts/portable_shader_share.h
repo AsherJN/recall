@@ -154,18 +154,46 @@ static void shareUnzip(NSString *source, NSString *destination) {
         if(result!=ARCHIVE_EOF)fail(@"shader_share_invalid");
     } @finally {archive_read_free(a);}
 }
-static void shaderSharePreview(NSString *requested) {
-    NSString *temporary=nil,*folder=requested;
+static NSDictionary *sharePreviewManifest(NSString *requested) {
+    if(![requested.pathExtension.lowercaseString isEqual:@"zip"]) {
+        shareDirectory(requested);return shareJSON(shareRead(join(requested,@"recall-shaders.json"),32*1024*1024));
+    }
+    struct stat st;if(lstat(requested.fileSystemRepresentation,&st)||!S_ISREG(st.st_mode)||st.st_size>2ll*1024*1024*1024)fail(@"shader_share_invalid");
+    struct archive *a=archive_read_new();archive_read_support_format_zip(a);
     @try {
-        if([requested.pathExtension.lowercaseString isEqual:@"zip"]) {
-            temporary=join(NSTemporaryDirectory(),[@"recall-preview-" stringByAppendingString:NSUUID.UUID.UUIDString]);mkdirs(temporary);
-            shareUnzip(requested,temporary);folder=temporary;
+        if(archive_read_open_filename(a,requested.fileSystemRepresentation,131072)!=ARCHIVE_OK)fail(@"shader_share_invalid");
+        struct archive_entry *entry;NSUInteger count=0;
+        while(archive_read_next_header(a,&entry)==ARCHIVE_OK) {
+            if(++count>98310)fail(@"shader_share_limit");
+            const char *name=archive_entry_pathname(entry);
+            if(!name||strcmp(name,"recall-shaders.json")) {archive_read_data_skip(a);continue;}
+            if(archive_entry_filetype(entry)!=AE_IFREG||archive_entry_symlink(entry)||archive_entry_hardlink(entry))fail(@"shader_share_invalid");
+            la_int64_t size=archive_entry_size(entry);if(size<=0||size>32*1024*1024)fail(@"shader_share_limit");
+            NSMutableData *data=[NSMutableData data];char buffer[65536];la_ssize_t n;
+            while((n=archive_read_data(a,buffer,sizeof(buffer)))>0) {
+                if(data.length+(NSUInteger)n>32*1024*1024)fail(@"shader_share_limit");
+                [data appendBytes:buffer length:(NSUInteger)n];
+            }
+            if(n<0||data.length!=(NSUInteger)size)fail(@"shader_share_invalid");
+            return shareJSON(data);
         }
-        shareDirectory(folder);
-        NSDictionary *manifest=shareJSON(shareRead(join(folder,@"recall-shaders.json"),32*1024*1024));
-        NSDictionary *files=shareInventory(folder);if(![files isEqual:manifest[@"files"]])fail(@"shader_share_invalid");
-        event(@"shader_share_preview",@{@"manifest":manifest,@"compatible":@([manifest[@"schema"] isEqual:@1] && [manifest[@"compatibility"] isEqual:shareCompatibility()])});
-    } @finally {if(temporary)[fm removeItemAtPath:temporary error:nil];}
+        fail(@"shader_share_invalid");return nil;
+    } @finally {archive_read_free(a);}
+}
+static void shaderSharePreview(NSString *requested) {
+    NSDictionary *manifest=sharePreviewManifest(requested);
+    id files=manifest[@"files"],producer=manifest[@"producer"] ?: @{},compatibility=manifest[@"compatibility"];
+    if(![files isKindOfClass:NSDictionary.class]||![producer isKindOfClass:NSDictionary.class]||![compatibility isKindOfClass:NSDictionary.class])fail(@"shader_share_invalid");
+    // Preview metadata is untrusted and deliberately bounded; full validation happens after confirmation.
+    NSMutableDictionary *safeProducer=[NSMutableDictionary dictionary],*safeCompatibility=[NSMutableDictionary dictionary];
+    for(NSString *key in @[@"recall_version",@"metal_device",@"architecture",@"created_at"]) {
+        id value=producer[key];if([value isKindOfClass:NSString.class]&&[value length]<=256)safeProducer[key]=value;
+    }
+    for(NSString *key in @[@"runtime",@"namespace",@"os"]) {
+        id value=compatibility[key];if(![value isKindOfClass:NSString.class]||[value length]>256)fail(@"shader_share_invalid");safeCompatibility[key]=value;
+    }
+    NSDictionary *summary=@{@"schema":@1,@"compatibility":safeCompatibility,@"producer":safeProducer,@"file_count":@([files count])};
+    event(@"shader_share_preview",@{@"manifest":summary,@"compatible":@([manifest[@"schema"] isEqual:@1] && [compatibility isEqual:shareCompatibility()])});
 }
 static void shaderShare(BOOL importing, NSString *requested) {
     if(![requested.pathExtension.lowercaseString isEqual:@"zip"]) {shaderShareFolder(importing,requested);return;}
