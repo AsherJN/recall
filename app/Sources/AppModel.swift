@@ -416,15 +416,15 @@ final class AppModel {
         let folder:URL
         if importing {
             let panel=NSOpenPanel();panel.canChooseDirectories=true;panel.canChooseFiles=true;panel.allowsMultipleSelection=false
-            panel.title="Import shader ZIP or folder"
+            panel.title=L("Import shader ZIP or folder")
             guard panel.runModal() == .OK,let selected=panel.url else { return };folder=selected
         } else {
             let panel=NSSavePanel();panel.nameFieldStringValue="Recall-Shaders.zip";panel.allowedContentTypes=[.zip]
-            panel.title="Export shader learning as ZIP"
+            panel.title=L("Export shader learning as ZIP")
             guard panel.runModal() == .OK,let selected=panel.url else { return };folder=selected
         }
         sharingShaders=true;shaderShareProgress=nil
-        shaderShareStatus=importing ? "Validating shader import…" : "Validating shaders for export…"
+        shaderShareStatus=importing ? L("Validating shader import…") : L("Validating shaders for export…")
         Task {
             busy=true
             defer { busy=false;sharingShaders=false }
@@ -436,28 +436,27 @@ final class AppModel {
                     let compatibility=manifest["compatibility"] as? [String:Any] ?? [:]
                     let counts=manifest["counts"] as? [String:Any] ?? [:]
                     let compatible=preview["compatible"] as? Bool == true
-                    let alert=NSAlert();alert.messageText=compatible ? "Import and merge shader learning?" : "Incompatible shader package"
-                    alert.informativeText="Source Recall: \(producer["recall_version"] ?? "unknown")\nSource GPU: \(producer["metal_device"] ?? "unknown")\nRuntime: \(compatibility["runtime"] ?? "unknown")\nmacOS: \(compatibility["os"] ?? "unknown")\nThis macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\nDifferent GPUs are allowed. Existing learning is preserved. Import only from someone you trust."
-                    alert.informativeText += "\nPipeline recipes: \(counts["recipes"] ?? 0)\nIntermediate libraries: \(counts["libraries"] ?? 0)\nUncompressed bytes: \(counts["uncompressed_bytes"] ?? 0)"
-                    alert.addButton(withTitle:compatible ? "Import and Merge" : "OK")
-                    if compatible { alert.addButton(withTitle:"Cancel") }
+                    let alert=NSAlert();alert.messageText=compatible ? L("Import and merge shader learning?") : L("Incompatible shader package")
+                    alert.informativeText=L("Source Recall: {0}\nSource GPU: {1}\nRuntime: {2}\nmacOS: {3}\nThis macOS: {4}\nPipeline recipes: {5}\nIntermediate libraries: {6}\nUncompressed bytes: {7}\nDifferent GPUs are allowed. Existing learning is preserved. Import only from someone you trust.",String(describing:producer["recall_version"] ?? "unknown"),String(describing:producer["metal_device"] ?? "unknown"),String(describing:compatibility["runtime"] ?? "unknown"),String(describing:compatibility["os"] ?? "unknown"),ProcessInfo.processInfo.operatingSystemVersionString,String(describing:counts["recipes"] ?? 0),String(describing:counts["libraries"] ?? 0),String(describing:counts["uncompressed_bytes"] ?? 0))
+                    alert.addButton(withTitle:compatible ? L("Import and Merge") : L("OK"))
+                    if compatible { alert.addButton(withTitle:L("Cancel")) }
                     let answer=alert.runModal()
-                    guard compatible,answer == .alertFirstButtonReturn else { shaderShareStatus="Import cancelled.";return }
+                    guard compatible,answer == .alertFirstButtonReturn else { shaderShareStatus=L("Import cancelled.");return }
                 }
                 let events=try await service.run(importing ? "import-shaders" : "export-shaders",["--folder",folder.path],event:{ event in
                     guard event["stage"] as? String == "shader_share_progress",let total=event["total"] as? Int,let completed=event["completed"] as? Int else { return }
                     self.shaderShareProgress=Double(completed)/Double(max(1,total))
-                    self.shaderShareStatus=event["phase"] as? String == "extracting" ? "Extracting ZIP: \(completed) / \(total) bytes" : "Transferring shaders: \(completed) / \(total) files"
+                    self.shaderShareStatus=event["phase"] as? String == "extracting" ? L("Extracting ZIP: {0} / {1} bytes",completed,total) : L("Transferring shaders: {0} / {1} files",completed,total)
                 })
                 let result=events.last ?? [:]
-                notice="Shader learning: \(result["added"] ?? 0) files added, \(result["kept"] ?? 0) already present."
+                notice=L("Shader learning: {0} files added, {1} already present.",String(describing:result["added"] ?? 0),String(describing:result["kept"] ?? 0))
                 shaderShareProgress=1
-                shaderShareStatus=importing ? "Import complete. " + notice : "Export complete — you can send this ZIP. " + notice
+                shaderShareStatus=importing ? L("Import complete. ") + notice : L("Export complete — you can send this ZIP. ") + notice
                 if importing {
                     _ = try await service.run("prepare-shaders",["--game-mode",gameMode ? "1" : "0"])
-                    notice += " Local shader preparation started. Wait for it to finish before playing."
+                    notice += L(" Local shader preparation started. Wait for it to finish before playing.")
                 }
-            } catch { notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message;shaderShareProgress=nil;shaderShareStatus="Transfer failed: " + notice }
+            } catch { notice=(error as? SetupFailure ?? SetupFailure(code:"unexpected_setup_error")).message;shaderShareProgress=nil;shaderShareStatus=L("Transfer failed: ") + notice }
         }
     }
     func rebuildShaders() { updateShaderCache(rebuild:true) }
