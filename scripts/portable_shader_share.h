@@ -119,7 +119,9 @@ static void shaderShareFolder(BOOL importing, NSString *requested) {
         mkdirs(join(folder,@"recipes"));mkdirs(join(folder,@"libraries"));
         shareMerge(local,folder,files,&added,&kept);
         id<MTLDevice> device=MTLCreateSystemDefaultDevice();
-        writeJSON(@{@"schema":@1,@"compatibility":compatibility,@"files":files,
+        NSUInteger recipeCount=0,libraryCount=0;uint64_t uncompressed=0;
+        for(NSString *name in files){if([name hasPrefix:@"recipes/"])recipeCount++;else libraryCount++;uncompressed+=[files[name][@"bytes"] unsignedLongLongValue];}
+        writeJSON(@{@"schema":@1,@"compatibility":compatibility,@"files":files,@"counts":@{@"recipes":@(recipeCount),@"libraries":@(libraryCount),@"files":@(files.count),@"uncompressed_bytes":@(uncompressed)},
             @"producer":@{@"recall_version":NSProcessInfo.processInfo.environment[@"RECALL_APP_VERSION"] ?: @"unknown",@"metal_device":device.name ?: @"unknown",@"architecture":@"arm64",@"created_at":[NSISO8601DateFormatter.new stringFromDate:NSDate.date]}},manifestPath);
     }
     event(importing?@"shaders_imported":@"shaders_exported",@{@"added":@(added),@"kept":@(kept)});
@@ -128,7 +130,15 @@ static void shaderShareFolder(BOOL importing, NSString *requested) {
 static BOOL shareArchiveName(NSString *name) {
     return [name isEqual:@"recall-shaders.json"] || matches(name,@"^(recipes/[a-f0-9]{64}[.]json|libraries/[a-f0-9]{64}[.]air)$");
 }
+static NSDictionary *sharePreviewManifest(NSString *requested);
 static void shareUnzip(NSString *source, NSString *destination) {
+    NSDictionary *preview=sharePreviewManifest(source);
+    uint64_t expected=0,reported=0;id catalog=preview[@"files"];
+    if(![catalog isKindOfClass:NSDictionary.class])fail(@"shader_share_invalid");
+    for(id spec in [catalog allValues]) {
+        if(![spec isKindOfClass:NSDictionary.class]||![spec[@"bytes"] isKindOfClass:NSNumber.class])fail(@"shader_share_invalid");
+        uint64_t size=[spec[@"bytes"] unsignedLongLongValue];if(size>32*1024*1024||expected>2ull*1024*1024*1024-size)fail(@"shader_share_limit");expected+=size;
+    }
     struct stat st;if(lstat(source.fileSystemRepresentation,&st)||!S_ISREG(st.st_mode)||st.st_size>2ll*1024*1024*1024)fail(@"shader_share_invalid");
     struct archive *a=archive_read_new();archive_read_support_format_zip(a);
     @try {
@@ -147,11 +157,13 @@ static void shareUnzip(NSString *source, NSString *destination) {
             while((n=archive_read_data(a,buffer,sizeof(buffer)))>0) {
                 total+=(uint64_t)n;if(total>2ull*1024*1024*1024||bytes.length+(NSUInteger)n>limit)fail(@"shader_share_limit");
                 [bytes appendBytes:buffer length:(NSUInteger)n];
+                if(![name isEqual:@"recall-shaders.json"]){reported+=(uint64_t)n;if(reported%(1024*1024)<(uint64_t)n)event(@"shader_share_progress",@{@"phase":@"extracting",@"completed":@(reported),@"total":@(MAX(expected,reported))});}
             }
             if(n<0||bytes.length!=(NSUInteger)size)fail(@"shader_share_invalid");
             if(![bytes writeToFile:join(destination,name) options:NSDataWritingWithoutOverwriting error:nil])fail(@"shader_share_write_failed");
         }
         if(result!=ARCHIVE_EOF)fail(@"shader_share_invalid");
+        event(@"shader_share_progress",@{@"phase":@"extracting",@"completed":@(reported),@"total":@(MAX(expected,reported))});
     } @finally {archive_read_free(a);}
 }
 static NSDictionary *sharePreviewManifest(NSString *requested) {
@@ -192,7 +204,10 @@ static void shaderSharePreview(NSString *requested) {
     for(NSString *key in @[@"runtime",@"namespace",@"os"]) {
         id value=compatibility[key];if(![value isKindOfClass:NSString.class]||[value length]>256)fail(@"shader_share_invalid");safeCompatibility[key]=value;
     }
-    NSDictionary *summary=@{@"schema":@1,@"compatibility":safeCompatibility,@"producer":safeProducer,@"file_count":@([files count])};
+    NSUInteger recipes=0,libraries=0;uint64_t bytes=0;
+    for(id key in files){if(![key isKindOfClass:NSString.class])fail(@"shader_share_invalid");if([key hasPrefix:@"recipes/"])recipes++;else if([key hasPrefix:@"libraries/"])libraries++;
+        id spec=files[key];if(![spec isKindOfClass:NSDictionary.class]||![spec[@"bytes"] isKindOfClass:NSNumber.class])fail(@"shader_share_invalid");uint64_t size=[spec[@"bytes"] unsignedLongLongValue];if(size>32*1024*1024||bytes>2ull*1024*1024*1024-size)fail(@"shader_share_limit");bytes+=size;}
+    NSDictionary *summary=@{@"schema":@1,@"compatibility":safeCompatibility,@"producer":safeProducer,@"file_count":@([files count]),@"counts":@{@"recipes":@(recipes),@"libraries":@(libraries),@"uncompressed_bytes":@(bytes)}};
     event(@"shader_share_preview",@{@"manifest":summary,@"compatible":@([manifest[@"schema"] isEqual:@1] && [compatibility isEqual:shareCompatibility()])});
 }
 static void shaderShare(BOOL importing, NSString *requested) {

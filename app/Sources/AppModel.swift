@@ -434,9 +434,11 @@ final class AppModel {
                     let manifest=preview["manifest"] as? [String:Any] ?? [:]
                     let producer=manifest["producer"] as? [String:Any] ?? [:]
                     let compatibility=manifest["compatibility"] as? [String:Any] ?? [:]
+                    let counts=manifest["counts"] as? [String:Any] ?? [:]
                     let compatible=preview["compatible"] as? Bool == true
                     let alert=NSAlert();alert.messageText=compatible ? "Import and merge shader learning?" : "Incompatible shader package"
                     alert.informativeText="Source Recall: \(producer["recall_version"] ?? "unknown")\nSource GPU: \(producer["metal_device"] ?? "unknown")\nRuntime: \(compatibility["runtime"] ?? "unknown")\nmacOS: \(compatibility["os"] ?? "unknown")\nThis macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\nDifferent GPUs are allowed. Existing learning is preserved. Import only from someone you trust."
+                    alert.informativeText += "\nPipeline recipes: \(counts["recipes"] ?? 0)\nIntermediate libraries: \(counts["libraries"] ?? 0)\nUncompressed bytes: \(counts["uncompressed_bytes"] ?? 0)"
                     alert.addButton(withTitle:compatible ? "Import and Merge" : "OK")
                     if compatible { alert.addButton(withTitle:"Cancel") }
                     let answer=alert.runModal()
@@ -445,7 +447,7 @@ final class AppModel {
                 let events=try await service.run(importing ? "import-shaders" : "export-shaders",["--folder",folder.path],event:{ event in
                     guard event["stage"] as? String == "shader_share_progress",let total=event["total"] as? Int,let completed=event["completed"] as? Int else { return }
                     self.shaderShareProgress=Double(completed)/Double(max(1,total))
-                    self.shaderShareStatus="Transferring shaders: \(completed) / \(total) files"
+                    self.shaderShareStatus=event["phase"] as? String == "extracting" ? "Extracting ZIP: \(completed) / \(total) bytes" : "Transferring shaders: \(completed) / \(total) files"
                 })
                 let result=events.last ?? [:]
                 notice="Shader learning: \(result["added"] ?? 0) files added, \(result["kept"] ?? 0) already present."
