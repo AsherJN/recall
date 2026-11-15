@@ -446,7 +446,7 @@ final class AppModel {
                 let events=try await service.run(importing ? "import-shaders" : "export-shaders",["--folder",folder.path],event:{ event in
                     guard event["stage"] as? String == "shader_share_progress",let total=event["total"] as? Int,let completed=event["completed"] as? Int else { return }
                     self.shaderShareProgress=Double(completed)/Double(max(1,total))
-                    self.shaderShareStatus=event["phase"] as? String == "extracting" ? L("Extracting ZIP: {0} / {1} bytes",completed,total) : L("Transferring shaders: {0} / {1} files",completed,total)
+                    self.shaderShareStatus=event["phase"] as? String == "extracting" ? L("Extracting ZIP: {0} / {1} bytes",String(completed),String(total)) : L("Transferring shaders: {0} / {1} files",String(completed),String(total))
                 })
                 let result=events.last ?? [:]
                 notice=L("Shader learning: {0} files added, {1} already present.",String(describing:result["added"] ?? 0),String(describing:result["kept"] ?? 0))
