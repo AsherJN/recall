@@ -15,6 +15,7 @@ PORTABLE_MODULES = (
     'test_windowed_preferences', 'test_prepare_dxmt_pipelines',
     'test_summarize_frames', 'test_process_probe', 'test_summarize_display',
     'test_v1_finish', 'test_derive_runtime', 'test_pipeline_helper', 'test_localization',
+    'test_eager_initial_mode',
 )
 
 

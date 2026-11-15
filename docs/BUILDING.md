@@ -104,6 +104,13 @@ helper; generated files remain ignored. Remaining `test_*.py` modules depend on
 installed engines, reconstructed source, historical development shortcuts, or
 private measured sessions and are excluded from this portable selection.
 
+`tests/test_eager_initial_mode.py`, included in the portable selection, extracts
+Wine's complete exclusive-mode method from the activation patch's context and
+compiles it against fake application/display boundaries. It checks that an
+inactive Diablo III startup realizes its requested physical mode before the
+call returns, along with exact process selection, later background deferral,
+capture failures and desktop restoration. It does not call real display APIs.
+
 Native fixtures under `tests/` extract or compile the relevant upstream source
 and need the pinned toolchain/runtime. For example, `tests/fullscreen/run.py
 --focus-recovery` exercises the normal presentation path at both resolutions.
