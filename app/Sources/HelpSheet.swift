@@ -37,6 +37,15 @@ struct HelpTopic:Identifiable {
     var regions:[BattleNetRegion]=[]
 }
 extension HelpTopic {
+    /// Saving and sharing highlights; with DISCORD, the step for Copy for Discord (not on China's Battle.net).
+    static func highlights(discord:Bool)->HelpTopic {
+        HelpTopic(id:HighlightLibrary.helpTopic,symbol:"film.stack",title:L("How do I save and share highlights?"),
+                  steps:[L("In Overwatch, open **Career Profile › History › Highlights**."),
+                         L("Choose a highlight and select **Save**. Keep the format at **MP4**."),
+                         L("Open **Highlights** in {0}. Move the pointer across a clip to look through it, or double-click it to watch it in QuickTime.",Brand.name)]+(discord ? [L("To share on Discord, choose **Copy for Discord**, then paste it into a chat with ⌘V. The copy fits Discord’s 20 MB limit.")] : []),
+                  note:L("Highlights are saved in **Movies › Overwatch** on your Mac. Overwatch keeps unsaved highlights only until it closes, so save the ones you want first. If a save doesn’t finish, save it again."),
+                  action:.highlights,regions:discord ? [.global,.korea] : [.china])
+    }
     /// The first-matches stutter, as the Play screen's tip tells it (FirstMatchTip; REC-13): how
     /// long it lasts by players' reports, two ways to speed it up, and when it isn't the warm-up.
     static var stutterAnswer:String { L("Your Mac builds each shader the first time Overwatch uses it, which causes a stutter. After each match, {0} prepares what it learned, so matches get smoother. Most players are smooth within 5 to 10 matches, or about 10,000 to 15,000 shaders.",Brand.name) }
@@ -84,13 +93,10 @@ extension HelpTopic {
                          L("Play from {0}.",Brand.name)],
                   note:L("Battle.net picks up the setting when it opens. To hide the HUD, quit Overwatch, close Battle.net, turn the setting off and play again."),
                   action:.settings(.graphics)),
-        // REC-53, REC-96: Overwatch's Record saves an MP4 in Movies › Overwatch; Recall lists them.
-        HelpTopic(id:"highlights",symbol:"film.stack",title:L("How do I save and share highlights?"),
-                  steps:[L("In Overwatch, open **Career Profile › History › Highlights**."),
-                         L("Choose a highlight and select **Record**. Keep the format at **MP4**."),
-                         L("Open **Highlights** in {0} to watch, share or find the clip.",Brand.name)],
-                  note:L("Highlights are saved in **Movies › Overwatch** on your Mac. Overwatch keeps unsaved highlights only until it closes, so record the ones you want first."),
-                  action:.highlights),
+        // REC-53, REC-96: Overwatch's Save writes an MP4 in Movies › Overwatch; Recall lists them and
+        // copies one for Discord, which China's Battle.net doesn't show (Discord is blocked there).
+        highlights(discord:true),
+        highlights(discord:false),
         HelpTopic(id:"monitor",symbol:"rectangle.connected.to.line.below",title:L("How do I play on an external monitor?"),
                   steps:[L("In **System Settings › Displays**, select the monitor and set **Use as** to Main display."),
                          L("In Overwatch, choose the monitor’s resolution under **Options › Video**, for example 2560 × 1440 on a 1440p monitor.")],

@@ -1055,62 +1055,7 @@ index ce6a702..3778c1c 100644
          event = macdrv_create_event(DISPLAYS_CHANGED, nil);
          event->displays_changed.activating = activating;
  
-@@ -1146,110 +2019,114 @@
-     - (BOOL) setMode:(CGDisplayModeRef)mode forDisplay:(CGDirectDisplayID)displayID
-     {
-         BOOL ret = FALSE;
-         NSNumber* displayIDKey = [NSNumber numberWithUnsignedInt:displayID];
-         CGDisplayModeRef originalMode;
- 
-         originalMode = (CGDisplayModeRef)originalDisplayModes[displayIDKey];
- 
-         if (originalMode && [self mode:mode matchesMode:originalMode])
-         {
-             if ([originalDisplayModes count] == 1) // If this is the last changed display, do a blanket reset
-             {
-                 CGRestorePermanentDisplayConfiguration();
-                 if (!displaysCapturedForFullscreen)
-                     CGReleaseAllDisplays();
-                 [originalDisplayModes removeAllObjects];
-                 ret = TRUE;
-             }
-             else // ... otherwise, try to restore just the one display
-             {
-                 for (id modeObject in [self modesMatchingMode:mode forDisplay:displayID])
-                 {
-                     mode = (CGDisplayModeRef)modeObject;
-                     if (CGDisplaySetDisplayMode(displayID, mode, NULL) == CGDisplayNoErr)
-                     {
-                         [originalDisplayModes removeObjectForKey:displayIDKey];
-                         ret = TRUE;
-                         break;
-                     }
-                 }
-             }
-         }
-         else
-         {
-             CGDisplayModeRef currentMode;
-             NSArray* modes;
- 
-             currentMode = CGDisplayModeRetain((CGDisplayModeRef)latentDisplayModes[displayIDKey]);
-             if (!currentMode)
-                 currentMode = CGDisplayCopyDisplayMode(displayID);
-             if (!currentMode) // Invalid display ID
-                 return FALSE;
- 
-             if ([self mode:mode matchesMode:currentMode]) // Already there!
-             {
-                 CGDisplayModeRelease(currentMode);
-                 return TRUE;
-             }
- 
-             CGDisplayModeRelease(currentMode);
-             currentMode = NULL;
- 
-             modes = [self modesMatchingMode:mode forDisplay:displayID];
-             if (!modes.count)
-                 return FALSE;
+@@ -1201,7 +2074,11 @@ - (BOOL) setMode:(CGDisplayModeRef)mode forDisplay:(CGDirectDisplayID)displayID
  
              [self transformProcessToForeground:YES];
  
@@ -1123,54 +1068,6 @@ index ce6a702..3778c1c 100644
  
              if ([originalDisplayModes count] || displaysCapturedForFullscreen ||
                  !active || CGCaptureAllDisplays() == CGDisplayNoErr)
-             {
-                 if (active)
-                 {
-                     // If we get here, we have the displays captured.  If we don't
-                     // know the original mode of the display, the current mode must
-                     // be the original.  We should re-query the current mode since
-                     // another process could have changed it between when we last
-                     // checked and when we captured the displays.
-                     if (!originalMode)
-                         originalMode = currentMode = CGDisplayCopyDisplayMode(displayID);
- 
-                     if (originalMode)
-                     {
-                         for (id modeObject in modes)
-                         {
-                             mode = (CGDisplayModeRef)modeObject;
-                             if (CGDisplaySetDisplayMode(displayID, mode, NULL) == CGDisplayNoErr)
-                             {
-                                 ret = TRUE;
-                                 break;
-                             }
-                         }
-                     }
-                     if (ret && !(currentMode && [self mode:mode matchesMode:currentMode]))
-                         [originalDisplayModes setObject:(id)originalMode forKey:displayIDKey];
-                     else if (![originalDisplayModes count])
-                     {
-                         CGRestorePermanentDisplayConfiguration();
-                         if (!displaysCapturedForFullscreen)
-                             CGReleaseAllDisplays();
-                     }
- 
-                     if (currentMode)
-                         CGDisplayModeRelease(currentMode);
-                 }
-                 else
-                 {
-                     [latentDisplayModes setObject:(id)mode forKey:displayIDKey];
-                     ret = TRUE;
-                 }
-             }
-         }
- 
-         if (ret)
-             [self adjustWindowLevels];
- 
-         return ret;
-     }
 @@ -1805,30 +2682,57 @@ - (void) handleMouselookMove:(NSEvent*)anEvent
      {
          static int unscaled = -1;

@@ -85,7 +85,11 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               window does leave fullscreen in the background waits for the animation to
               end (macOS brought the window back when it ended), at most 3 s, and a window
               minimized for Wine but still on screen is restored when it becomes key
-              (REC-55, 1.6).
+              (REC-55, 1.6). Diablo III (`Diablo III64.exe` only) asks for exclusive
+              fullscreen before macOS first activates it; the driver now applies that
+              first mode at once instead of reporting success and waiting for the first
+              click, which shrank or cropped its 4K picture (PR #79, @keeneye7, 1.6.5).
+              After its first activation it defers background requests as before.
   mmdevapi    runtime/source/wine-audio (the Phase 2 tree's dlls/mmdevapi and
   winecoreaudio dlls/winecoreaudio.drv; one patch for both, 1.6). Wine listed the Mac's sound
               devices once, when a program started, so headphones connected later never

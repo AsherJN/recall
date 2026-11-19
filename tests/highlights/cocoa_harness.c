@@ -3,7 +3,11 @@
  * test pattern and a two-tone sine, writes them into an MPEG-4 file the way
  * the Media Foundation sink does, and leaves the file for verify_mp4.swift.
  *
- *   cocoa_harness <out.mp4> <bgra|nv12|i420|yv12|yuy2> [width height fps seconds]
+ * --game sets the encoder as Overwatch does (quality 75 with a 9.9 Mbit/s average, two
+ * B-frames). WINEMACMF_SOFTWARE_ENCODER=1 in the environment asks VideoToolbox for its
+ * software encoder, which keeps back 15 frames before it returns one.
+ *
+ *   cocoa_harness <out.mp4> <bgra|nv12|i420|yv12|yuy2> [width height fps seconds] [--game]
  */
 
 #include <math.h>
@@ -211,7 +215,7 @@ int main(int argc, char **argv)
     uint8_t config[64], asc[16], buffer[1 << 16];
     uint32_t config_size = 0, asc_size = 0, size;
     void *video, *audio, *muxer;
-    int video_track, audio_track, fmt;
+    int video_track, audio_track, fmt, game = 0;
     uint64_t total = 0, offset;
     FILE *out;
 
@@ -225,6 +229,7 @@ int main(int argc, char **argv)
         fps = atoi(argv[5]);
         seconds = atoi(argv[6]);
     }
+    if (argc >= 8 && !strcmp(argv[7], "--game")) game = 1;
     frames = fps * seconds;
     fmt = !strcmp(format, "bgra") ? 0 : !strcmp(format, "nv12") ? 1 : !strcmp(format, "i420") ? 2
             : !strcmp(format, "yv12") ? 3 : 4;
@@ -234,7 +239,9 @@ int main(int argc, char **argv)
     settings.frame_rate_num = fps;
     settings.frame_rate_den = 1;
     settings.format = fmt;
-    settings.bitrate = 12000000;
+    settings.bitrate = game ? 9900000 : 12000000;
+    settings.quality = game ? 75 : 0;
+    settings.b_frames = game ? 2 : 0;
     settings.profile = 100;
     if (!(video = macmf_video_encoder_create(&settings))) return 3;
 

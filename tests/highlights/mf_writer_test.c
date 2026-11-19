@@ -10,8 +10,15 @@
  * (rgb32-bottomup), or bottom-up with no stride in the type, which means the
  * same on Windows (rgb32-nostride).
  *
+ * --game sets the encoder as Overwatch does (from its trace, November 16): quality-based
+ * rate control at 75 with a 9.9 Mbit/s average, two B-frames, low latency and adaptive mode
+ * off, quality over speed. Apple's software encoder, which keeps back 15 frames and has no
+ * quality setting, is what macOS gives when the hardware one is unavailable; the Unix
+ * environment's WINEMACMF_SOFTWARE_ENCODER=1 asks for it (run.py's --software clips).
+ *
  *   mf_writer_test <out.mp4> [rgb32|argb32|rgb32-bottomup|rgb32-nostride|nv12] [pcm16|float]
- *                  [width height fps seconds] [--hardware] [--async] [--no-codecapi] [--channels N]
+ *                  [width height fps seconds] [--hardware] [--async] [--no-codecapi] [--game]
+ *                  [--channels N]
  */
 
 #define COBJMACROS
@@ -34,7 +41,11 @@ DEFINE_GUID(CODECAPI_AVEncCommonMeanBitRate, 0xf7222374, 0x2144, 0x4815, 0xb5, 0
 DEFINE_GUID(CODECAPI_AVEncCommonQualityVsSpeed, 0x98332df8, 0x03cd, 0x476b, 0x89, 0xfa, 0x3f, 0x9e, 0x44, 0x2d, 0xec, 0x9f);
 DEFINE_GUID(CODECAPI_AVEncMPVDefaultBPictureCount, 0x8d390aac, 0xdc5c, 0x4200, 0xb5, 0x7f, 0x81, 0x4d, 0x04, 0xba, 0xba, 0xb2);
 DEFINE_GUID(CODECAPI_AVEncMPVGOPSize, 0x95f31b26, 0x95a4, 0x41aa, 0x93, 0x03, 0x24, 0x6a, 0x7f, 0xc6, 0xee, 0xf1);
+DEFINE_GUID(CODECAPI_AVEncCommonQuality, 0xfcbf57a3, 0x7ea5, 0x4b0c, 0x96, 0x44, 0x69, 0xb4, 0x0c, 0x39, 0xc3, 0x91);
+DEFINE_GUID(CODECAPI_AVLowLatencyMode, 0x9c27891a, 0xed7a, 0x40e1, 0x88, 0xe8, 0xb2, 0x27, 0x27, 0xa0, 0x24, 0xee);
+DEFINE_GUID(CODECAPI_AVEncAdaptiveMode, 0x4419b185, 0xda1f, 0x4f53, 0xbc, 0x76, 0x09, 0x7d, 0x0c, 0x1e, 0xfb, 0x1e);
 #define eAVEncCommonRateControlMode_UnconstrainedVBR 2
+#define eAVEncCommonRateControlMode_Quality 3
 #define eAVEncH264VProfile_High 100
 
 #define CHECK(expr) do { HRESULT hr_ = (expr); if (FAILED(hr_)) { \
@@ -144,7 +155,7 @@ int wmain(int argc, WCHAR **argv)
     const WCHAR *path;
     char video_format[32] = "rgb32", audio_format[32] = "pcm16";
     UINT width = 1920, height = 1080, fps = 60, seconds = 3, frames, rate = 48000, channels = 2, i, j;
-    BOOL hardware = FALSE, async = FALSE, codecapi = TRUE;
+    BOOL hardware = FALSE, async = FALSE, codecapi = TRUE, game = FALSE;
     IMFMediaType *video_out, *video_in, *audio_out, *audio_in;
     IMFAttributes *attributes;
     IMFSinkWriter *writer;
@@ -157,6 +168,8 @@ int wmain(int argc, WCHAR **argv)
     int arg = 2;
 
     if (argc < 2) return 2;
+    /* Unbuffered: under Wine a buffered report to a pipe was now and then lost at exit. */
+    setvbuf(stdout, NULL, _IONBF, 0);
     path = argv[1];
     if (argc > arg && argv[arg][0] != '-') WideCharToMultiByte(CP_ACP, 0, argv[arg++], -1, video_format, 32, NULL, NULL);
     if (argc > arg && argv[arg][0] != '-') WideCharToMultiByte(CP_ACP, 0, argv[arg++], -1, audio_format, 32, NULL, NULL);
@@ -172,6 +185,7 @@ int wmain(int argc, WCHAR **argv)
         if (!wcscmp(argv[arg], L"--hardware")) hardware = TRUE;
         else if (!wcscmp(argv[arg], L"--async")) async = TRUE;
         else if (!wcscmp(argv[arg], L"--no-codecapi")) codecapi = FALSE;
+        else if (!wcscmp(argv[arg], L"--game")) game = TRUE;
         else if (!wcscmp(argv[arg], L"--channels") && arg + 1 < argc) channels = _wtoi(argv[++arg]);
     }
     frames = fps * seconds;
@@ -226,7 +240,33 @@ int wmain(int argc, WCHAR **argv)
     CHECK(IMFMediaType_SetUINT64(video_in, &MF_MT_PIXEL_ASPECT_RATIO, (UINT64)(1) << 32 | (1)));
     CHECK(IMFSinkWriter_SetInputMediaType(writer, video, video_in, NULL));
 
-    if (codecapi)
+    if (game)
+    {
+        /* Overwatch's own settings, in its order. */
+        ICodecAPI *api;
+        VARIANT value;
+
+        CHECK(IMFSinkWriter_GetServiceForStream(writer, video, &null_guid, &IID_ICodecAPI, (void **)&api));
+        V_VT(&value) = VT_UI4;
+        V_UI4(&value) = eAVEncCommonRateControlMode_Quality;
+        CHECK(ICodecAPI_SetValue(api, &CODECAPI_AVEncCommonRateControlMode, &value));
+        V_UI4(&value) = 75;
+        CHECK(ICodecAPI_SetValue(api, &CODECAPI_AVEncCommonQuality, &value));
+        V_UI4(&value) = 9900000;
+        CHECK(ICodecAPI_SetValue(api, &CODECAPI_AVEncCommonMeanBitRate, &value));
+        V_UI4(&value) = 2;
+        CHECK(ICodecAPI_SetValue(api, &CODECAPI_AVEncMPVDefaultBPictureCount, &value));
+        V_VT(&value) = VT_BOOL;
+        V_BOOL(&value) = VARIANT_FALSE;
+        CHECK(ICodecAPI_SetValue(api, &CODECAPI_AVLowLatencyMode, &value));
+        V_VT(&value) = VT_UI4;
+        V_UI4(&value) = 100;
+        CHECK(ICodecAPI_SetValue(api, &CODECAPI_AVEncCommonQualityVsSpeed, &value));
+        V_UI4(&value) = 0;
+        CHECK(ICodecAPI_SetValue(api, &CODECAPI_AVEncAdaptiveMode, &value));
+        ICodecAPI_Release(api);
+    }
+    else if (codecapi)
     {
         /* What Overwatch's h264-win32-* settings map to. */
         ICodecAPI *api;

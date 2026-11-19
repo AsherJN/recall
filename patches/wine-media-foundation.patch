@@ -1564,10 +1564,10 @@ index 0000000..f83dd1f
 +}
 diff --git a/dlls/winemacmf/h264_encoder.c b/dlls/winemacmf/h264_encoder.c
 new file mode 100644
-index 0000000..7bceb78
+index 0000000..b4c5af8
 --- /dev/null
 +++ b/dlls/winemacmf/h264_encoder.c
-@@ -0,0 +1,1118 @@
+@@ -0,0 +1,1119 @@
 +/*
 + * H.264 encoder transform on VideoToolbox
 + *
@@ -1733,7 +1733,8 @@ index 0000000..7bceb78
 +    params.frame_rate_num = encoder->rate_num;
 +    params.frame_rate_den = encoder->rate_den;
 +    params.format = encoder->format;
-+    params.bitrate = encoder->rate_control == eAVEncCommonRateControlMode_Quality ? 0 : bitrate;
++    /* With quality-based rate control too: an encoder without it uses the average instead. */
++    params.bitrate = bitrate;
 +    params.max_bitrate = encoder->rate_control == eAVEncCommonRateControlMode_PeakConstrainedVBR
 +            || encoder->rate_control == eAVEncCommonRateControlMode_CBR ? max(encoder->max_bitrate, bitrate) : 0;
 +    params.quality = encoder->rate_control == eAVEncCommonRateControlMode_Quality ? max(encoder->quality, 1) : 0;
@@ -2787,10 +2788,10 @@ index 0000000..06639f5
 +#endif /* __WINE_WINEMACMF_COCOA_H */
 diff --git a/dlls/winemacmf/macmf_cocoa.m b/dlls/winemacmf/macmf_cocoa.m
 new file mode 100644
-index 0000000..4437231
+index 0000000..66934aa
 --- /dev/null
 +++ b/dlls/winemacmf/macmf_cocoa.m
-@@ -0,0 +1,1757 @@
+@@ -0,0 +1,1828 @@
 +/*
 + * Media Foundation encoders and MPEG-4 writer on macOS frameworks
 + *
@@ -2836,8 +2837,15 @@ index 0000000..4437231
 +
 +/* Media Foundation's time unit is 100 ns. */
 +#define MF_TIMESCALE 10000000
-+/* Frames the video encoder may hold before encode waits for it. */
-+#define VIDEO_PENDING_LIMIT 8
++/* VideoToolbox holds frames while it encodes: Apple's hardware H.264 encoder returns the first
++ * at once and holds up to about 4, its software encoder (which macOS gives when the hardware one
++ * is unavailable) keeps 15 back before it returns the first (Main and High profiles). Encode
++ * lets the encoder hold this many frames more than it kept back; when the encoder returns
++ * nothing for a second while it holds them all, it gets this many more, since only further
++ * frames let it return one. */
++#define VIDEO_PENDING_MARGIN 8
++/* An encoder that encode has waited on this long without getting a frame back has stopped. */
++#define VIDEO_STALL_SECONDS 10.0
 +
 +enum
 +{
@@ -2951,6 +2959,14 @@ index 0000000..4437231
 +/* H.264 encoder                                                             */
 +/* ------------------------------------------------------------------------ */
 +
++static double monotonic_seconds(void)
++{
++    struct timespec now;
++
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    return now.tv_sec + now.tv_nsec / 1e9;
++}
++
 +struct video_encoder
 +{
 +    VTCompressionSessionRef session;
@@ -2960,7 +2976,13 @@ index 0000000..4437231
 +    pthread_mutex_t lock;
 +    pthread_cond_t cond;
 +    struct packet_queue packets;
-+    unsigned int pending;
++    unsigned int pending;       /* frames given to the encoder and not yet returned */
++    unsigned int limit;         /* pending at which encode waits for a frame to return */
++    unsigned int kept_back;     /* pending when the first frame returned */
++    unsigned int returned;      /* frames returned so far */
++    double waited;              /* seconds encode has waited since a frame last returned */
++    int hardware;
++    int kept_back_logged;
 +    OSStatus error;
 +    int error_logged;
 +    int missing_config;
@@ -2983,6 +3005,12 @@ index 0000000..4437231
 +    {
 +        encoder->missing_config = 2;
 +        log_error("H.264 encoder output has no parameter sets");
++    }
++    if (encoder->returned && !encoder->kept_back_logged)
++    {
++        encoder->kept_back_logged = 1;
++        log_trace("H.264 encoder (%s) kept back %u frames", encoder->hardware ? "hardware" : "software",
++                encoder->kept_back);
 +    }
 +}
 +
@@ -3130,7 +3158,15 @@ index 0000000..4437231
 +        free(packet->data);
 +        free(packet);
 +    }
++    if (!encoder->returned && encoder->pending)
++    {
++        encoder->kept_back = encoder->pending;
++        if (encoder->limit < encoder->pending + VIDEO_PENDING_MARGIN)
++            encoder->limit = encoder->pending + VIDEO_PENDING_MARGIN;
++    }
 +    if (encoder->pending) encoder->pending--;
++    encoder->returned++;
++    encoder->waited = 0.0;
 +    pthread_cond_broadcast(&encoder->cond);
 +    pthread_mutex_unlock(&encoder->lock);
 +}
@@ -3158,12 +3194,15 @@ index 0000000..4437231
 +    NSDictionary *specification, *source;
 +    double frame_rate = 0.0;
 +    CFStringRef profile;
++    const char *value;
 +    uint32_t bitrate;
 +    OSStatus status;
++    int software;
 +
 +    if (!settings->width || !settings->height) return NULL;
 +    if (!(encoder = calloc(1, sizeof(*encoder)))) return NULL;
 +    encoder->settings = *settings;
++    encoder->limit = VIDEO_PENDING_MARGIN;
 +    pthread_mutex_init(&encoder->lock, NULL);
 +    pthread_cond_init(&encoder->cond, NULL);
 +
@@ -3174,7 +3213,11 @@ index 0000000..4437231
 +                : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
 +    encoder->matrix = settings->bt601 ? kCVImageBufferYCbCrMatrix_ITU_R_601_4 : kCVImageBufferYCbCrMatrix_ITU_R_709_2;
 +
-+    specification = @{(__bridge NSString *)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES};
++    /* WINEMACMF_SOFTWARE_ENCODER=1 asks for Apple's software encoder, which VideoToolbox
++     * otherwise gives only when the hardware one is not available (tests use it). */
++    software = (value = getenv("WINEMACMF_SOFTWARE_ENCODER")) && atoi(value);
++    specification = @{(__bridge NSString *)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder:
++            software ? @NO : @YES};
 +    source = @{(__bridge NSString *)kCVPixelBufferPixelFormatTypeKey: @(encoder->pixel_format),
 +               (__bridge NSString *)kCVPixelBufferWidthKey: @(settings->width),
 +               (__bridge NSString *)kCVPixelBufferHeightKey: @(settings->height),
@@ -3214,11 +3257,14 @@ index 0000000..4437231
 +                (__bridge CFTypeRef)@2.0, "key frame interval duration");
 +
 +    bitrate = settings->bitrate;
-+    if (!bitrate && settings->quality)
-+        set_property(encoder->session, kVTCompressionPropertyKey_Quality,
-+                (__bridge CFTypeRef)@(settings->quality / 100.0), "quality");
++    /* Quality-based rate control where the encoder has it. Apple's software encoder has not:
++     * it gets the average bitrate the program asked for with the quality. */
++    if (settings->quality && !(status = VTSessionSetProperty(encoder->session, kVTCompressionPropertyKey_Quality,
++            (__bridge CFTypeRef)@(settings->quality / 100.0))))
++        bitrate = 0;
 +    else
 +    {
++        if (settings->quality) log_trace("H.264 encoder has no quality setting (%d): average bitrate", (int)status);
 +        /* About what Windows' encoder picks when given nothing: 0.1 bit per pixel. */
 +        if (!bitrate) bitrate = (uint32_t)fmin(4.0e9, settings->width * (double)settings->height * frame_rate * 0.1);
 +        video_set_bitrate(encoder, bitrate, settings->max_bitrate);
@@ -3232,9 +3278,20 @@ index 0000000..4437231
 +
 +    if ((status = VTCompressionSessionPrepareToEncodeFrames(encoder->session)))
 +        log_trace("H.264 encoder could not prepare: %d", (int)status);
++    {
++        CFBooleanRef hardware = NULL;
 +
-+    log_trace("H.264 encoder %ux%u at %.3f fps, %u bit/s, format %u, profile %u",
-+            settings->width, settings->height, frame_rate, bitrate, settings->format, settings->profile);
++        if (!VTSessionCopyProperty(encoder->session, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
++                kCFAllocatorDefault, &hardware) && hardware)
++        {
++            encoder->hardware = CFBooleanGetValue(hardware);
++            CFRelease(hardware);
++        }
++    }
++
++    log_trace("H.264 encoder %ux%u at %.3f fps, %u bit/s, format %u, profile %u, %s",
++            settings->width, settings->height, frame_rate, bitrate, settings->format, settings->profile,
++            encoder->hardware ? "hardware" : "software");
 +    return encoder;
 +}
 +
@@ -3393,11 +3450,26 @@ index 0000000..4437231
 +    OSStatus status;
 +
 +    pthread_mutex_lock(&encoder->lock);
-+    while (encoder->pending >= VIDEO_PENDING_LIMIT && !encoder->error)
++    while (encoder->pending >= encoder->limit && !encoder->error)
 +    {
++        unsigned int returned = encoder->returned;
++        double start = monotonic_seconds();
++
 +        clock_gettime(CLOCK_REALTIME, &deadline);
 +        deadline.tv_sec += 1;
 +        pthread_cond_timedwait(&encoder->cond, &encoder->lock, &deadline);
++        if (encoder->returned != returned || encoder->pending < encoder->limit) continue;
++        encoder->waited += monotonic_seconds() - start;
++        if (encoder->waited >= VIDEO_STALL_SECONDS)
++        {
++            encoder->error = kVTVideoEncoderMalfunctionErr;
++            encoder->error_logged = 1;
++            log_error("H.264 encoder (%s) returned no frame in %.0f s while holding %u",
++                    encoder->hardware ? "hardware" : "software", encoder->waited, encoder->pending);
++            break;
++        }
++        /* Nothing came back: the encoder keeps back more frames than it has. */
++        encoder->limit = encoder->pending + VIDEO_PENDING_MARGIN;
 +    }
 +    status = encoder->error;
 +    video_report(encoder);
@@ -6229,7 +6301,7 @@ index 0000000..76e62c9
 +C_ASSERT(ARRAY_SIZE(__wine_unix_call_funcs) == unix_funcs_count);
 diff --git a/dlls/winemacmf/unixlib.h b/dlls/winemacmf/unixlib.h
 new file mode 100644
-index 0000000..2dbcf4c
+index 0000000..0a10df1
 --- /dev/null
 +++ b/dlls/winemacmf/unixlib.h
 @@ -0,0 +1,216 @@
@@ -6290,7 +6362,7 @@ index 0000000..2dbcf4c
 +    UINT32 format;          /* enum macmf_video_format */
 +    UINT32 bitrate;         /* average bits per second, 0 lets the encoder choose */
 +    UINT32 max_bitrate;     /* peak bits per second, 0 for none */
-+    UINT32 quality;         /* 1-100 asks for quality-based rate control instead */
++    UINT32 quality;         /* 1-100 asks for quality-based rate control instead, where the encoder has it */
 +    UINT32 profile;         /* eAVEncH264VProfile (66, 77, 100), 0 for High */
 +    UINT32 gop_size;        /* frames between key frames, 0 for two seconds */
 +    UINT32 b_frames;        /* nonzero allows frame reordering */

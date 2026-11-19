@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Test Wine's actual exclusive-mode method without a game or display access.
 
-The activation patch retains the complete setMode method as context. Tests
-extract its before/after images and executable-name selection, then compile
-those production bodies with fake NSApp and CG display boundaries. No Wine
-source checkout or installed runtime is needed; no real display API is called.
+The patch's setMode hunk must change only the activity predicate, and the
+executable-name selection must match Diablo III alone. Where the driver's source
+checkout is present (the engineering tree), the patch is applied to the
+checkout's first commit, its base, and the complete before/after setMode methods
+are compiled with fake NSApp and CG display boundaries. The patch keeps the
+usual three lines of context, as scripts/build_wine_native.py writes it, so the
+public tree, which has the patch but not Wine's source, runs the hunk checks
+only. No installed runtime is needed; no real display API is called.
 """
 import ast
+import functools
 import hashlib
 import json
 from pathlib import Path
@@ -18,22 +23,41 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PATCH = ROOT / 'patches/wine-winemac-activation.patch'
+SOURCES = ROOT / 'docs/SOURCES.json'
+if not SOURCES.exists():  # the engineering tree keeps it as docs/public-sources.json
+    SOURCES = ROOT / 'docs/public-sources.json'
+SOURCE = ROOT / 'runtime/source/wine-winemac'
+COCOA_APP = 'dlls/winemac.drv/cocoa_app.m'
+MACDRV_MAIN = 'dlls/winemac.drv/macdrv_main.c'
+SET_MODE = '- (BOOL) setMode:(CGDisplayModeRef)mode forDisplay:(CGDirectDisplayID)displayID'
+PREDICATE = ' || (diablo_eager_initial_mode && !beenActive)'
+
+
+def hunks(filename):
+    """This file's unified-diff hunks: header, before image and after image."""
+    marker = 'diff --git a/{0} b/{0}\n'.format(filename)
+    section = PATCH.read_text().split(marker, 1)[1].split('\ndiff --git ', 1)[0]
+    result = []
+    for line in section.splitlines(keepends=True):
+        if line.startswith('@@ '):
+            result.append(dict(header=line, before=[], after=[]))
+        elif result and line[:1] in ' -+':
+            if line[:1] in ' -':
+                result[-1]['before'].append(line[1:])
+            if line[:1] in ' +':
+                result[-1]['after'].append(line[1:])
+    return result
 
 
 def patch_image(filename, after=True):
     """Return only source lines from this file's unified-diff hunks."""
-    marker = 'diff --git a/{0} b/{0}\n'.format(filename)
-    section = PATCH.read_text().split(marker, 1)[1].split('\ndiff --git ', 1)[0]
-    result = []
-    in_hunk = False
-    for line in section.splitlines(keepends=True):
-        if line.startswith('@@ '):
-            in_hunk = True
-            result.append('\n')
-        elif in_hunk and (line.startswith(' ') or
-                          line.startswith('+' if after else '-')):
-            result.append(line[1:])
-    return ''.join(result)
+    return ''.join('\n' + ''.join(hunk['after' if after else 'before']) for hunk in hunks(filename))
+
+
+def normalized(text):
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    text = re.sub(r'//[^\n]*', '', text)
+    return re.sub(r'\s+', '', text)
 
 
 def extract(text, signature):
@@ -47,7 +71,7 @@ def extract(text, signature):
 
 
 def process_scope():
-    text = patch_image('dlls/winemac.drv/macdrv_main.c')
+    text = patch_image(MACDRV_MAIN)
     declaration = re.search(r'static const WCHAR diablo3W\[\]\s*=\s*\{[^}]+\};', text).group()
     start = text.index('appname = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;')
     end = text.index('diablo_eager_initial_mode =', start)
@@ -55,9 +79,38 @@ def process_scope():
     return declaration + '\n' + text[start:end]
 
 
+@functools.lru_cache(maxsize=None)
+def patched_source():
+    """(before, after) of cocoa_app.m: the source checkout's first commit, and it with the patch applied.
+
+    None without the checkout. Every branch of the checkout shares that first commit, so the
+    result depends only on the patch, not on what is checked out."""
+    if not (SOURCE / '.git').exists():
+        return None
+    git = ['git', '-C', str(SOURCE)]
+    first = subprocess.run([*git, 'rev-list', '--max-parents=0', 'HEAD'],
+                           capture_output=True, text=True, check=True).stdout.split()[0]
+    with tempfile.TemporaryDirectory(prefix='recall-eager-source-') as tmp:
+        names = sorted({line[len('diff --git a/'):].split(' b/', 1)[0]
+                        for line in PATCH.read_text().splitlines() if line.startswith('diff --git a/')})
+        for name in names:
+            shown = subprocess.run([*git, 'show', f'{first}:{name}'], capture_output=True)
+            if shown.returncode == 0:  # otherwise the patch creates the file
+                path = Path(tmp) / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(shown.stdout)
+        before = (Path(tmp) / COCOA_APP).read_text()
+        applied = subprocess.run(['git', 'apply', str(PATCH)], cwd=tmp, capture_output=True, text=True)
+        if applied.returncode:
+            raise AssertionError('patch does not apply to the checkout base: ' + applied.stderr)
+        return before, (Path(tmp) / COCOA_APP).read_text()
+
+
 def production_method(after=True):
-    return extract(patch_image('dlls/winemac.drv/cocoa_app.m', after),
-                   '- (BOOL) setMode:(CGDisplayModeRef)mode forDisplay:(CGDirectDisplayID)displayID')
+    source = patched_source()
+    if source is None:
+        raise unittest.SkipTest("needs Wine's source checkout at runtime/source/wine-winemac")
+    return extract(source[1] if after else source[0], SET_MODE)
 
 
 HARNESS=r'''
@@ -212,25 +265,29 @@ int main(void){@autoreleasepool{
 '''
 
 class EagerInitialMode(unittest.TestCase):
-    def test_set_mode_changes_only_initial_activity_predicate(self):
-        def normalized(text):
-            text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
-            text = re.sub(r'//[^\n]*', '', text)
-            return re.sub(r'\s+', '', text)
-        method = production_method()
-        predicate = ' || (diablo_eager_initial_mode && !beenActive)'
-        self.assertEqual(method.count(predicate), 1)
-        self.assertEqual(normalized(method.replace(predicate, '')),
-                         normalized(production_method(after=False)))
-        main = patch_image('dlls/winemac.drv/macdrv_main.c')
+    def test_set_mode_hunk_changes_only_initial_activity_predicate(self):
+        found = [hunk for hunk in hunks(COCOA_APP) if PREDICATE in ''.join(hunk['after'])]
+        self.assertEqual(len(found), 1)
+        hunk = found[0]
+        self.assertIn(SET_MODE, hunk['header'])
+        after, before = ''.join(hunk['after']), ''.join(hunk['before'])
+        self.assertEqual(after.count(PREDICATE), 1)
+        self.assertEqual(normalized(after.replace(PREDICATE, '')), normalized(before))
+        main = patch_image(MACDRV_MAIN)
         self.assertEqual(main.count('bool diablo_eager_initial_mode = false;'), 1)
         self.assertIn('extern bool diablo_eager_initial_mode;',
                       patch_image('dlls/winemac.drv/macdrv_cocoa.h'))
         self.assertIn('static void setup_options(void)', main)
 
+    def test_set_mode_method_changes_only_initial_activity_predicate(self):
+        method = production_method()
+        self.assertEqual(method.count(PREDICATE), 1)
+        self.assertEqual(normalized(method.replace(PREDICATE, '')),
+                         normalized(production_method(after=False)))
+
     def test_patch_hashes_match_build_and_source_manifest(self):
         digest = hashlib.sha256(PATCH.read_bytes()).hexdigest()
-        manifest = json.loads((ROOT / 'docs/SOURCES.json').read_text())
+        manifest = json.loads(SOURCES.read_text())
         self.assertEqual(next(p['sha256'] for p in manifest['sources']['wine']['v1_patches']
                               if p['patch'] == 'patches/' + PATCH.name), digest)
         self.assertEqual(next(p['sha256'] for p in manifest['patches']

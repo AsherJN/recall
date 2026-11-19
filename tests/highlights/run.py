@@ -15,9 +15,16 @@ under runtime/phase-2/artifacts. The Wine prefix is made in a scratch folder (--
 where, a RAM disk for example) and removed afterwards unless --keep. --long adds a
 20-second 1080p60 clip and a 12-second 4K60 one. --cocoa also drives winemacmf's macOS
 half without Wine (cocoa_harness.c), built from runtime/source/wine-media.
+
+The game clips set the encoder as Overwatch does (--game: quality-based rate control, two
+B-frames). The software ones run them on Apple's software H.264 encoder, which macOS gives
+when the hardware one is unavailable: it keeps back 15 frames before it returns one and has
+no quality setting, and before the November 16 fix saving froze on it, leaving players a 0 MB
+file. A clip that takes longer than WRITER_TIMEOUT fails.
 """
 from pathlib import Path
 import argparse
+import os
 import json
 import shutil
 import subprocess
@@ -45,12 +52,17 @@ CLIPS = (
     ('hardware-defaults', 'rgb32', 'pcm16', HD, ('--hardware', '--no-codecapi'), ()),
     ('surround', 'rgb32', 'float', HD, ('--channels', '6'), ('--channels', '6')),
     ('1440p30', 'rgb32', 'pcm16', (2560, 1440, 30, 2), (), ()),
+    ('game-720p60', 'nv12', 'pcm16', (1280, 720, 60, 3), ('--game',), ()),
+    ('game-720p60-software', 'nv12', 'pcm16', (1280, 720, 60, 3), ('--game', '--software'), ()),
+    ('game-1080p60-software', 'nv12', 'pcm16', HD, ('--game', '--software'), ()),
 )
 LONG_CLIPS = (
     ('1080p60-20s', 'rgb32', 'pcm16', (1920, 1080, 60, 20), (), ()),
     ('4k60-12s', 'rgb32', 'pcm16', (3840, 2160, 60, 12), (), ()),
 )
 COCOA_FORMATS = ('bgra', 'nv12', 'i420', 'yv12', 'yuy2')
+SOFTWARE = {'WINEMACMF_SOFTWARE_ENCODER': '1'}   # --software: a clip option run.py turns into this
+WRITER_TIMEOUT = 300                              # seconds; the longest --long clip takes about a minute
 
 
 def pinned_engine():
@@ -130,6 +142,19 @@ def main():
                     report(f'cocoa {picture}', False, (result.stderr.strip().splitlines() or ['harness failed'])[-1])
                 else:
                     report(f'cocoa {picture}', *check(verifier, output, HD, ()))
+            for name, extra in (('cocoa game', {}), ('cocoa game software', SOFTWARE)):
+                output = work/(name.replace(' ', '-') + '.mp4')
+                try:
+                    result = subprocess.run([str(tools/'cocoa_harness'), str(output), 'nv12', *map(str, HD), '--game'],
+                                            capture_output=True, text=True, env=dict(os.environ, **extra),
+                                            timeout=WRITER_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    report(name, False, f'no file after {WRITER_TIMEOUT} s: the encoder stopped')
+                    continue
+                if result.returncode:
+                    report(name, False, (result.stderr.strip().splitlines() or ['harness failed'])[-1])
+                else:
+                    report(name, *check(verifier, output, HD, ()))
 
         # A fresh prefix: wineboot registers the engine's DLLs from wine.inf, winemacmf included.
         with open(work/'wineboot.log', 'w') as log:
@@ -137,13 +162,22 @@ def main():
         subprocess.run([str(engine/'bin/wineserver'), '-w'], env=env, check=True)
         shutil.copy(tools/'mf_writer_test.exe', prefix/'drive_c')
         for name, picture, audio, size, options, checks in CLIPS + (LONG_CLIPS if args.long else ()):
+            clip_env = dict(env, **SOFTWARE) if '--software' in options else env
+            options = [option for option in options if option != '--software']
             with open(work/f'{name}.wine.log', 'w') as log:
-                result = subprocess.run([str(engine/'bin/wine'), 'C:\\mf_writer_test.exe', f'C:\\{name}.mp4', picture,
-                                         audio, *map(str, size), *options],
-                                        env=env, stdout=subprocess.PIPE, stderr=log, text=True)
+                try:
+                    result = subprocess.run([str(engine/'bin/wine'), 'C:\\mf_writer_test.exe', f'C:\\{name}.mp4',
+                                             picture, audio, *map(str, size), *options],
+                                            env=clip_env, stdout=subprocess.PIPE, stderr=log, text=True,
+                                            timeout=WRITER_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    subprocess.run([str(engine/'bin/wineserver'), '-k'], env=env, stderr=subprocess.DEVNULL)
+                    report(name, False, f'no file after {WRITER_TIMEOUT} s: the encoder stopped (see {work/name}.wine.log)')
+                    continue
             written = last_json(result.stdout)
             if not written or not written.get('ok'):
-                report(name, False, f'writer: {written or result.stdout.strip() or "no output"} (see {work/name}.wine.log)')
+                report(name, False, f'writer exit {result.returncode}: {written or result.stdout.strip() or "no output"} '
+                                    f'(see {work/name}.wine.log)')
                 continue
             report(name, *check(verifier, prefix/'drive_c'/f'{name}.mp4', size, checks))
         finished = True

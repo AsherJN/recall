@@ -104,8 +104,11 @@ helper; generated files remain ignored. Remaining `test_*.py` modules depend on
 installed engines, reconstructed source, historical development shortcuts, or
 private measured sessions and are excluded from this portable selection.
 
-`tests/test_eager_initial_mode.py`, included in the portable selection, extracts
-Wine's complete exclusive-mode method from the activation patch's context and
+`tests/test_eager_initial_mode.py`, included in the portable selection, checks
+that the activation patch's exclusive-mode hunk changes only the activity
+predicate. With Wine's driver source checked out at `runtime/source/wine-winemac`
+(the patch's base is that checkout's first commit), it also applies
+the patch to that source, extracts Wine's complete exclusive-mode method and
 compiles it against fake application/display boundaries. It checks that an
 inactive Diablo III startup realizes its requested physical mode before the
 call returns, along with exact process selection, later background deferral,
@@ -239,6 +242,22 @@ built with `patches/wine-winemac-activation.patch` (`scripts/build_wine_native.p
 `scripts/derive_runtime.py --native winemac`): with `WINEMAC_APPKIT_UPDATE_CYCLE=0` (Faster key
 response) AppKit's display-synchronized event loop is off, so input reaches the driver as it
 happens instead of once per display refresh. Without the variable, the driver behaves as before.
+
+Runtime `phase2-20261116.1` is `phase2-20261113.1` with Media Foundation built again from the updated
+`patches/wine-media-foundation.patch` (`scripts/build_wine_native.py media`, then
+`scripts/derive_runtime.py --media`): `winemacmf.so`, `winemacmf.dll`, `mfreadwrite.dll` and
+`mfh264enc.dll` are replaced, and `wine.inf` is unchanged. When macOS gives Apple's software H.264
+encoder instead of the hardware one, the encoder keeps 15 frames back before it returns the first,
+and saving an MP4 used to stop waiting for it. The encoder now gets the frames it needs, uses the
+program's average bitrate when it has no quality setting, and reports an error instead of waiting
+forever if it stops returning frames. `WINEMACMF_SOFTWARE_ENCODER=1` asks for the software encoder
+(the highlights tests use it).
+
+Runtime `phase2-20261119.1` is `phase2-20261116.1` with only the Mac driver `winemac.so` replaced,
+built with the updated `patches/wine-winemac-activation.patch` (`scripts/build_wine_native.py winemac`,
+then `scripts/derive_runtime.py --native winemac`): Diablo III's first exclusive fullscreen mode is
+applied before macOS first activates the game, so the game no longer sets up its picture for the old
+desktop mode. Every other program takes the same path as before.
 
 Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
 replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py

@@ -295,7 +295,11 @@ this build doesn't include. The patch:
 - passes the game's encoder settings (bit rate and rate control, quality, profile, keyframe interval,
   B-frames) through `ICodecAPI`, and reads RGB frames bottom-up when their type gives no stride, as
   Windows does;
-- lists RGB and I420 among the H.264 encoder's registered inputs.
+- lists RGB and I420 among the H.264 encoder's registered inputs;
+- gives Apple's software H.264 encoder, which macOS uses when the hardware one is unavailable, the
+  frames it keeps back before it returns the first (15), gives it the game's average bit rate since it
+  has no quality setting, and ends a save with an error instead of waiting forever if an encoder stops
+  returning frames.
 Saving as WebM, which the game encodes itself, is unchanged.
 
 Apply each patch once, in this order, first using `git apply --check`.

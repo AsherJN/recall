@@ -67,7 +67,7 @@
     },
     {
      "patch": "patches/wine-winemac-activation.patch",
-     "sha256": "e8b615ffb7b1cafc9b6897f836e01ab95c936fb814651eb590e540475a72bbb0"
+     "sha256": "6689832868fcab1194c11b0ac8cf89e335c396fe06ba5f386f99147e279621e4"
     },
     {
      "patch": "patches/wine-audio-devices.patch",
@@ -79,7 +79,7 @@
     },
     {
      "patch": "patches/wine-media-foundation.patch",
-     "sha256": "5d5de9e5153a0d49b57506b0a8ab84a9897edd0200146fe16fa76505633da368"
+     "sha256": "2140597e07840ec066e20c9cb9b5cbe65fb50bdd82fefbdddb8d15ce26ef0d5c"
     }
    ],
    "v1_patches_apply_after": "patches/wine-portable-directory-boolean.patch and Soju's ncrypt-persisted-keys.patch"
@@ -191,7 +191,7 @@
   },
   {
    "path": "patches/wine-winemac-activation.patch",
-   "sha256": "e8b615ffb7b1cafc9b6897f836e01ab95c936fb814651eb590e540475a72bbb0"
+   "sha256": "6689832868fcab1194c11b0ac8cf89e335c396fe06ba5f386f99147e279621e4"
   },
   {
    "path": "patches/wine-audio-devices.patch",
@@ -203,7 +203,7 @@
   },
   {
    "path": "patches/wine-media-foundation.patch",
-   "sha256": "5d5de9e5153a0d49b57506b0a8ab84a9897edd0200146fe16fa76505633da368"
+   "sha256": "2140597e07840ec066e20c9cb9b5cbe65fb50bdd82fefbdddb8d15ce26ef0d5c"
   }
  ]
 }
