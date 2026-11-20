@@ -28,11 +28,8 @@ Then open Recall from Applications and follow the setup steps. To update, run
 `brew update` and then `brew upgrade --cask recall`; **Update Now** in the app
 works too. To remove Recall and the game, run `brew uninstall --zap --cask recall`.
 
-**Why not `brew install --cask recall`?** Homebrew's official catalog doesn't
-accept apps whose GitHub repository is less than 30 days old, so for now Recall
-comes from its own tap, `asherjn/recall`. I plan to submit Recall to the catalog
-in November; once it's accepted, the shorter command will work. A tap can install
-anything its owner publishes, so only add taps from people you trust.
+A tap can install anything its owner publishes, so only add taps from people you
+trust.
 
 ## Your first matches
 
