@@ -285,8 +285,8 @@ so every other start downloaded it again.
 with Media Foundation's sink writer (`mfreadwrite`), which could neither encode nor finish a file.
 Wine has no AAC encoder, and its H.264 encoder and MPEG-4 file sink hand the work to GStreamer, which
 this build doesn't include. The patch:
-- adds `winemacmf`, built on macOS's own frameworks: an H.264 encoder (VideoToolbox), an AAC encoder
-  (AudioToolbox) and an MPEG-4 file sink (AVFoundation) that writes the file's index first. They are
+- adds `winemacmf`: an H.264 encoder (VideoToolbox), an AAC encoder (AudioToolbox) and an MPEG-4
+  file sink that writes the file itself and puts its index first. They are
   registered under the class IDs Wine's `mfh264enc` and `mfmp4srcsnk` forward to, and under Windows'
   AAC encoder ID; `wine.inf` registers `winemacmf.dll`;
 - lets the sink writer put encoders and format converters between the game's frames and the file,
@@ -299,7 +299,15 @@ this build doesn't include. The patch:
 - gives Apple's software H.264 encoder, which macOS uses when the hardware one is unavailable, the
   frames it keeps back before it returns the first (15), gives it the game's average bit rate since it
   has no quality setting, and ends a save with an error instead of waiting forever if an encoder stops
-  returning frames.
+  returning frames;
+- (1.6.6) finishes the file without waiting on anything else. Until 1.6.6 the sink used AVFoundation's
+  writer, which interleaved its tracks on queues of its own and could hold one back for good, and
+  finished on Media Foundation's standard work queue, whose single thread also carries the program's
+  callbacks: on some Macs a save stopped after its last frame and left a 0 MB file after the game had
+  said it was saved. The sink now keeps each sample in a temporary file as it arrives and writes the
+  index at the end, on a thread of its own; a sample or a track it cannot take is left out instead of
+  failing the file. Its AAC track marks each frame as needing the one before it, so Apple's players
+  and others trim the encoder's priming alike and the sound starts with the picture in both.
 Saving as WebM, which the game encodes itself, is unchanged.
 
 Apply each patch once, in this order, first using `git apply --check`.

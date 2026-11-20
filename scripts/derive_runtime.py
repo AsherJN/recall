@@ -74,7 +74,7 @@ REC-53): build_wine_native.py media's five files, all from wine-media-foundation
 mfreadwrite.dll (the sink writer: encoders inserted, samples encoded, Finalize), mfh264enc.dll (the
 RGB input the macOS encoder takes, registered) and share/wine/wine.inf (registers winemacmf.dll)
 replace the base's; winemacmf.dll and its Unix library winemacmf.so (H.264 on VideoToolbox, AAC on
-AudioToolbox, MPEG-4 files through AVFoundation's writer) are added, the library packaged and signed
+AudioToolbox, MPEG-4 files through its own writer; AVFoundation's until 1.6.6) are added, the library packaged and signed
 as the assembler treats Wine's Unix libraries. Every other file stays byte-identical. Later builds
 of the patch go in the same way, replacing all five.
 

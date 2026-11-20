@@ -105,9 +105,10 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
               MP4 files through Media Foundation's sink writer, which needs an H.264 encoder, an AAC
               encoder and an MPEG-4 sink. Wine keeps the first and the last in GStreamer, which the
               engine is built without, and has no AAC encoder. winemacmf.dll and its Unix library
-              winemacmf.so provide the three on VideoToolbox, AudioToolbox and AVFoundation's
-              writer (mfh264enc.dll and mfmp4srcsnk.dll create its classes, as they would
-              winegstreamer's); the sink writer gets the encoder insertion, encoding, draining and
+              winemacmf.so provide the three: H.264 on VideoToolbox, AAC on AudioToolbox and an
+              MPEG-4 writer of its own (mp4_writer.c; until 1.6.6 AVFoundation's writer, which
+              could hold a save forever) (mfh264enc.dll and mfmp4srcsnk.dll create its classes, as
+              they would winegstreamer's); the sink writer gets the encoder insertion, encoding, draining and
               Finalize it lacked; mfh264enc registers the RGB input the macOS encoder takes; and
               wine.inf registers winemacmf.dll. Overwatch saves its highlights this way (REC-53).
               winemacmf is not in the Phase 2 Makefile: its commands are those of mfh264enc (PE)
@@ -199,8 +200,8 @@ COMPONENTS.update({
 })
 MEDIA_COMPONENTS = ['mfreadwrite', 'mfh264enc', 'winemacmf', 'winemacmf-unix', 'wine-inf']
 WINEMACMF_PE_SOURCES = ['aac_encoder', 'h264_encoder', 'main', 'mpeg4_sink']
-WINEMACMF_UNIX_SOURCES = ['unixlib.c', 'macmf_cocoa.m']
-WINEMACMF_FRAMEWORKS = ['AVFoundation', 'AudioToolbox', 'CoreMedia', 'CoreVideo', 'VideoToolbox', 'Foundation',
+WINEMACMF_UNIX_SOURCES = ['unixlib.c', 'mp4_writer.c', 'macmf_cocoa.m']
+WINEMACMF_FRAMEWORKS = ['AudioToolbox', 'CoreMedia', 'CoreVideo', 'VideoToolbox', 'Foundation',
                         'CoreFoundation']
 LLVM_STRIP = ROOT / 'runtime/toolchains/llvm-mingw-20251216-ucrt-macos-universal/bin/llvm-strip'
 OUT = ROOT / 'runtime/build/wine-native'

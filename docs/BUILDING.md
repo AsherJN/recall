@@ -121,7 +121,9 @@ The `--overlay` control is a known failing diagnostic, not release acceptance.
 No test licenses or distributes Blizzard game files.
 
 `tests/highlights/run.py` saves MP4 highlights through Media Foundation in Wine the way Overwatch does
-and checks each file with AVFoundation; it needs an engine with `winemacmf` (by default the one
+(one clip as in a player's log: 27 seconds of 720p60, finished through the game's callback; one with
+Media Foundation's shared work queue held while the file is finished) and checks each file with
+AVFoundation, and with FFmpeg when it is installed; it needs an engine with `winemacmf` (by default the one
 `app/Resources/release.json` pins) and the pinned LLVM-MinGW. `tests/run_highlights.py` checks the
 app's Highlights window and the Recall mark without Wine.
 

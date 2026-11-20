@@ -219,6 +219,9 @@ do {
     if let first = (0..<frames).first(where: { abs(samples[channels * $0]) > 0.05 }) {
         report["audio_onset_ms"] = Double(first) / rate * 1000
         if Double(first) / rate > 0.005 { fail("tone starts \(Double(first) / rate * 1000) ms late (priming not trimmed?)") }
+        // The tone rises from zero: loud at the very first sample means sound was cut from its
+        // start (priming trimmed twice), so it plays ahead of the picture.
+        if first < 2 { fail("tone already loud at sample \(first): the sound starts early (priming trimmed twice?)") }
     } else { fail("audio is silent") }
 } catch { fail("audio reader: \(error)") }
 

@@ -18,7 +18,13 @@
  *
  *   mf_writer_test <out.mp4> [rgb32|argb32|rgb32-bottomup|rgb32-nostride|nv12] [pcm16|float]
  *                  [width height fps seconds] [--hardware] [--async] [--no-codecapi] [--game]
- *                  [--channels N]
+ *                  [--channels N] [--audio-per-frame] [--busy-queue]
+ *
+ * --audio-per-frame feeds the sound as Overwatch does (its trace, November 19): after each
+ * frame, the frame's length of PCM (800 samples at 48 kHz and 60 fps) instead of 10 ms steps.
+ * --busy-queue (with --async) holds Media Foundation's standard work queue, whose single
+ * thread also carries the program's own callbacks, from Finalize until OnFinalize or 30
+ * seconds: finishing the file must not wait for it. The report gives finalize_ms.
  */
 
 #define COBJMACROS
@@ -145,6 +151,40 @@ static HRESULT WINAPI callback_OnFinalize(IMFSinkWriterCallback *iface, HRESULT 
 
 static HRESULT WINAPI callback_OnMarker(IMFSinkWriterCallback *iface, DWORD index, void *context) { return S_OK; }
 
+/* --busy-queue: a work item that keeps the standard queue's thread until the file is done. */
+struct blocker
+{
+    IMFAsyncCallback IMFAsyncCallback_iface;
+    HANDLE release;
+};
+
+static HRESULT WINAPI blocker_QueryInterface(IMFAsyncCallback *iface, REFIID riid, void **out)
+{
+    if (IsEqualIID(riid, &IID_IMFAsyncCallback) || IsEqualIID(riid, &IID_IUnknown))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI blocker_AddRef(IMFAsyncCallback *iface) { return 2; }
+static ULONG WINAPI blocker_Release(IMFAsyncCallback *iface) { return 1; }
+static HRESULT WINAPI blocker_GetParameters(IMFAsyncCallback *iface, DWORD *flags, DWORD *queue) { return E_NOTIMPL; }
+
+static HRESULT WINAPI blocker_Invoke(IMFAsyncCallback *iface, IMFAsyncResult *result)
+{
+    struct blocker *blocker = CONTAINING_RECORD(iface, struct blocker, IMFAsyncCallback_iface);
+    WaitForSingleObject(blocker->release, 30000);
+    return S_OK;
+}
+
+static IMFAsyncCallbackVtbl blocker_vtbl =
+{
+    blocker_QueryInterface, blocker_AddRef, blocker_Release, blocker_GetParameters, blocker_Invoke,
+};
+
 static IMFSinkWriterCallbackVtbl callback_vtbl =
 {
     callback_QueryInterface, callback_AddRef, callback_Release, callback_OnFinalize, callback_OnMarker,
@@ -154,8 +194,10 @@ int wmain(int argc, WCHAR **argv)
 {
     const WCHAR *path;
     char video_format[32] = "rgb32", audio_format[32] = "pcm16";
-    UINT width = 1920, height = 1080, fps = 60, seconds = 3, frames, rate = 48000, channels = 2, i, j;
-    BOOL hardware = FALSE, async = FALSE, codecapi = TRUE, game = FALSE;
+    UINT width = 1920, height = 1080, fps = 60, seconds = 3, frames, rate = 48000, channels = 2, i, j, steps;
+    BOOL hardware = FALSE, async = FALSE, codecapi = TRUE, game = FALSE, per_frame = FALSE, busy = FALSE;
+    struct blocker blocker = {{&blocker_vtbl}};
+    DWORD finalize_start, finalize_ms;
     IMFMediaType *video_out, *video_in, *audio_out, *audio_in;
     IMFAttributes *attributes;
     IMFSinkWriter *writer;
@@ -187,6 +229,8 @@ int wmain(int argc, WCHAR **argv)
         else if (!wcscmp(argv[arg], L"--no-codecapi")) codecapi = FALSE;
         else if (!wcscmp(argv[arg], L"--game")) game = TRUE;
         else if (!wcscmp(argv[arg], L"--channels") && arg + 1 < argc) channels = _wtoi(argv[++arg]);
+        else if (!wcscmp(argv[arg], L"--audio-per-frame")) per_frame = TRUE;
+        else if (!wcscmp(argv[arg], L"--busy-queue")) busy = async = TRUE;
     }
     frames = fps * seconds;
 
@@ -310,12 +354,14 @@ int wmain(int argc, WCHAR **argv)
     start = GetTickCount();
     CHECK(IMFSinkWriter_BeginWriting(writer));
 
-    /* Ten milliseconds of audio per step, frames when their time comes. */
-    for (i = 0, j = 0; i < frames || j < seconds * 100;)
+    /* Ten milliseconds of audio per step, frames when their time comes; or a frame's length
+     * of audio after each frame. */
+    steps = per_frame ? frames : seconds * 100;
+    for (i = 0, j = 0; i < frames || j < steps;)
     {
-        LONGLONG video_time = i * 10000000LL / fps, audio_time = j * 100000LL;
+        LONGLONG video_time = i * 10000000LL / fps, audio_time = per_frame ? j * 10000000LL / fps : j * 100000LL;
 
-        if (i < frames && (j >= seconds * 100 || video_time <= audio_time))
+        if (i < frames && (j >= steps || (per_frame ? i <= j : video_time <= audio_time)))
         {
             IMFMediaBuffer *buffer;
             IMFSample *sample;
@@ -337,7 +383,7 @@ int wmain(int argc, WCHAR **argv)
         }
         else
         {
-            UINT count = rate / 100, size = count * channels * (!strcmp(audio_format, "float") ? 4 : 2), k;
+            UINT count = per_frame ? rate / fps : rate / 100, size = count * channels * (!strcmp(audio_format, "float") ? 4 : 2), k;
             IMFMediaBuffer *buffer;
             IMFSample *sample;
             BYTE *data;
@@ -366,7 +412,7 @@ int wmain(int argc, WCHAR **argv)
             CHECK(MFCreateSample(&sample));
             CHECK(IMFSample_AddBuffer(sample, buffer));
             CHECK(IMFSample_SetSampleTime(sample, audio_time));
-            CHECK(IMFSample_SetSampleDuration(sample, 100000));
+            CHECK(IMFSample_SetSampleDuration(sample, count * 10000000LL / rate));
             CHECK(IMFSinkWriter_WriteSample(writer, audio, sample));
             IMFSample_Release(sample);
             IMFMediaBuffer_Release(buffer);
@@ -375,15 +421,22 @@ int wmain(int argc, WCHAR **argv)
     }
 
     CHECK(IMFSinkWriter_GetStatistics(writer, video, &stats));
+    if (busy)
+    {
+        blocker.release = callback.finalized;
+        CHECK(MFPutWorkItem(MFASYNC_CALLBACK_QUEUE_STANDARD, &blocker.IMFAsyncCallback_iface, NULL));
+    }
+    finalize_start = GetTickCount();
     CHECK(IMFSinkWriter_Finalize(writer));
     if (async)
     {
         if (WaitForSingleObject(callback.finalized, 120000)) { printf("{\"ok\": false, \"step\": \"OnFinalize\"}\n"); return 1; }
         CHECK(callback.status);
     }
+    finalize_ms = GetTickCount() - finalize_start;
     IMFSinkWriter_Release(writer);
     MFShutdown();
-    printf("{\"ok\": true, \"frames\": %u, \"video_samples_received\": %I64u, \"ms\": %lu}\n",
-            frames, stats.qwNumSamplesReceived, GetTickCount() - start);
+    printf("{\"ok\": true, \"frames\": %u, \"video_samples_received\": %I64u, \"ms\": %lu, \"finalize_ms\": %lu}\n",
+            frames, stats.qwNumSamplesReceived, GetTickCount() - start, finalize_ms);
     return 0;
 }

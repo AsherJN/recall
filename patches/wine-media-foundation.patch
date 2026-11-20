@@ -15,7 +15,7 @@ index 4e8244a..0b3a567 100644
      MFT_REGISTER_TYPE_INFO h264_encoder_mft_outputs[] =
      {
 diff --git a/dlls/mfreadwrite/writer.c b/dlls/mfreadwrite/writer.c
-index e57bf47..daa335e 100644
+index e57bf47..3e48905 100644
 --- a/dlls/mfreadwrite/writer.c
 +++ b/dlls/mfreadwrite/writer.c
 @@ -29,14 +29,22 @@
@@ -182,7 +182,7 @@ index e57bf47..daa335e 100644
 +
 +    if (FAILED(hr = stream_enumerate_transforms(input_type, output_type, TRUE, FALSE, attributes, &activates, &count)))
 +    {
-+        WARN("No encoder for %s, hr %#lx.\n", debugstr_guid(&stream->major_type), hr);
++        ERR("No encoder for %s, hr %#lx.\n", debugstr_guid(&stream->major_type), hr);
 +        return hr;
 +    }
 +    for (i = 0; i < count && !stream->encoder; ++i)
@@ -459,7 +459,7 @@ index e57bf47..daa335e 100644
 +    }
 +    if (FAILED(hr))
 +    {
-+        WARN("Transform %p did not take a sample, hr %#lx.\n", transforms[stage], hr);
++        ERR("Transform %p did not take a sample, hr %#lx.\n", transforms[stage], hr);
 +        return hr;
 +    }
 +    return stream_pull(stream, stage);
@@ -536,14 +536,16 @@ index e57bf47..daa335e 100644
              {
                  WARN("Failed to place a marker for stream %u.\n", i);
                  break;
-@@ -767,13 +1116,178 @@ static HRESULT WINAPI sink_writer_Flush(IMFSinkWriterEx *iface, DWORD index)
+@@ -767,13 +1116,202 @@ static HRESULT WINAPI sink_writer_Flush(IMFSinkWriterEx *iface, DWORD index)
      return hr;
  }
  
 -static HRESULT WINAPI sink_writer_Finalize(IMFSinkWriterEx *iface)
++/* Lives until the sink has called back, even when the writer stopped waiting. */
 +struct finalize_wait
 +{
 +    IMFAsyncCallback IMFAsyncCallback_iface;
++    LONG refcount;
 +    IMFFinalizableMediaSink *sink;
 +    HANDLE event;
 +    HRESULT hr;
@@ -559,6 +561,7 @@ index e57bf47..daa335e 100644
 +    if (IsEqualIID(riid, &IID_IMFAsyncCallback) || IsEqualIID(riid, &IID_IUnknown))
 +    {
 +        *out = iface;
++        IMFAsyncCallback_AddRef(iface);
 +        return S_OK;
 +    }
 +    *out = NULL;
@@ -566,14 +569,24 @@ index e57bf47..daa335e 100644
 +}
 +
 +static ULONG WINAPI finalize_wait_AddRef(IMFAsyncCallback *iface)
-+{
-+    return 2;
+ {
+-    FIXME("%p.\n", iface);
++    struct finalize_wait *wait = impl_from_finalize_wait(iface);
++    return InterlockedIncrement(&wait->refcount);
 +}
 +
 +static ULONG WINAPI finalize_wait_Release(IMFAsyncCallback *iface)
- {
--    FIXME("%p.\n", iface);
-+    return 1;
++{
++    struct finalize_wait *wait = impl_from_finalize_wait(iface);
++    ULONG refcount = InterlockedDecrement(&wait->refcount);
++
++    if (!refcount)
++    {
++        IMFFinalizableMediaSink_Release(wait->sink);
++        CloseHandle(wait->event);
++        free(wait);
++    }
++    return refcount;
 +}
  
 +static HRESULT WINAPI finalize_wait_GetParameters(IMFAsyncCallback *iface, DWORD *flags, DWORD *queue)
@@ -613,7 +626,7 @@ index e57bf47..daa335e 100644
 +static HRESULT sink_writer_finalize(struct sink_writer *writer)
 +{
 +    IMFFinalizableMediaSink *finalizable;
-+    struct finalize_wait wait;
++    struct finalize_wait *wait;
 +    DWORD start = GetTickCount();
 +    unsigned int i;
 +    HRESULT hr = S_OK;
@@ -630,7 +643,7 @@ index e57bf47..daa335e 100644
 +    {
 +        if (GetTickCount() - start > FINALIZE_TIMEOUT)
 +        {
-+            ERR("The sink did not take the last samples.\n");
++            ERR("The sink did not take the last samples in %u s.\n", FINALIZE_TIMEOUT / 1000);
 +            hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
 +            break;
 +        }
@@ -642,22 +655,33 @@ index e57bf47..daa335e 100644
 +    if (SUCCEEDED(hr) && SUCCEEDED(IMFMediaSink_QueryInterface(writer->sink, &IID_IMFFinalizableMediaSink,
 +            (void **)&finalizable)))
 +    {
-+        wait.IMFAsyncCallback_iface.lpVtbl = &finalize_wait_vtbl;
-+        wait.sink = finalizable;
-+        wait.hr = E_FAIL;
-+        wait.event = CreateEventW(NULL, TRUE, FALSE, NULL);
-+        if (SUCCEEDED(hr = IMFFinalizableMediaSink_BeginFinalize(finalizable, &wait.IMFAsyncCallback_iface, NULL)))
++        if (!(wait = calloc(1, sizeof(*wait))) || !(wait->event = CreateEventW(NULL, TRUE, FALSE, NULL)))
 +        {
-+            if (WaitForSingleObject(wait.event, FINALIZE_TIMEOUT * 5) == WAIT_OBJECT_0)
-+                hr = wait.hr;
++            free(wait);
++            IMFFinalizableMediaSink_Release(finalizable);
++            hr = E_OUTOFMEMORY;
++        }
++        else
++        {
++            wait->IMFAsyncCallback_iface.lpVtbl = &finalize_wait_vtbl;
++            wait->refcount = 1;
++            wait->sink = finalizable;
++            wait->hr = E_FAIL;
++            start = GetTickCount();
++            if (FAILED(hr = IMFFinalizableMediaSink_BeginFinalize(finalizable, &wait->IMFAsyncCallback_iface, NULL)))
++                ERR("The sink cannot finish its file, hr %#lx.\n", hr);
++            else if (WaitForSingleObject(wait->event, FINALIZE_TIMEOUT) == WAIT_OBJECT_0)
++            {
++                hr = wait->hr;
++                TRACE("The sink finished its file in %lu ms, hr %#lx.\n", GetTickCount() - start, hr);
++            }
 +            else
 +            {
-+                ERR("The sink did not finish its file.\n");
++                ERR("The sink did not finish its file in %u s.\n", FINALIZE_TIMEOUT / 1000);
 +                hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
 +            }
++            IMFAsyncCallback_Release(&wait->IMFAsyncCallback_iface);
 +        }
-+        CloseHandle(wait.event);
-+        IMFFinalizableMediaSink_Release(finalizable);
 +    }
 +
 +    if (writer->clock) IMFPresentationClock_Stop(writer->clock);
@@ -667,7 +691,7 @@ index e57bf47..daa335e 100644
 +    writer->state = SINK_WRITER_STATE_FINALIZED;
 +    LeaveCriticalSection(&writer->cs);
 +
-+    if (FAILED(hr)) WARN("Finalize failed, hr %#lx.\n", hr);
++    if (FAILED(hr)) ERR("Finalize failed, hr %#lx.\n", hr);
 +    return hr;
 +}
 +
@@ -717,7 +741,7 @@ index e57bf47..daa335e 100644
  static HRESULT sink_writer_get_service(void *object, REFGUID service, REFIID riid, void **ret)
  {
      IUnknown *iface = object;
-@@ -880,13 +1394,15 @@ static HRESULT WINAPI sink_writer_GetTransformForStream(IMFSinkWriterEx *iface,
+@@ -880,13 +1418,15 @@ static HRESULT WINAPI sink_writer_GetTransformForStream(IMFSinkWriterEx *iface,
      if (stream->converter && transform_index == 0)
      {
          transform = stream->converter;
@@ -735,7 +759,7 @@ index e57bf47..daa335e 100644
      }
  
      hr = MF_E_INVALIDINDEX;
-@@ -1017,7 +1533,7 @@ static HRESULT WINAPI sink_writer_events_callback_Invoke(IMFAsyncCallback *iface
+@@ -1017,7 +1557,7 @@ static HRESULT WINAPI sink_writer_events_callback_Invoke(IMFAsyncCallback *iface
                  stream->stats.llLastSinkSampleRequest = timestamp;
                  stream->stats.dwNumOutstandingSinkSampleRequests++;
  
@@ -744,7 +768,7 @@ index e57bf47..daa335e 100644
  
                  break;
  
-@@ -1097,6 +1613,7 @@ HRESULT create_sink_writer_from_sink(IMFMediaSink *sink, IMFAttributes *attribut
+@@ -1097,6 +1637,7 @@ HRESULT create_sink_writer_from_sink(IMFMediaSink *sink, IMFAttributes *attribut
      IMFMediaSink_AddRef(sink);
      object->stats.cb = sizeof(object->stats);
      InitializeCriticalSection(&object->cs);
@@ -752,7 +776,7 @@ index e57bf47..daa335e 100644
  
      if (attributes)
      {
-@@ -1168,10 +1685,11 @@ static HRESULT sink_writer_get_sink_factory_class(const WCHAR *url, IMFAttribute
+@@ -1168,10 +1709,11 @@ static HRESULT sink_writer_get_sink_factory_class(const WCHAR *url, IMFAttribute
  
              for (i = 0; i < ARRAY_SIZE(ext_map); ++i)
              {
@@ -1564,7 +1588,7 @@ index 0000000..f83dd1f
 +}
 diff --git a/dlls/winemacmf/h264_encoder.c b/dlls/winemacmf/h264_encoder.c
 new file mode 100644
-index 0000000..b4c5af8
+index 0000000..594acf4
 --- /dev/null
 +++ b/dlls/winemacmf/h264_encoder.c
 @@ -0,0 +1,1119 @@
@@ -2000,7 +2024,7 @@ index 0000000..b4c5af8
 +    height = (UINT32)size;
 +    if (width != encoder->width || height != encoder->height)
 +    {
-+        WARN("Input is %ux%u, output %ux%u.\n", width, height, encoder->width, encoder->height);
++        ERR("Input is %ux%u, output %ux%u.\n", width, height, encoder->width, encoder->height);
 +        hr = MF_E_INVALIDMEDIATYPE;
 +        goto done;
 +    }
@@ -2310,7 +2334,7 @@ index 0000000..b4c5af8
 +    encoder->force_keyframe = FALSE;
 +    if ((status = UNIX_CALL(video_encoder_encode, &params)))
 +    {
-+        WARN("Failed to encode a frame, status %#lx.\n", status);
++        ERR("Failed to encode a frame, status %#lx.\n", status);
 +        hr = E_FAIL;
 +    }
 +
@@ -2788,16 +2812,15 @@ index 0000000..06639f5
 +#endif /* __WINE_WINEMACMF_COCOA_H */
 diff --git a/dlls/winemacmf/macmf_cocoa.m b/dlls/winemacmf/macmf_cocoa.m
 new file mode 100644
-index 0000000..66934aa
+index 0000000..cbc002b
 --- /dev/null
 +++ b/dlls/winemacmf/macmf_cocoa.m
-@@ -0,0 +1,1828 @@
+@@ -0,0 +1,1189 @@
 +/*
-+ * Media Foundation encoders and MPEG-4 writer on macOS frameworks
++ * Media Foundation encoders on macOS frameworks
 + *
-+ * H.264 through VideoToolbox (the Mac's hardware encoder), AAC through
-+ * AudioToolbox, and MPEG-4 files through AVFoundation's writer, which takes
-+ * the already encoded samples as they are.
++ * H.264 through VideoToolbox (the Mac's hardware encoder) and AAC through
++ * AudioToolbox. mp4_writer.c writes the MPEG-4 files.
 + *
 + * This library is free software; you can redistribute it and/or
 + * modify it under the terms of the GNU Lesser General Public
@@ -2819,7 +2842,6 @@ index 0000000..66934aa
 +#endif
 +
 +#import <Foundation/Foundation.h>
-+#import <AVFoundation/AVFoundation.h>
 +#import <AudioToolbox/AudioToolbox.h>
 +#import <CoreMedia/CoreMedia.h>
 +#import <CoreVideo/CoreVideo.h>
@@ -2862,12 +2884,6 @@ index 0000000..66934aa
 +    AUDIO_S24,
 +    AUDIO_S32,
 +    AUDIO_F32,
-+};
-+
-+enum
-+{
-+    TRACK_H264,
-+    TRACK_AAC,
 +};
 +
 +static void log_error(const char *format, ...) __attribute__((format(printf, 1, 2)));
@@ -3912,602 +3928,6 @@ index 0000000..66934aa
 +}
 +
 +/* ------------------------------------------------------------------------ */
-+/* MPEG-4 writer                                                             */
-+/* ------------------------------------------------------------------------ */
-+
-+/* Media before the first track has samples is kept until every track has one,
-+ * up to this much, so each gets its format before writing starts. */
-+#define MUXER_WAIT_LIMIT (3 * (int64_t)MF_TIMESCALE)
-+
-+@interface MacmfTrack : NSObject
-+{
-+@public
-+    int type;
-+    uint32_t width, height, sample_rate, channels, priming;
-+    NSData *config;
-+    CMFormatDescriptionRef format;
-+    AVAssetWriterInput *input;
-+    dispatch_queue_t queue;
-+    NSMutableArray *waiting;
-+    BOOL has_first;
-+    int64_t first_time;
-+    int64_t last_time;
-+    unsigned int written;
-+    unsigned int failed;
-+    NSString *failure;
-+}
-+@end
-+
-+@implementation MacmfTrack
-+- (void)dealloc
-+{
-+    if (format) CFRelease(format);
-+}
-+@end
-+
-+@interface MacmfMuxer : NSObject
-+{
-+@public
-+    NSString *directory;
-+    NSString *path;
-+    NSMutableArray<MacmfTrack *> *tracks;
-+    AVAssetWriter *writer;
-+    BOOL started;
-+    BOOL failed;
-+    NSLock *lock;
-+}
-+@end
-+
-+@implementation MacmfMuxer
-+@end
-+
-+static const uint8_t *next_start_code(const uint8_t *data, const uint8_t *end, int *code_size)
-+{
-+    const uint8_t *p;
-+
-+    for (p = data; p + 3 <= end; ++p)
-+    {
-+        if (p[0] || p[1]) continue;
-+        if (p[2] == 1)
-+        {
-+            *code_size = 3;
-+            return p;
-+        }
-+        if (p + 4 <= end && !p[2] && p[3] == 1)
-+        {
-+            *code_size = 4;
-+            return p;
-+        }
-+    }
-+    return end;
-+}
-+
-+/* Calls back with each NAL unit of an Annex B access unit. */
-+static void annexb_units(const uint8_t *data, uint32_t size, void (^unit)(const uint8_t *nal, uint32_t length))
-+{
-+    const uint8_t *end = data + size, *start, *next;
-+    int code_size = 0, next_size = 0;
-+
-+    start = next_start_code(data, end, &code_size);
-+    while (start < end)
-+    {
-+        start += code_size;
-+        next = next_start_code(start, end, &next_size);
-+        if (next > start) unit(start, (uint32_t)(next - start));
-+        start = next;
-+        code_size = next_size;
-+    }
-+}
-+
-+static CMFormatDescriptionRef h264_format(const uint8_t *data, uint32_t size)
-+{
-+    __block NSData *sps = nil, *pps = nil;
-+    CMFormatDescriptionRef format = NULL;
-+    const uint8_t *sets[2];
-+    size_t sizes[2];
-+    OSStatus status;
-+
-+    annexb_units(data, size, ^(const uint8_t *nal, uint32_t length) {
-+        int type = nal[0] & 0x1f;
-+        if (type == 7 && !sps) sps = [NSData dataWithBytes:nal length:length];
-+        else if (type == 8 && !pps) pps = [NSData dataWithBytes:nal length:length];
-+    });
-+    if (!sps || !pps) return NULL;
-+    sets[0] = sps.bytes;
-+    sizes[0] = sps.length;
-+    sets[1] = pps.bytes;
-+    sizes[1] = pps.length;
-+    if ((status = CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, 2, sets, sizes, 4, &format)))
-+    {
-+        log_error("Unusable H.264 parameter sets: %d", (int)status);
-+        return NULL;
-+    }
-+    return format;
-+}
-+
-+static void put_descriptor(NSMutableData *data, uint8_t tag, NSData *body)
-+{
-+    uint8_t header[2] = {tag, (uint8_t)body.length};
-+
-+    [data appendBytes:header length:2];
-+    [data appendData:body];
-+}
-+
-+/* The magic cookie Core Media wants for AAC: an MPEG-4 ES descriptor holding
-+ * the AudioSpecificConfig. */
-+static NSData *aac_cookie(NSData *config, uint32_t channels)
-+{
-+    NSMutableData *decoder = [NSMutableData data], *es = [NSMutableData data], *cookie = [NSMutableData data];
-+    uint32_t buffer = 6144 * channels / 8;
-+    uint8_t fields[13] = {0x40, 0x15, (uint8_t)(buffer >> 16), (uint8_t)(buffer >> 8), (uint8_t)buffer, 0, 0, 0, 0, 0, 0, 0, 0};
-+    uint8_t es_header[3] = {0, 0, 0}, sl = 2;
-+
-+    [decoder appendBytes:fields length:sizeof(fields)];
-+    put_descriptor(decoder, 0x05, config);
-+    [es appendBytes:es_header length:sizeof(es_header)];
-+    put_descriptor(es, 0x04, decoder);
-+    put_descriptor(es, 0x06, [NSData dataWithBytes:&sl length:1]);
-+    put_descriptor(cookie, 0x03, es);
-+    return cookie;
-+}
-+
-+static CMFormatDescriptionRef aac_format(MacmfTrack *track)
-+{
-+    AudioStreamBasicDescription description = {0};
-+    CMFormatDescriptionRef format = NULL;
-+    AudioChannelLayout layout = {0};
-+    NSData *cookie;
-+    OSStatus status;
-+
-+    if (!track->config.length) return NULL;
-+    description.mSampleRate = track->sample_rate;
-+    description.mFormatID = kAudioFormatMPEG4AAC;
-+    description.mFormatFlags = kMPEG4Object_AAC_LC;
-+    description.mFramesPerPacket = 1024;
-+    description.mChannelsPerFrame = track->channels;
-+    switch (track->channels)
-+    {
-+        case 1: layout.mChannelLayoutTag = kAudioChannelLayoutTag_Mono; break;
-+        case 2: layout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo; break;
-+        case 6: layout.mChannelLayoutTag = kAudioChannelLayoutTag_AAC_5_1; break;
-+        case 8: layout.mChannelLayoutTag = kAudioChannelLayoutTag_AAC_7_1; break;
-+    }
-+    cookie = aac_cookie(track->config, track->channels);
-+    status = CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &description,
-+            layout.mChannelLayoutTag ? sizeof(layout) : 0, layout.mChannelLayoutTag ? &layout : NULL,
-+            cookie.length, cookie.bytes, NULL, &format);
-+    if (status) log_error("Unusable AAC configuration: %d", (int)status);
-+    return format;
-+}
-+
-+static CMSampleBufferRef h264_sample(MacmfTrack *track, const uint8_t *data, uint32_t size,
-+        int64_t time, int64_t decode_time, int64_t duration, int keyframe)
-+{
-+    NSMutableData *avcc = [NSMutableData dataWithCapacity:size + 16];
-+    CMSampleTimingInfo timing;
-+    CMBlockBufferRef block = NULL;
-+    CMSampleBufferRef sample = NULL;
-+    size_t sample_size;
-+    void *memory;
-+
-+    annexb_units(data, size, ^(const uint8_t *nal, uint32_t length) {
-+        int type = nal[0] & 0x1f;
-+        uint8_t prefix[4] = {(uint8_t)(length >> 24), (uint8_t)(length >> 16), (uint8_t)(length >> 8), (uint8_t)length};
-+
-+        /* Parameter sets live in the format description; delimiters and filler are dropped. */
-+        if (type == 7 || type == 8 || type == 9 || type == 12) return;
-+        [avcc appendBytes:prefix length:4];
-+        [avcc appendBytes:nal length:length];
-+    });
-+    if (!avcc.length) return NULL;
-+
-+    sample_size = avcc.length;
-+    if (!(memory = malloc(sample_size))) return NULL;
-+    memcpy(memory, avcc.bytes, sample_size);
-+    if (CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, memory, sample_size, kCFAllocatorMalloc, NULL,
-+            0, sample_size, 0, &block))
-+    {
-+        free(memory);
-+        return NULL;
-+    }
-+    timing.presentationTimeStamp = mf_time(time);
-+    timing.decodeTimeStamp = decode_time == INT64_MIN ? kCMTimeInvalid : mf_time(decode_time);
-+    timing.duration = duration > 0 ? mf_time(duration) : kCMTimeInvalid;
-+    if (CMSampleBufferCreateReady(kCFAllocatorDefault, block, track->format, 1, 1, &timing, 1, &sample_size, &sample))
-+        sample = NULL;
-+    CFRelease(block);
-+    if (sample)
-+    {
-+        CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, true);
-+        CFMutableDictionaryRef dict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
-+
-+        CFDictionarySetValue(dict, kCMSampleAttachmentKey_NotSync, keyframe ? kCFBooleanFalse : kCFBooleanTrue);
-+        CFDictionarySetValue(dict, kCMSampleAttachmentKey_DependsOnOthers, keyframe ? kCFBooleanFalse : kCFBooleanTrue);
-+    }
-+    return sample;
-+}
-+
-+static CMSampleBufferRef aac_sample(MacmfTrack *track, const uint8_t *data, uint32_t size, int64_t time,
-+        int64_t duration)
-+{
-+    AudioStreamPacketDescription description = {0, 0, size};
-+    CMBlockBufferRef block = NULL;
-+    CMSampleBufferRef sample = NULL;
-+    void *memory;
-+
-+    if (!size || !(memory = malloc(size))) return NULL;
-+    memcpy(memory, data, size);
-+    if (CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, memory, size, kCFAllocatorMalloc, NULL,
-+            0, size, 0, &block))
-+    {
-+        free(memory);
-+        return NULL;
-+    }
-+    /* Presentation in the track's own sample rate keeps every frame exactly 1024 long. */
-+    if (CMAudioSampleBufferCreateReadyWithPacketDescriptions(kCFAllocatorDefault, block, track->format, 1,
-+            CMTimeConvertScale(mf_time(time), track->sample_rate, kCMTimeRoundingMethod_RoundHalfAwayFromZero),
-+            &description, &sample))
-+        sample = NULL;
-+    CFRelease(block);
-+    /* The encoder gives its last frame the length of the sound it holds; the rest is padding. */
-+    if (sample && duration > 0)
-+    {
-+        int64_t frames = (duration * track->sample_rate + MF_TIMESCALE / 2) / MF_TIMESCALE;
-+
-+        if (frames < 1024)
-+        {
-+            CFDictionaryRef trim = CMTimeCopyAsDictionary(CMTimeMake(1024 - frames, track->sample_rate),
-+                    kCFAllocatorDefault);
-+            CMSetAttachment(sample, kCMSampleBufferAttachmentKey_TrimDurationAtEnd, trim, kCMAttachmentMode_ShouldPropagate);
-+            CFRelease(trim);
-+        }
-+    }
-+    return sample;
-+}
-+
-+static void append_sample(MacmfMuxer *muxer, MacmfTrack *track, id sample)
-+{
-+    dispatch_async(track->queue, ^{
-+        AVAssetWriterInput *input = track->input;
-+        AVAssetWriter *writer = muxer->writer;
-+
-+        if (!input) return;
-+        /* The writer interleaves its tracks and holds one back until the others catch up. */
-+        while (!input.readyForMoreMediaData)
-+        {
-+            if (writer.status != AVAssetWriterStatusWriting) return;
-+            usleep(1000);
-+        }
-+        if (writer.status != AVAssetWriterStatusWriting) return;
-+        /* This runs on a dispatch thread, which must not log through Wine. */
-+        @try
-+        {
-+            if ([input appendSampleBuffer:(__bridge CMSampleBufferRef)sample]) track->written++;
-+            else if (!track->failed++) track->failure = writer.error.description ?: @"unknown error";
-+        }
-+        @catch (NSException *exception)
-+        {
-+            if (!track->failed++) track->failure = exception.reason ?: @"exception";
-+        }
-+    });
-+}
-+
-+/* Creates the writer once each track has its format, or once waiting is pointless. */
-+static BOOL muxer_start_body(MacmfMuxer *muxer, BOOL force);
-+
-+/* AVFoundation reports misuse with exceptions; in a game they would end the process. */
-+static BOOL muxer_start(MacmfMuxer *muxer, BOOL force)
-+{
-+    @try
-+    {
-+        return muxer_start_body(muxer, force);
-+    }
-+    @catch (NSException *exception)
-+    {
-+        log_error("MPEG-4 writer could not start: %s", exception.reason.UTF8String);
-+        muxer->failed = YES;
-+        return NO;
-+    }
-+}
-+
-+static BOOL muxer_start_body(MacmfMuxer *muxer, BOOL force)
-+{
-+    int64_t start = INT64_MAX, earliest = INT64_MAX, latest = INT64_MIN;
-+    MacmfTrack *video = nil;
-+    NSURL *url;
-+    NSError *error = nil;
-+    BOOL waiting = NO;
-+
-+    for (MacmfTrack *track in muxer->tracks)
-+    {
-+        if (!track->has_first)
-+        {
-+            waiting = YES;
-+            continue;
-+        }
-+        if (track->type == TRACK_H264 && !video) video = track;
-+        if (track->first_time < earliest) earliest = track->first_time;
-+        if (track->last_time > latest) latest = track->last_time;
-+    }
-+    if (earliest == INT64_MAX) return NO;
-+    if (waiting && !force && latest - earliest < MUXER_WAIT_LIMIT) return NO;
-+
-+    url = [NSURL fileURLWithPath:muxer->path];
-+    muxer->writer = [[AVAssetWriter alloc] initWithURL:url fileType:AVFileTypeMPEG4 error:&error];
-+    if (!muxer->writer)
-+    {
-+        log_error("Could not create the MPEG-4 writer: %s", error.description.UTF8String);
-+        muxer->failed = YES;
-+        return NO;
-+    }
-+    muxer->writer.shouldOptimizeForNetworkUse = YES;
-+
-+    for (MacmfTrack *track in muxer->tracks)
-+    {
-+        AVAssetWriterInput *input;
-+
-+        if (!track->has_first)
-+        {
-+            log_error("MPEG-4 writer starts without its %s track", track->type == TRACK_H264 ? "video" : "audio");
-+            continue;
-+        }
-+        input = [AVAssetWriterInput assetWriterInputWithMediaType:track->type == TRACK_H264 ? AVMediaTypeVideo
-+                : AVMediaTypeAudio outputSettings:nil sourceFormatHint:track->format];
-+        input.expectsMediaDataInRealTime = NO;
-+        /* Audio keeps its sample rate as its time scale; video gets the usual 90 kHz. */
-+        if (track->type == TRACK_H264) input.mediaTimeScale = 90000;
-+        if (![muxer->writer canAddInput:input])
-+        {
-+            log_error("MPEG-4 writer cannot take the %s track", track->type == TRACK_H264 ? "video" : "audio");
-+            continue;
-+        }
-+        [muxer->writer addInput:input];
-+        track->input = input;
-+    }
-+    if (![muxer->writer startWriting])
-+    {
-+        log_error("MPEG-4 writer did not start: %s", muxer->writer.error.description.UTF8String);
-+        muxer->failed = YES;
-+        return NO;
-+    }
-+
-+    /* Video starts the file; audio before it (such as the AAC encoder's priming) is trimmed. */
-+    if (video) start = video->first_time;
-+    else
-+    {
-+        for (MacmfTrack *track in muxer->tracks)
-+        {
-+            int64_t first;
-+
-+            if (!track->has_first) continue;
-+            first = track->first_time;
-+            if (track->type == TRACK_AAC && track->sample_rate)
-+                first += (int64_t)track->priming * MF_TIMESCALE / track->sample_rate;
-+            if (first < start) start = first;
-+        }
-+    }
-+    [muxer->writer startSessionAtSourceTime:mf_time(start)];
-+    muxer->started = YES;
-+    log_trace("MPEG-4 writer started at %lld with %u tracks", (long long)start, (unsigned int)muxer->writer.inputs.count);
-+
-+    for (MacmfTrack *track in muxer->tracks)
-+    {
-+        for (id sample in track->waiting) append_sample(muxer, track, sample);
-+        [track->waiting removeAllObjects];
-+    }
-+    return YES;
-+}
-+
-+static void *body_muxer_create(void)
-+{
-+    MacmfMuxer *muxer = [[MacmfMuxer alloc] init];
-+    NSString *template = [NSTemporaryDirectory() stringByAppendingPathComponent:@"winemacmf-XXXXXX"];
-+    char *path = strdup(template.fileSystemRepresentation);
-+
-+    if (!path || !mkdtemp(path))
-+    {
-+        log_error("No temporary folder for the MPEG-4 writer");
-+        free(path);
-+        return NULL;
-+    }
-+    muxer->directory = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:path length:strlen(path)];
-+    free(path);
-+    muxer->path = [muxer->directory stringByAppendingPathComponent:@"video.mp4"];
-+    muxer->tracks = [NSMutableArray array];
-+    muxer->lock = [[NSLock alloc] init];
-+    return (__bridge_retained void *)muxer;
-+}
-+
-+static void body_muxer_destroy(void *object)
-+{
-+    MacmfMuxer *muxer = (__bridge_transfer MacmfMuxer *)object;
-+
-+    if (!muxer) return;
-+    @try
-+    {
-+        if (muxer->writer && muxer->writer.status == AVAssetWriterStatusWriting) [muxer->writer cancelWriting];
-+    }
-+    @catch (NSException *exception) {}
-+    for (MacmfTrack *track in muxer->tracks) dispatch_sync(track->queue, ^{});
-+    [[NSFileManager defaultManager] removeItemAtPath:muxer->directory error:nil];
-+}
-+
-+static int body_muxer_add_track(void *object, uint32_t type, uint32_t width, uint32_t height, uint32_t sample_rate,
-+        uint32_t channels, uint32_t priming, const uint8_t *config, uint32_t config_size)
-+{
-+    MacmfMuxer *muxer = (__bridge MacmfMuxer *)object;
-+    MacmfTrack *track;
-+    int index;
-+
-+    if (type != TRACK_H264 && type != TRACK_AAC) return MACMF_ERROR;
-+    if (type == TRACK_AAC && (!sample_rate || !channels || !config_size)) return MACMF_ERROR;
-+    [muxer->lock lock];
-+    if (muxer->started)
-+    {
-+        [muxer->lock unlock];
-+        return MACMF_ERROR;
-+    }
-+    track = [[MacmfTrack alloc] init];
-+    track->type = type;
-+    track->width = width;
-+    track->height = height;
-+    track->sample_rate = sample_rate;
-+    track->channels = channels;
-+    track->priming = priming;
-+    track->config = config_size ? [NSData dataWithBytes:config length:config_size] : [NSData data];
-+    track->queue = dispatch_queue_create("org.winehq.winemacmf.track", DISPATCH_QUEUE_SERIAL);
-+    track->waiting = [NSMutableArray array];
-+    index = (int)muxer->tracks.count;
-+    [muxer->tracks addObject:track];
-+    [muxer->lock unlock];
-+    return index;
-+}
-+
-+static int body_muxer_write(void *object, uint32_t index, const uint8_t *data, uint32_t size,
-+        int64_t time, int64_t decode_time, int64_t duration, int keyframe)
-+{
-+    MacmfMuxer *muxer = (__bridge MacmfMuxer *)object;
-+    CMSampleBufferRef sample = NULL;
-+    MacmfTrack *track;
-+    int ret = MACMF_OK;
-+
-+    [muxer->lock lock];
-+    if (muxer->failed || index >= muxer->tracks.count)
-+    {
-+        [muxer->lock unlock];
-+        return MACMF_ERROR;
-+    }
-+    track = muxer->tracks[index];
-+
-+    if (!track->format)
-+    {
-+        if (track->type == TRACK_H264)
-+        {
-+            if (track->config.length) track->format = h264_format(track->config.bytes, (uint32_t)track->config.length);
-+            if (!track->format) track->format = h264_format(data, size);
-+            /* Nothing before the first key frame can be decoded. */
-+            if (!track->format || !keyframe)
-+            {
-+                [muxer->lock unlock];
-+                return MACMF_OK;
-+            }
-+        }
-+        else if (!(track->format = aac_format(track)))
-+        {
-+            muxer->failed = YES;
-+            [muxer->lock unlock];
-+            return MACMF_ERROR;
-+        }
-+    }
-+
-+    sample = track->type == TRACK_H264 ? h264_sample(track, data, size, time, decode_time, duration, keyframe)
-+            : aac_sample(track, data, size, time, duration);
-+    if (!sample)
-+    {
-+        [muxer->lock unlock];
-+        return track->type == TRACK_H264 ? MACMF_OK : MACMF_ERROR;
-+    }
-+    if (!track->has_first)
-+    {
-+        track->has_first = YES;
-+        track->first_time = time;
-+    }
-+    track->last_time = time;
-+
-+    if (muxer->started) append_sample(muxer, track, (__bridge_transfer id)sample);
-+    else
-+    {
-+        [track->waiting addObject:(__bridge_transfer id)sample];
-+        muxer_start(muxer, NO);
-+        if (muxer->failed) ret = MACMF_ERROR;
-+    }
-+    [muxer->lock unlock];
-+    return ret;
-+}
-+
-+static int body_muxer_finish(void *object, uint64_t *size)
-+{
-+    MacmfMuxer *muxer = (__bridge MacmfMuxer *)object;
-+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
-+    NSDictionary *attributes;
-+    AVAssetWriter *writer;
-+    unsigned int failed = 0;
-+
-+    [muxer->lock lock];
-+    if (!muxer->started && !muxer->failed) muxer_start(muxer, YES);
-+    writer = muxer->writer;
-+    [muxer->lock unlock];
-+    if (!writer || muxer->failed || !muxer->started)
-+    {
-+        log_error("MPEG-4 writer has nothing to finish");
-+        return MACMF_ERROR;
-+    }
-+
-+    /* Each track ends after its last sample; one waiting for the others moves on once they end. */
-+    for (MacmfTrack *track in muxer->tracks)
-+    {
-+        if (!track->input) continue;
-+        dispatch_async(track->queue, ^{
-+            @try { [track->input markAsFinished]; }
-+            @catch (NSException *exception) { if (!track->failed++) track->failure = exception.reason; }
-+        });
-+    }
-+    for (MacmfTrack *track in muxer->tracks)
-+    {
-+        dispatch_sync(track->queue, ^{});
-+        failed += track->failed;
-+        if (track->failure)
-+            log_error("MPEG-4 writer refused a %s sample: %s", track->type == TRACK_H264 ? "video" : "audio",
-+                    track->failure.UTF8String);
-+        log_trace("MPEG-4 writer %s track: %u samples", track->type == TRACK_H264 ? "video" : "audio", track->written);
-+    }
-+
-+    @try
-+    {
-+        [writer finishWritingWithCompletionHandler:^{ dispatch_semaphore_signal(done); }];
-+    }
-+    @catch (NSException *exception)
-+    {
-+        log_error("MPEG-4 writer could not finish: %s", exception.reason.UTF8String);
-+        return MACMF_ERROR;
-+    }
-+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_SEC)))
-+    {
-+        log_error("MPEG-4 writer did not finish in time");
-+        return MACMF_ERROR;
-+    }
-+    if (writer.status != AVAssetWriterStatusCompleted)
-+    {
-+        log_error("MPEG-4 writer failed: %s", writer.error.description.UTF8String);
-+        return MACMF_ERROR;
-+    }
-+    if (failed) log_error("MPEG-4 writer refused %u samples", failed);
-+
-+    attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:muxer->path error:nil];
-+    *size = [attributes fileSize];
-+    return MACMF_OK;
-+}
-+
-+static int body_muxer_read(void *object, uint64_t offset, uint8_t *data, uint32_t capacity, uint32_t *size)
-+{
-+    MacmfMuxer *muxer = (__bridge MacmfMuxer *)object;
-+    FILE *file = fopen(muxer->path.fileSystemRepresentation, "rb");
-+    size_t count;
-+
-+    *size = 0;
-+    if (!file) return MACMF_ERROR;
-+    if (fseeko(file, (off_t)offset, SEEK_SET))
-+    {
-+        fclose(file);
-+        return MACMF_ERROR;
-+    }
-+    count = fread(data, 1, capacity, file);
-+    fclose(file);
-+    *size = (uint32_t)count;
-+    return MACMF_OK;
-+}
-+
-+/* ------------------------------------------------------------------------ */
 +/* Entry points: Wine's threads have no autorelease pool of their own.       */
 +/* ------------------------------------------------------------------------ */
 +
@@ -4584,41 +4004,6 @@ index 0000000..66934aa
 +int macmf_audio_encoder_read(void *encoder, uint8_t *data, uint32_t capacity, struct macmf_packet_info *info)
 +{
 +    @autoreleasepool { return body_audio_encoder_read(encoder, data, capacity, info); }
-+}
-+
-+void *macmf_muxer_create(void)
-+{
-+    @autoreleasepool { return body_muxer_create(); }
-+}
-+
-+void macmf_muxer_destroy(void *muxer)
-+{
-+    @autoreleasepool { body_muxer_destroy(muxer); }
-+}
-+
-+int macmf_muxer_add_track(void *muxer, uint32_t type, uint32_t width, uint32_t height, uint32_t sample_rate,
-+        uint32_t channels, uint32_t priming, const uint8_t *config, uint32_t config_size)
-+{
-+    @autoreleasepool
-+    {
-+        return body_muxer_add_track(muxer, type, width, height, sample_rate, channels, priming, config, config_size);
-+    }
-+}
-+
-+int macmf_muxer_write(void *muxer, uint32_t track, const uint8_t *data, uint32_t size,
-+        int64_t time, int64_t decode_time, int64_t duration, int keyframe)
-+{
-+    @autoreleasepool { return body_muxer_write(muxer, track, data, size, time, decode_time, duration, keyframe); }
-+}
-+
-+int macmf_muxer_finish(void *muxer, uint64_t *size)
-+{
-+    @autoreleasepool { return body_muxer_finish(muxer, size); }
-+}
-+
-+int macmf_muxer_read(void *muxer, uint64_t offset, uint8_t *data, uint32_t capacity, uint32_t *size)
-+{
-+    @autoreleasepool { return body_muxer_read(muxer, offset, data, capacity, size); }
 +}
 diff --git a/dlls/winemacmf/main.c b/dlls/winemacmf/main.c
 new file mode 100644
@@ -4837,12 +4222,1294 @@ index 0000000..ce1fceb
 +    IMFMediaBuffer_Release(buffer);
 +    return hr;
 +}
+diff --git a/dlls/winemacmf/mp4_writer.c b/dlls/winemacmf/mp4_writer.c
+new file mode 100644
+index 0000000..06fe223
+--- /dev/null
++++ b/dlls/winemacmf/mp4_writer.c
+@@ -0,0 +1,1276 @@
++/*
++ * MPEG-4 file writer
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++/* The sink's MPEG-4 file, written here rather than by AVFoundation's AVAssetWriter.
++ * Each sample goes to a payload file as it arrives and its size and times stay in
++ * memory; finishing puts the file's index (moov) in front of the samples. Nothing
++ * waits: AVAssetWriter interleaved its tracks on dispatch queues and could hold one
++ * back forever, which left players a 0 MB file after Overwatch had said "saved".
++ * A track that fails drops out and the file keeps the others. */
++
++#include <limits.h>
++#include <pthread.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#include <unistd.h>
++
++#include <CoreFoundation/CoreFoundation.h>
++#include <CoreMedia/CoreMedia.h>
++#include <CoreVideo/CoreVideo.h>
++
++#include "macmf_cocoa.h"
++
++#define MF_TIMESCALE 10000000
++#define MOVIE_TIMESCALE 1000
++#define VIDEO_TIMESCALE 90000
++#define AAC_FRAMES 1024
++#define MAX_TRACKS 8
++#define SECONDS_1904_TO_1970 2082844800u
++
++enum
++{
++    TRACK_H264,
++    TRACK_AAC,
++};
++
++struct mp4_sample
++{
++    uint64_t offset;            /* in the payload file */
++    uint32_t size;
++    int keyframe;
++    int64_t time;               /* 100 ns */
++    int64_t decode_time;        /* 100 ns, INT64_MIN when unknown */
++    int64_t duration;           /* 100 ns, 0 when unknown */
++};
++
++struct mp4_track
++{
++    int type;
++    uint32_t width, height, sample_rate, channels;
++    uint8_t *config;            /* H.264: Annex B parameter sets, optional; AAC: AudioSpecificConfig */
++    uint32_t config_size;
++    uint8_t *avcc;              /* H.264: the avcC box's contents once the parameter sets are known */
++    uint32_t avcc_size;
++    uint8_t colr[7];            /* H.264: nclx colour, when the parameter sets give it */
++    int has_colr;
++    int format_error;           /* unusable parameter sets were reported */
++    unsigned int refused;
++    struct mp4_sample *samples;
++    size_t count, capacity;
++};
++
++struct mp4_writer
++{
++    pthread_mutex_t lock;
++    char directory[PATH_MAX];
++    char path[PATH_MAX];
++    FILE *payload;
++    uint64_t payload_size;
++    int failed;                 /* the payload file could not be written */
++    struct mp4_track tracks[MAX_TRACKS];
++    unsigned int track_count;
++    uint8_t *scratch;
++    size_t scratch_capacity;
++    uint8_t *header;            /* ftyp, moov and the mdat header, once finished */
++    size_t header_size;
++};
++
++/* What finishing works out for one track. */
++struct edit
++{
++    uint64_t segment;           /* movie ticks */
++    int64_t media_time;         /* media ticks, -1 for an empty edit */
++};
++
++struct plan
++{
++    struct mp4_track *track;
++    uint32_t id, timescale;
++    uint64_t media_duration;
++    struct edit edits[2];
++    unsigned int edit_count;
++    uint64_t movie_duration;
++    int64_t *decode;            /* video: decode times in media ticks */
++    int64_t *offset;            /* video: composition offsets */
++    uint32_t last_delta;
++    int has_offsets, all_sync;
++    uint32_t max_size, avg_bitrate, max_bitrate;
++};
++
++static void log_error(const char *format, ...) __attribute__((format(printf, 1, 2)));
++static void log_error(const char *format, ...)
++{
++    char message[512];
++    va_list args;
++
++    va_start(args, format);
++    vsnprintf(message, sizeof(message), format, args);
++    va_end(args);
++    macmf_log_error(message);
++}
++
++static void log_trace(const char *format, ...) __attribute__((format(printf, 1, 2)));
++static void log_trace(const char *format, ...)
++{
++    char message[512];
++    va_list args;
++
++    va_start(args, format);
++    vsnprintf(message, sizeof(message), format, args);
++    va_end(args);
++    macmf_log_trace(message);
++}
++
++static const char *track_name(const struct mp4_track *track)
++{
++    return track->type == TRACK_H264 ? "video" : "audio";
++}
++
++/* 100 ns units to another time scale, rounding half away from zero. */
++static int64_t rescale(int64_t value, int64_t scale)
++{
++    __int128 product = (__int128)value * scale;
++
++    if (product >= 0) return (int64_t)((product + MF_TIMESCALE / 2) / MF_TIMESCALE);
++    return -(int64_t)((-product + MF_TIMESCALE / 2) / MF_TIMESCALE);
++}
++
++static uint64_t to_movie(uint64_t ticks, uint32_t timescale)
++{
++    return (uint64_t)(((unsigned __int128)ticks * MOVIE_TIMESCALE + timescale / 2) / timescale);
++}
++
++/* ------------------------------------------------------------------------ */
++/* Box building                                                             */
++/* ------------------------------------------------------------------------ */
++
++struct buffer
++{
++    uint8_t *data;
++    size_t size, capacity;
++    int failed;
++};
++
++static void put_bytes(struct buffer *buffer, const void *data, size_t size)
++{
++    if (buffer->failed || !size) return;
++    if (buffer->size + size > buffer->capacity)
++    {
++        size_t capacity = buffer->capacity ? buffer->capacity : 4096;
++        uint8_t *grown;
++
++        while (capacity < buffer->size + size) capacity *= 2;
++        if (!(grown = realloc(buffer->data, capacity)))
++        {
++            buffer->failed = 1;
++            return;
++        }
++        buffer->data = grown;
++        buffer->capacity = capacity;
++    }
++    memcpy(buffer->data + buffer->size, data, size);
++    buffer->size += size;
++}
++
++static void put_u8(struct buffer *buffer, uint8_t value)
++{
++    put_bytes(buffer, &value, 1);
++}
++
++static void put_u16(struct buffer *buffer, uint16_t value)
++{
++    uint8_t bytes[2] = {(uint8_t)(value >> 8), (uint8_t)value};
++    put_bytes(buffer, bytes, 2);
++}
++
++static void put_u24(struct buffer *buffer, uint32_t value)
++{
++    uint8_t bytes[3] = {(uint8_t)(value >> 16), (uint8_t)(value >> 8), (uint8_t)value};
++    put_bytes(buffer, bytes, 3);
++}
++
++static void put_u32(struct buffer *buffer, uint32_t value)
++{
++    uint8_t bytes[4] = {(uint8_t)(value >> 24), (uint8_t)(value >> 16), (uint8_t)(value >> 8), (uint8_t)value};
++    put_bytes(buffer, bytes, 4);
++}
++
++static void put_u64(struct buffer *buffer, uint64_t value)
++{
++    put_u32(buffer, (uint32_t)(value >> 32));
++    put_u32(buffer, (uint32_t)value);
++}
++
++static void put_zeros(struct buffer *buffer, size_t count)
++{
++    static const uint8_t zeros[32];
++
++    while (count)
++    {
++        size_t size = count < sizeof(zeros) ? count : sizeof(zeros);
++        put_bytes(buffer, zeros, size);
++        count -= size;
++    }
++}
++
++static size_t box_start(struct buffer *buffer, const char *type)
++{
++    size_t start = buffer->size;
++
++    put_u32(buffer, 0);
++    put_bytes(buffer, type, 4);
++    return start;
++}
++
++static size_t full_box_start(struct buffer *buffer, const char *type, uint8_t version, uint32_t flags)
++{
++    size_t start = box_start(buffer, type);
++
++    put_u32(buffer, (uint32_t)version << 24 | flags);
++    return start;
++}
++
++static void box_end(struct buffer *buffer, size_t start)
++{
++    uint32_t size = (uint32_t)(buffer->size - start);
++
++    if (buffer->failed) return;
++    buffer->data[start] = (uint8_t)(size >> 24);
++    buffer->data[start + 1] = (uint8_t)(size >> 16);
++    buffer->data[start + 2] = (uint8_t)(size >> 8);
++    buffer->data[start + 3] = (uint8_t)size;
++}
++
++static void put_matrix(struct buffer *buffer)
++{
++    static const uint32_t unity[9] = {0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000};
++    unsigned int i;
++
++    for (i = 0; i < 9; ++i) put_u32(buffer, unity[i]);
++}
++
++/* ------------------------------------------------------------------------ */
++/* H.264 access units                                                       */
++/* ------------------------------------------------------------------------ */
++
++static const uint8_t *next_start_code(const uint8_t *data, const uint8_t *end, int *code_size)
++{
++    const uint8_t *p;
++
++    for (p = data; p + 3 <= end; ++p)
++    {
++        if (p[0] || p[1]) continue;
++        if (p[2] == 1)
++        {
++            *code_size = 3;
++            return p;
++        }
++        if (p + 4 <= end && !p[2] && p[3] == 1)
++        {
++            *code_size = 4;
++            return p;
++        }
++    }
++    return end;
++}
++
++struct nal_units
++{
++    const uint8_t *next, *end;
++    int code_size;
++};
++
++static void nal_units_init(struct nal_units *units, const uint8_t *data, uint32_t size)
++{
++    units->end = data + size;
++    units->code_size = 0;
++    units->next = next_start_code(data, units->end, &units->code_size);
++}
++
++/* The next NAL unit of an Annex B access unit. */
++static int nal_units_next(struct nal_units *units, const uint8_t **unit, uint32_t *length)
++{
++    while (units->next < units->end)
++    {
++        const uint8_t *start = units->next + units->code_size, *next;
++        int next_size = 0;
++
++        next = next_start_code(start, units->end, &next_size);
++        units->next = next;
++        units->code_size = next_size;
++        if (next > start)
++        {
++            *unit = start;
++            *length = (uint32_t)(next - start);
++            return 1;
++        }
++    }
++    return 0;
++}
++
++static int16_t colour_code(int code)
++{
++    return code > 0 && code < 256 ? (int16_t)code : 2;   /* 2: unspecified */
++}
++
++/* Takes the stream's format from an access unit's parameter sets: the avcC box Core Media
++ * makes from them (as AVAssetWriter wrote it), the coded size and the colour. */
++static int track_take_h264_format(struct mp4_track *track, const uint8_t *data, uint32_t size)
++{
++    const uint8_t *sps = NULL, *pps = NULL, *unit, *sets[2];
++    uint32_t sps_size = 0, pps_size = 0, length;
++    CMFormatDescriptionRef format = NULL;
++    CFStringRef primaries, transfer, matrix;
++    struct nal_units units;
++    CMVideoDimensions dimensions;
++    CFDictionaryRef atoms;
++    CFBooleanRef full_range;
++    CFDataRef avcc;
++    size_t sizes[2];
++    OSStatus status;
++
++    nal_units_init(&units, data, size);
++    while (nal_units_next(&units, &unit, &length))
++    {
++        int type = unit[0] & 0x1f;
++
++        if (type == 7 && !sps)
++        {
++            sps = unit;
++            sps_size = length;
++        }
++        else if (type == 8 && !pps)
++        {
++            pps = unit;
++            pps_size = length;
++        }
++    }
++    if (!sps || !pps) return 0;
++
++    sets[0] = sps;
++    sizes[0] = sps_size;
++    sets[1] = pps;
++    sizes[1] = pps_size;
++    if ((status = CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, 2, sets, sizes, 4, &format)))
++    {
++        if (!track->format_error++) log_error("Unusable H.264 parameter sets: %d", (int)status);
++        return 0;
++    }
++    atoms = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms);
++    avcc = atoms && CFGetTypeID(atoms) == CFDictionaryGetTypeID() ? CFDictionaryGetValue(atoms, CFSTR("avcC")) : NULL;
++    if (!avcc || CFGetTypeID(avcc) != CFDataGetTypeID() || !CFDataGetLength(avcc)
++            || !(track->avcc = malloc(CFDataGetLength(avcc))))
++    {
++        if (!track->format_error++) log_error("No avcC for the H.264 parameter sets");
++        CFRelease(format);
++        return 0;
++    }
++    track->avcc_size = (uint32_t)CFDataGetLength(avcc);
++    memcpy(track->avcc, CFDataGetBytePtr(avcc), track->avcc_size);
++
++    dimensions = CMVideoFormatDescriptionGetDimensions(format);
++    if (dimensions.width > 0 && dimensions.height > 0)
++    {
++        track->width = (uint32_t)dimensions.width;
++        track->height = (uint32_t)dimensions.height;
++    }
++
++    primaries = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_ColorPrimaries);
++    transfer = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_TransferFunction);
++    matrix = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_YCbCrMatrix);
++    full_range = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_FullRangeVideo);
++    if (primaries && transfer && matrix && CFGetTypeID(primaries) == CFStringGetTypeID()
++            && CFGetTypeID(transfer) == CFStringGetTypeID() && CFGetTypeID(matrix) == CFStringGetTypeID())
++    {
++        int16_t codes[3] = {colour_code(CVColorPrimariesGetIntegerCodePointForString(primaries)),
++                colour_code(CVTransferFunctionGetIntegerCodePointForString(transfer)),
++                colour_code(CVYCbCrMatrixGetIntegerCodePointForString(matrix))};
++        unsigned int i;
++
++        for (i = 0; i < 3; ++i)
++        {
++            track->colr[i * 2] = (uint8_t)(codes[i] >> 8);
++            track->colr[i * 2 + 1] = (uint8_t)codes[i];
++        }
++        track->colr[6] = full_range && CFGetTypeID(full_range) == CFBooleanGetTypeID()
++                && CFBooleanGetValue(full_range) ? 0x80 : 0;
++        track->has_colr = 1;
++    }
++    CFRelease(format);
++    return 1;
++}
++
++/* An access unit as MPEG-4 stores it: each NAL unit after its 4-byte length, without
++ * the parameter sets (they are in avcC), delimiters and filler. */
++static uint32_t avcc_from_annexb(struct mp4_writer *writer, const uint8_t *data, uint32_t size)
++{
++    struct nal_units units;
++    const uint8_t *unit;
++    uint32_t length, used = 0;
++
++    if (writer->scratch_capacity < (size_t)size + 64)
++    {
++        size_t capacity = (size_t)size * 2 + 64;
++        uint8_t *grown = realloc(writer->scratch, capacity);
++
++        if (!grown) return 0;
++        writer->scratch = grown;
++        writer->scratch_capacity = capacity;
++    }
++    nal_units_init(&units, data, size);
++    while (nal_units_next(&units, &unit, &length))
++    {
++        int type = unit[0] & 0x1f;
++
++        if (type == 7 || type == 8 || type == 9 || type == 12) continue;
++        if (used + 4 + (size_t)length > writer->scratch_capacity) return 0;
++        writer->scratch[used++] = (uint8_t)(length >> 24);
++        writer->scratch[used++] = (uint8_t)(length >> 16);
++        writer->scratch[used++] = (uint8_t)(length >> 8);
++        writer->scratch[used++] = (uint8_t)length;
++        memcpy(writer->scratch + used, unit, length);
++        used += length;
++    }
++    return used;
++}
++
++/* ------------------------------------------------------------------------ */
++/* Samples                                                                  */
++/* ------------------------------------------------------------------------ */
++
++static void track_refuse(struct mp4_track *track, unsigned int index, const char *reason)
++{
++    if (!track->refused++) log_error("MPEG-4 writer leaves out %s samples from #%u: %s", track_name(track), index, reason);
++}
++
++static int writer_append(struct mp4_writer *writer, struct mp4_track *track, const uint8_t *data, uint32_t size,
++        int64_t time, int64_t decode_time, int64_t duration, int keyframe)
++{
++    struct mp4_sample *sample;
++
++    if (track->count == track->capacity)
++    {
++        size_t capacity = track->capacity ? track->capacity * 2 : 1024;
++        struct mp4_sample *grown = realloc(track->samples, capacity * sizeof(*grown));
++
++        if (!grown)
++        {
++            track_refuse(track, (unsigned int)track->count, "out of memory");
++            return MACMF_ERROR;
++        }
++        track->samples = grown;
++        track->capacity = capacity;
++    }
++    if (fwrite(data, 1, size, writer->payload) != size)
++    {
++        writer->failed = 1;
++        log_error("MPEG-4 writer could not write its temporary file %s", writer->path);
++        return MACMF_ERROR;
++    }
++    sample = &track->samples[track->count++];
++    sample->offset = writer->payload_size;
++    sample->size = size;
++    sample->keyframe = keyframe;
++    sample->time = time;
++    sample->decode_time = decode_time;
++    sample->duration = duration;
++    writer->payload_size += size;
++    return MACMF_OK;
++}
++
++/* ------------------------------------------------------------------------ */
++/* Finishing                                                                */
++/* ------------------------------------------------------------------------ */
++
++static int64_t sample_decode_time(const struct mp4_sample *sample)
++{
++    return sample->decode_time == INT64_MIN ? sample->time : sample->decode_time;
++}
++
++static int64_t video_length(const struct mp4_track *track, const struct plan *plan, size_t index)
++{
++    if (track->samples[index].duration > 0)
++    {
++        int64_t length = rescale(track->samples[index].duration, plan->timescale);
++        if (length > 0) return length;
++    }
++    if (index + 1 < track->count) return plan->decode[index + 1] - plan->decode[index];
++    if (index) return plan->decode[index] - plan->decode[index - 1];
++    return plan->timescale / 30;
++}
++
++/* Video presents from its earliest frame: an edit skips the decode delay of B-frames. */
++static int plan_video(struct plan *plan, int64_t start)
++{
++    struct mp4_track *track = plan->track;
++    int64_t base = sample_decode_time(&track->samples[0]), least = INT64_MAX, first = INT64_MAX, end = INT64_MIN;
++    size_t i, count = track->count;
++
++    (void)start;    /* the earliest frame is the start */
++    plan->timescale = VIDEO_TIMESCALE;
++    if (!(plan->decode = malloc(count * sizeof(int64_t))) || !(plan->offset = malloc(count * sizeof(int64_t))))
++        return 0;
++    for (i = 0; i < count; ++i)
++    {
++        int64_t decode = rescale(sample_decode_time(&track->samples[i]) - base, VIDEO_TIMESCALE);
++
++        if (i && decode <= plan->decode[i - 1]) decode = plan->decode[i - 1] + 1;
++        plan->decode[i] = decode;
++        plan->offset[i] = rescale(track->samples[i].time - base, VIDEO_TIMESCALE) - decode;
++        if (plan->offset[i] < least) least = plan->offset[i];
++    }
++    plan->all_sync = 1;
++    for (i = 0; i < count; ++i)
++    {
++        int64_t composition;
++
++        if (least < 0) plan->offset[i] -= least;
++        if (plan->offset[i]) plan->has_offsets = 1;
++        if (!track->samples[i].keyframe) plan->all_sync = 0;
++        composition = plan->decode[i] + plan->offset[i];
++        if (composition < first) first = composition;
++        if (composition + video_length(track, plan, i) > end) end = composition + video_length(track, plan, i);
++    }
++    plan->last_delta = (uint32_t)video_length(track, plan, count - 1);
++    plan->media_duration = (uint64_t)(plan->decode[count - 1] + plan->last_delta);
++    plan->edits[0].media_time = first;
++    plan->edits[0].segment = to_movie((uint64_t)(end - first), VIDEO_TIMESCALE);
++    plan->edit_count = 1;
++    return 1;
++}
++
++/* AAC frames are 1024 long and follow each other: the first one's time places the track,
++ * an edit trims the encoder's priming and anything before the picture, and the last
++ * frame's length trims its padding. */
++static int plan_audio(struct plan *plan, int64_t start)
++{
++    struct mp4_track *track = plan->track;
++    size_t i, count = track->count, window = 0;
++    int64_t media_start, end, last;
++    uint64_t total = 0, in_window = 0, peak = 0;
++    uint32_t per_second;
++
++    plan->timescale = track->sample_rate;
++    media_start = rescale(start - track->samples[0].time, track->sample_rate);
++    last = track->samples[count - 1].duration > 0 ? rescale(track->samples[count - 1].duration, track->sample_rate)
++            : AAC_FRAMES;
++    if (last < 1) last = 1;
++    if (last > AAC_FRAMES) last = AAC_FRAMES;
++    end = (int64_t)(count - 1) * AAC_FRAMES + last;
++    if (media_start >= end) return 0;
++
++    plan->media_duration = (uint64_t)count * AAC_FRAMES;
++    plan->last_delta = AAC_FRAMES;
++    plan->all_sync = 1;
++    if (media_start >= 0)
++    {
++        plan->edits[0].segment = to_movie((uint64_t)(end - media_start), track->sample_rate);
++        plan->edits[0].media_time = media_start;
++        plan->edit_count = 1;
++    }
++    else
++    {
++        plan->edits[0].segment = to_movie((uint64_t)-media_start, track->sample_rate);
++        plan->edits[0].media_time = -1;
++        plan->edits[1].segment = to_movie((uint64_t)end, track->sample_rate);
++        plan->edits[1].media_time = 0;
++        plan->edit_count = 2;
++    }
++
++    per_second = (track->sample_rate + AAC_FRAMES - 1) / AAC_FRAMES;
++    for (i = 0; i < count; ++i)
++    {
++        uint32_t size = track->samples[i].size;
++
++        if (size > plan->max_size) plan->max_size = size;
++        total += size;
++        in_window += size;
++        if (++window > per_second) in_window -= track->samples[i - per_second].size;
++        if (in_window > peak) peak = in_window;
++    }
++    plan->avg_bitrate = (uint32_t)(total * 8 * track->sample_rate / ((uint64_t)count * AAC_FRAMES));
++    plan->max_bitrate = (uint32_t)(peak * 8);
++    if (plan->max_bitrate < plan->avg_bitrate) plan->max_bitrate = plan->avg_bitrate;
++    return 1;
++}
++
++static void put_descriptor_header(struct buffer *buffer, uint8_t tag, uint32_t size)
++{
++    put_u8(buffer, tag);
++    put_u8(buffer, (uint8_t)(0x80 | (size >> 21 & 0x7f)));
++    put_u8(buffer, (uint8_t)(0x80 | (size >> 14 & 0x7f)));
++    put_u8(buffer, (uint8_t)(0x80 | (size >> 7 & 0x7f)));
++    put_u8(buffer, (uint8_t)(size & 0x7f));
++}
++
++static void put_sample_entry(struct buffer *buffer, const struct plan *plan)
++{
++    const struct mp4_track *track = plan->track;
++    size_t entry, child;
++
++    if (track->type == TRACK_H264)
++    {
++        static const char name[32] = "\x05H.264";
++
++        entry = box_start(buffer, "avc1");
++        put_zeros(buffer, 6);
++        put_u16(buffer, 1);                 /* data reference */
++        put_zeros(buffer, 16);
++        put_u16(buffer, (uint16_t)track->width);
++        put_u16(buffer, (uint16_t)track->height);
++        put_u32(buffer, 0x00480000);        /* 72 dpi */
++        put_u32(buffer, 0x00480000);
++        put_u32(buffer, 0);
++        put_u16(buffer, 1);                 /* frames per sample */
++        put_bytes(buffer, name, sizeof(name));
++        put_u16(buffer, 0x0018);
++        put_u16(buffer, 0xffff);
++        child = box_start(buffer, "avcC");
++        put_bytes(buffer, track->avcc, track->avcc_size);
++        box_end(buffer, child);
++        if (track->has_colr)
++        {
++            child = box_start(buffer, "colr");
++            put_bytes(buffer, "nclx", 4);
++            put_bytes(buffer, track->colr, sizeof(track->colr));
++            box_end(buffer, child);
++        }
++        box_end(buffer, entry);
++        return;
++    }
++
++    entry = box_start(buffer, "mp4a");
++    put_zeros(buffer, 6);
++    put_u16(buffer, 1);
++    put_zeros(buffer, 8);
++    put_u16(buffer, (uint16_t)track->channels);
++    put_u16(buffer, 16);
++    put_u32(buffer, 0);
++    put_u32(buffer, track->sample_rate <= 0xffff ? track->sample_rate << 16 : 0);
++    child = full_box_start(buffer, "esds", 0, 0);
++    put_descriptor_header(buffer, 0x03, 3 + (5 + 13 + 5 + track->config_size) + (5 + 1));
++    put_u16(buffer, 0);                     /* ES_ID */
++    put_u8(buffer, 0);
++    put_descriptor_header(buffer, 0x04, 13 + 5 + track->config_size);
++    put_u8(buffer, 0x40);                   /* MPEG-4 audio */
++    put_u8(buffer, 0x15);                   /* audio stream */
++    put_u24(buffer, plan->max_size);
++    put_u32(buffer, plan->max_bitrate);
++    put_u32(buffer, plan->avg_bitrate);
++    put_descriptor_header(buffer, 0x05, track->config_size);
++    put_bytes(buffer, track->config, track->config_size);
++    put_descriptor_header(buffer, 0x06, 1);
++    put_u8(buffer, 0x02);
++    box_end(buffer, child);
++    box_end(buffer, entry);
++}
++
++static void patch_u32(struct buffer *buffer, size_t at, uint32_t value)
++{
++    if (buffer->failed) return;
++    buffer->data[at] = (uint8_t)(value >> 24);
++    buffer->data[at + 1] = (uint8_t)(value >> 16);
++    buffer->data[at + 2] = (uint8_t)(value >> 8);
++    buffer->data[at + 3] = (uint8_t)value;
++}
++
++/* Samples next to each other in the payload share a chunk. */
++static void put_chunks(struct buffer *buffer, const struct mp4_track *track, uint64_t base, int co64)
++{
++    uint32_t *counts = malloc(track->count * sizeof(*counts));
++    size_t *firsts = malloc(track->count * sizeof(*firsts));
++    size_t i, chunks = 0, box, at;
++    uint32_t runs = 0;
++
++    if (!counts || !firsts)
++    {
++        buffer->failed = 1;
++        free(counts);
++        free(firsts);
++        return;
++    }
++    for (i = 0; i < track->count; ++i)
++    {
++        if (!i || track->samples[i].offset != track->samples[i - 1].offset + track->samples[i - 1].size)
++        {
++            firsts[chunks] = i;
++            counts[chunks++] = 0;
++        }
++        ++counts[chunks - 1];
++    }
++
++    box = full_box_start(buffer, "stsc", 0, 0);
++    at = buffer->size;
++    put_u32(buffer, 0);
++    for (i = 0; i < chunks; ++i)
++    {
++        if (i && counts[i] == counts[i - 1]) continue;
++        put_u32(buffer, (uint32_t)i + 1);   /* first chunk */
++        put_u32(buffer, counts[i]);
++        put_u32(buffer, 1);                 /* sample description */
++        ++runs;
++    }
++    patch_u32(buffer, at, runs);
++    box_end(buffer, box);
++
++    box = full_box_start(buffer, co64 ? "co64" : "stco", 0, 0);
++    put_u32(buffer, (uint32_t)chunks);
++    for (i = 0; i < chunks; ++i)
++    {
++        uint64_t offset = base + track->samples[firsts[i]].offset;
++
++        if (co64) put_u64(buffer, offset);
++        else put_u32(buffer, (uint32_t)offset);
++    }
++    box_end(buffer, box);
++    free(counts);
++    free(firsts);
++}
++
++static uint32_t sample_delta(const struct plan *plan, size_t index)
++{
++    if (plan->track->type == TRACK_AAC) return AAC_FRAMES;
++    if (index + 1 < plan->track->count) return (uint32_t)(plan->decode[index + 1] - plan->decode[index]);
++    return plan->last_delta;
++}
++
++static void put_sample_tables(struct buffer *buffer, const struct plan *plan, uint64_t base, int co64)
++{
++    const struct mp4_track *track = plan->track;
++    size_t stbl, box, at, i;
++    uint32_t entries, run;
++
++    stbl = box_start(buffer, "stbl");
++
++    box = full_box_start(buffer, "stsd", 0, 0);
++    put_u32(buffer, 1);
++    put_sample_entry(buffer, plan);
++    box_end(buffer, box);
++
++    /* Decode durations, run-length coded. */
++    box = full_box_start(buffer, "stts", 0, 0);
++    at = buffer->size;
++    put_u32(buffer, 0);
++    for (i = 0, entries = 0; i < track->count; i += run, ++entries)
++    {
++        uint32_t delta = sample_delta(plan, i);
++
++        for (run = 1; i + run < track->count && sample_delta(plan, i + run) == delta; ++run) {}
++        put_u32(buffer, run);
++        put_u32(buffer, delta);
++    }
++    patch_u32(buffer, at, entries);
++    box_end(buffer, box);
++
++    /* Composition offsets: B-frames show after frames decoded later. */
++    if (plan->has_offsets)
++    {
++        box = full_box_start(buffer, "ctts", 0, 0);
++        at = buffer->size;
++        put_u32(buffer, 0);
++        for (i = 0, entries = 0; i < track->count; i += run, ++entries)
++        {
++            for (run = 1; i + run < track->count && plan->offset[i + run] == plan->offset[i]; ++run) {}
++            put_u32(buffer, run);
++            put_u32(buffer, (uint32_t)plan->offset[i]);
++        }
++        patch_u32(buffer, at, entries);
++        box_end(buffer, box);
++    }
++
++    if (!plan->all_sync)
++    {
++        box = full_box_start(buffer, "stss", 0, 0);
++        at = buffer->size;
++        put_u32(buffer, 0);
++        for (i = 0, entries = 0; i < track->count; ++i)
++        {
++            if (!track->samples[i].keyframe) continue;
++            put_u32(buffer, (uint32_t)i + 1);
++            ++entries;
++        }
++        patch_u32(buffer, at, entries);
++        box_end(buffer, box);
++    }
++
++    put_chunks(buffer, track, base, co64);
++
++    box = full_box_start(buffer, "stsz", 0, 0);
++    put_u32(buffer, 0);
++    put_u32(buffer, (uint32_t)track->count);
++    for (i = 0; i < track->count; ++i) put_u32(buffer, track->samples[i].size);
++    box_end(buffer, box);
++
++    /* Each AAC frame needs the one before it decoded first (a roll of -1). Without this
++     * group Apple's players drop the encoder's priming a second time, after the edit has,
++     * and the sound runs 44 ms ahead of the picture; with it they take the edit as it is,
++     * like every other player. */
++    if (track->type == TRACK_AAC)
++    {
++        box = full_box_start(buffer, "sgpd", 1, 0);
++        put_bytes(buffer, "roll", 4);
++        put_u32(buffer, 2);                 /* entry length */
++        put_u32(buffer, 1);
++        put_u16(buffer, 0xffff);            /* roll distance -1 */
++        box_end(buffer, box);
++        box = full_box_start(buffer, "sbgp", 0, 0);
++        put_bytes(buffer, "roll", 4);
++        put_u32(buffer, 1);
++        put_u32(buffer, (uint32_t)track->count);
++        put_u32(buffer, 1);                 /* every frame */
++        box_end(buffer, box);
++    }
++
++    box_end(buffer, stbl);
++}
++
++static void put_track(struct buffer *buffer, const struct plan *plan, uint32_t now, uint64_t base, int co64)
++{
++    const struct mp4_track *track = plan->track;
++    int video = track->type == TRACK_H264;
++    size_t trak, box, mdia, minf, child;
++    unsigned int i;
++
++    trak = box_start(buffer, "trak");
++
++    box = full_box_start(buffer, "tkhd", 0, 0x000003);     /* enabled, in the movie */
++    put_u32(buffer, now);
++    put_u32(buffer, now);
++    put_u32(buffer, plan->id);
++    put_u32(buffer, 0);
++    put_u32(buffer, (uint32_t)plan->movie_duration);
++    put_zeros(buffer, 8);
++    put_u16(buffer, 0);                                 /* layer */
++    put_u16(buffer, video ? 0 : 1);                     /* alternate group */
++    put_u16(buffer, video ? 0 : 0x0100);                /* volume */
++    put_u16(buffer, 0);
++    put_matrix(buffer);
++    put_u32(buffer, video ? track->width << 16 : 0);
++    put_u32(buffer, video ? track->height << 16 : 0);
++    box_end(buffer, box);
++
++    box = box_start(buffer, "edts");
++    child = full_box_start(buffer, "elst", 0, 0);
++    put_u32(buffer, plan->edit_count);
++    for (i = 0; i < plan->edit_count; ++i)
++    {
++        put_u32(buffer, (uint32_t)plan->edits[i].segment);
++        put_u32(buffer, (uint32_t)plan->edits[i].media_time);
++        put_u32(buffer, 0x00010000);                    /* rate 1 */
++    }
++    box_end(buffer, child);
++    box_end(buffer, box);
++
++    mdia = box_start(buffer, "mdia");
++    box = full_box_start(buffer, "mdhd", 0, 0);
++    put_u32(buffer, now);
++    put_u32(buffer, now);
++    put_u32(buffer, plan->timescale);
++    put_u32(buffer, (uint32_t)plan->media_duration);
++    put_u16(buffer, 0x55c4);                            /* "und" */
++    put_u16(buffer, 0);
++    box_end(buffer, box);
++
++    box = full_box_start(buffer, "hdlr", 0, 0);
++    put_u32(buffer, 0);
++    put_bytes(buffer, video ? "vide" : "soun", 4);
++    put_zeros(buffer, 12);
++    put_bytes(buffer, video ? "VideoHandler" : "SoundHandler", 13);
++    box_end(buffer, box);
++
++    minf = box_start(buffer, "minf");
++    if (video)
++    {
++        box = full_box_start(buffer, "vmhd", 0, 1);
++        put_zeros(buffer, 8);
++    }
++    else
++    {
++        box = full_box_start(buffer, "smhd", 0, 0);
++        put_zeros(buffer, 4);
++    }
++    box_end(buffer, box);
++    box = box_start(buffer, "dinf");
++    child = full_box_start(buffer, "dref", 0, 0);
++    put_u32(buffer, 1);
++    box_end(buffer, full_box_start(buffer, "url ", 0, 1));  /* in this file */
++    box_end(buffer, child);
++    box_end(buffer, box);
++    put_sample_tables(buffer, plan, base, co64);
++    box_end(buffer, minf);
++    box_end(buffer, mdia);
++
++    box_end(buffer, trak);
++}
++
++static void put_moov(struct buffer *buffer, const struct plan *plans, unsigned int count, uint32_t now,
++        uint64_t base, int co64)
++{
++    uint64_t duration = 0;
++    size_t moov, box;
++    unsigned int i;
++
++    for (i = 0; i < count; ++i)
++        if (plans[i].movie_duration > duration) duration = plans[i].movie_duration;
++
++    moov = box_start(buffer, "moov");
++    box = full_box_start(buffer, "mvhd", 0, 0);
++    put_u32(buffer, now);
++    put_u32(buffer, now);
++    put_u32(buffer, MOVIE_TIMESCALE);
++    put_u32(buffer, (uint32_t)duration);
++    put_u32(buffer, 0x00010000);                        /* rate 1 */
++    put_u16(buffer, 0x0100);                            /* volume 1 */
++    put_zeros(buffer, 10);
++    put_matrix(buffer);
++    put_zeros(buffer, 24);
++    put_u32(buffer, count + 1);                         /* next track ID */
++    box_end(buffer, box);
++    for (i = 0; i < count; ++i) put_track(buffer, &plans[i], now, base, co64);
++    box_end(buffer, moov);
++}
++
++static void put_ftyp(struct buffer *buffer)
++{
++    size_t box = box_start(buffer, "ftyp");
++
++    put_bytes(buffer, "mp42", 4);
++    put_u32(buffer, 1);
++    put_bytes(buffer, "isommp41mp42", 12);
++    box_end(buffer, box);
++}
++
++/* The presentation starts with the earliest frame of the picture, or with the sound
++ * when there is none; whatever comes before is trimmed. */
++static int64_t presentation_start(const struct mp4_writer *writer)
++{
++    int64_t start = INT64_MAX;
++    unsigned int i;
++    size_t j;
++
++    for (i = 0; i < writer->track_count; ++i)
++    {
++        const struct mp4_track *track = &writer->tracks[i];
++
++        if (track->type != TRACK_H264) continue;
++        for (j = 0; j < track->count; ++j)
++            if (track->samples[j].time < start) start = track->samples[j].time;
++    }
++    if (start != INT64_MAX) return start;
++    for (i = 0; i < writer->track_count; ++i)
++        if (writer->tracks[i].count && writer->tracks[i].samples[0].time < start) start = writer->tracks[i].samples[0].time;
++    return start;
++}
++
++static int writer_finish(struct mp4_writer *writer, uint64_t *size)
++{
++    struct plan plans[MAX_TRACKS];
++    struct buffer header = {0};
++    unsigned int i, j, count = 0;
++    uint64_t base = 0, mdat_size;
++    int64_t start;
++    uint32_t now;
++    int co64 = 0, ret = MACMF_ERROR;
++
++    if (writer->failed)
++    {
++        log_error("MPEG-4 writer lost samples to its temporary file; nothing to finish");
++        return MACMF_ERROR;
++    }
++    if (fflush(writer->payload))
++    {
++        log_error("MPEG-4 writer could not write its temporary file %s", writer->path);
++        return MACMF_ERROR;
++    }
++
++    memset(plans, 0, sizeof(plans));
++    start = presentation_start(writer);
++    for (i = 0; i < writer->track_count; ++i)
++    {
++        struct mp4_track *track = &writer->tracks[i];
++        struct plan *plan = &plans[count];
++
++        if (!track->count)
++        {
++            log_error("MPEG-4 writer has no %s samples; the file leaves the track out", track_name(track));
++            continue;
++        }
++        plan->track = track;
++        if (!(track->type == TRACK_H264 ? plan_video(plan, start) : plan_audio(plan, start)))
++        {
++            log_error("MPEG-4 writer leaves out the %s track: nothing of it is in the picture's time", track_name(track));
++            free(plan->decode);
++            free(plan->offset);
++            memset(plan, 0, sizeof(*plan));
++            continue;
++        }
++        plan->id = ++count;
++        for (j = 0; j < plan->edit_count; ++j) plan->movie_duration += plan->edits[j].segment;
++        log_trace("MPEG-4 writer %s track: %zu samples, %.3f s%s", track_name(track), track->count,
++                (double)plan->movie_duration / MOVIE_TIMESCALE, track->refused ? ", some left out" : "");
++    }
++    if (!count)
++    {
++        log_error("MPEG-4 writer has nothing to finish");
++        goto done;
++    }
++
++    /* The index goes first, so players can start before they have the whole file. Its
++     * size does not depend on the offsets it holds, only on their width. */
++    now = (uint32_t)(time(NULL) + SECONDS_1904_TO_1970);
++    mdat_size = writer->payload_size + 8 > 0xffffffffu ? writer->payload_size + 16 : writer->payload_size + 8;
++    for (;;)
++    {
++        header.size = 0;
++        put_ftyp(&header);
++        put_moov(&header, plans, count, now, 0, co64);
++        base = header.size + (mdat_size - writer->payload_size);
++        if (co64 || base + writer->payload_size <= 0xffffffffu) break;
++        co64 = 1;
++    }
++    header.size = 0;
++    put_ftyp(&header);
++    put_moov(&header, plans, count, now, base, co64);
++    if (mdat_size - writer->payload_size == 16)
++    {
++        put_u32(&header, 1);
++        put_bytes(&header, "mdat", 4);
++        put_u64(&header, mdat_size);
++    }
++    else
++    {
++        put_u32(&header, (uint32_t)mdat_size);
++        put_bytes(&header, "mdat", 4);
++    }
++    if (header.failed)
++    {
++        log_error("MPEG-4 writer is out of memory for the file's index");
++        free(header.data);
++        goto done;
++    }
++    free(writer->header);
++    writer->header = header.data;
++    writer->header_size = header.size;
++    *size = header.size + writer->payload_size;
++    log_trace("MPEG-4 writer finished %llu bytes with %u tracks", (unsigned long long)*size, count);
++    ret = MACMF_OK;
++
++done:
++    for (i = 0; i < MAX_TRACKS; ++i)
++    {
++        free(plans[i].decode);
++        free(plans[i].offset);
++    }
++    return ret;
++}
++
++/* ------------------------------------------------------------------------ */
++/* Entry points                                                             */
++/* ------------------------------------------------------------------------ */
++
++static void temporary_directory(char *path, size_t size)
++{
++    const char *variable = getenv("TMPDIR");
++    char user[PATH_MAX];
++
++    if (variable && *variable) snprintf(path, size, "%s", variable);
++    else if (confstr(_CS_DARWIN_USER_TEMP_DIR, user, sizeof(user)) > 0) snprintf(path, size, "%s", user);
++    else snprintf(path, size, "/tmp");
++}
++
++void *macmf_muxer_create(void)
++{
++    struct mp4_writer *writer;
++    char folder[PATH_MAX];
++    size_t length;
++
++    if (!(writer = calloc(1, sizeof(*writer)))) return NULL;
++    temporary_directory(folder, sizeof(folder));
++    length = strlen(folder);
++    while (length > 1 && folder[length - 1] == '/') folder[--length] = 0;
++    snprintf(writer->directory, sizeof(writer->directory), "%s/winemacmf-XXXXXX", folder);
++    if (!mkdtemp(writer->directory))
++    {
++        log_error("No temporary folder for the MPEG-4 writer in %s", folder);
++        free(writer);
++        return NULL;
++    }
++    snprintf(writer->path, sizeof(writer->path), "%s/samples", writer->directory);
++    if (!(writer->payload = fopen(writer->path, "w+b")))
++    {
++        log_error("MPEG-4 writer could not create %s", writer->path);
++        rmdir(writer->directory);
++        free(writer);
++        return NULL;
++    }
++    setvbuf(writer->payload, NULL, _IOFBF, 1 << 20);
++    pthread_mutex_init(&writer->lock, NULL);
++    return writer;
++}
++
++void macmf_muxer_destroy(void *object)
++{
++    struct mp4_writer *writer = object;
++    unsigned int i;
++
++    if (!writer) return;
++    if (writer->payload) fclose(writer->payload);
++    unlink(writer->path);
++    rmdir(writer->directory);
++    for (i = 0; i < writer->track_count; ++i)
++    {
++        free(writer->tracks[i].config);
++        free(writer->tracks[i].avcc);
++        free(writer->tracks[i].samples);
++    }
++    free(writer->scratch);
++    free(writer->header);
++    pthread_mutex_destroy(&writer->lock);
++    free(writer);
++}
++
++int macmf_muxer_add_track(void *object, uint32_t type, uint32_t width, uint32_t height, uint32_t sample_rate,
++        uint32_t channels, uint32_t priming, const uint8_t *config, uint32_t config_size)
++{
++    struct mp4_writer *writer = object;
++    struct mp4_track *track;
++    int index = MACMF_ERROR;
++
++    (void)priming;  /* AAC frame times already place the priming before the sound */
++    if (type != TRACK_H264 && type != TRACK_AAC) return MACMF_ERROR;
++    if (type == TRACK_AAC && (!sample_rate || !channels || config_size < 2))
++    {
++        log_error("MPEG-4 writer cannot take an audio track of %u Hz, %u channels, %u config bytes",
++                sample_rate, channels, config_size);
++        return MACMF_ERROR;
++    }
++    pthread_mutex_lock(&writer->lock);
++    if (writer->track_count < MAX_TRACKS && !writer->header)
++    {
++        track = &writer->tracks[writer->track_count];
++        memset(track, 0, sizeof(*track));
++        track->type = (int)type;
++        track->width = width;
++        track->height = height;
++        track->sample_rate = sample_rate;
++        track->channels = channels;
++        if (config_size && (track->config = malloc(config_size)))
++        {
++            memcpy(track->config, config, config_size);
++            track->config_size = config_size;
++        }
++        if (type != TRACK_AAC || track->config) index = (int)writer->track_count++;
++    }
++    pthread_mutex_unlock(&writer->lock);
++    return index;
++}
++
++int macmf_muxer_write(void *object, uint32_t index, const uint8_t *data, uint32_t size,
++        int64_t time, int64_t decode_time, int64_t duration, int keyframe)
++{
++    struct mp4_writer *writer = object;
++    struct mp4_track *track;
++    uint32_t length;
++    int ret = MACMF_OK;
++
++    pthread_mutex_lock(&writer->lock);
++    if (writer->failed || writer->header || index >= writer->track_count)
++    {
++        pthread_mutex_unlock(&writer->lock);
++        return MACMF_ERROR;
++    }
++    track = &writer->tracks[index];
++    if (!size)
++    {
++        pthread_mutex_unlock(&writer->lock);
++        return MACMF_OK;
++    }
++
++    if (track->type == TRACK_AAC)
++        ret = writer_append(writer, track, data, size, time, time, duration, 1);
++    else
++    {
++        if (!track->avcc)
++        {
++            if (!track->config || !track_take_h264_format(track, track->config, track->config_size))
++                track_take_h264_format(track, data, size);
++        }
++        /* Nothing before the first key frame can be decoded. */
++        if (track->avcc && (track->count || keyframe))
++        {
++            if (!(length = avcc_from_annexb(writer, data, size))) track_refuse(track, (unsigned int)track->count,
++                    "no picture in the access unit");
++            else ret = writer_append(writer, track, writer->scratch, length, time, decode_time, duration, keyframe);
++        }
++    }
++    pthread_mutex_unlock(&writer->lock);
++    return ret;
++}
++
++int macmf_muxer_finish(void *object, uint64_t *size)
++{
++    struct mp4_writer *writer = object;
++    int ret;
++
++    pthread_mutex_lock(&writer->lock);
++    ret = writer_finish(writer, size);
++    pthread_mutex_unlock(&writer->lock);
++    return ret;
++}
++
++int macmf_muxer_read(void *object, uint64_t offset, uint8_t *data, uint32_t capacity, uint32_t *size)
++{
++    struct mp4_writer *writer = object;
++    uint32_t done = 0;
++    ssize_t count;
++
++    *size = 0;
++    pthread_mutex_lock(&writer->lock);
++    if (!writer->header)
++    {
++        pthread_mutex_unlock(&writer->lock);
++        return MACMF_ERROR;
++    }
++    if (offset < writer->header_size)
++    {
++        done = (uint32_t)(writer->header_size - offset < capacity ? writer->header_size - offset : capacity);
++        memcpy(data, writer->header + offset, done);
++        offset += done;
++    }
++    if (done < capacity && offset >= writer->header_size && offset - writer->header_size < writer->payload_size)
++    {
++        count = pread(fileno(writer->payload), data + done, capacity - done, (off_t)(offset - writer->header_size));
++        if (count < 0)
++        {
++            log_error("MPEG-4 writer could not read its temporary file %s", writer->path);
++            pthread_mutex_unlock(&writer->lock);
++            return MACMF_ERROR;
++        }
++        done += (uint32_t)count;
++    }
++    pthread_mutex_unlock(&writer->lock);
++    *size = done;
++    return MACMF_OK;
++}
 diff --git a/dlls/winemacmf/mpeg4_sink.c b/dlls/winemacmf/mpeg4_sink.c
 new file mode 100644
-index 0000000..ede55bf
+index 0000000..7cc9cb0
 --- /dev/null
 +++ b/dlls/winemacmf/mpeg4_sink.c
-@@ -0,0 +1,1155 @@
+@@ -0,0 +1,1164 @@
 +/*
 + * MPEG-4 media sink on AVFoundation's writer
 + *
@@ -4872,8 +5539,10 @@ index 0000000..ede55bf
 +DEFINE_GUID(MFSampleExtension_DecodeTimestamp_sink, 0x73a954d4, 0x09e2, 0x4861, 0xbe, 0xfc, 0x94, 0xbd, 0x97, 0xc0, 0x8e, 0x6e);
 +
 +#define MAX_STREAMS 8
-+/* Sample requests kept open per stream, so the writer never waits on the sink. */
-+#define REQUESTS_AHEAD 4
++/* Sample requests kept open per stream, so the writer never waits on the sink. The sink
++ * takes each sample at once; the requests reach the writer through the standard work queue,
++ * so many open ones keep samples flowing while that queue is held up. */
++#define REQUESTS_AHEAD 64
 +
 +enum stream_kind
 +{
@@ -4894,9 +5563,12 @@ index 0000000..ede55bf
 +    IMFMediaType *type;
 +    DWORD id;
 +    enum stream_kind kind;
-+    UINT32 track;
++    UINT32 track;           /* NO_TRACK when the file leaves the stream out */
 +    UINT64 written;
++    UINT64 refused;
 +};
++
++#define NO_TRACK (~0u)
 +
 +enum sink_state
 +{
@@ -4910,7 +5582,6 @@ index 0000000..ede55bf
 +{
 +    IMFFinalizableMediaSink IMFFinalizableMediaSink_iface;
 +    IMFClockStateSink IMFClockStateSink_iface;
-+    IMFAsyncCallback finalize_callback;
 +    LONG refcount;
 +
 +    CRITICAL_SECTION cs;
@@ -4948,11 +5619,6 @@ index 0000000..ede55bf
 +static struct mpeg4_sink *impl_from_IMFClockStateSink(IMFClockStateSink *iface)
 +{
 +    return CONTAINING_RECORD(iface, struct mpeg4_sink, IMFClockStateSink_iface);
-+}
-+
-+static struct mpeg4_sink *impl_from_finalize_callback(IMFAsyncCallback *iface)
-+{
-+    return CONTAINING_RECORD(iface, struct mpeg4_sink, finalize_callback);
 +}
 +
 +/* What kind of stream a media type describes, if the sink can write it. */
@@ -5123,6 +5789,7 @@ index 0000000..ede55bf
 +        hr = MF_E_INVALIDREQUEST;
 +        goto done;
 +    }
++    if (stream->track == NO_TRACK) goto request;
 +    if (FAILED(hr = IMFSample_GetSampleTime(sample, &time))) goto done;
 +    if (FAILED(IMFSample_GetSampleDuration(sample, &duration))) duration = 0;
 +    if (FAILED(hr = IMFSample_ConvertToContiguousBuffer(sample, &buffer))) goto done;
@@ -5143,17 +5810,16 @@ index 0000000..ede55bf
 +    else
 +        params.keyframe = stream->kind == STREAM_AAC || buffer_has_idr(data, length);
 +
-+    if (length && UNIX_CALL(muxer_write, &params))
-+    {
-+        WARN("The MPEG-4 writer refused a sample of stream %lu.\n", stream->id);
-+        hr = E_FAIL;
-+    }
++    /* One sample the writer cannot take costs that sample, not the file. */
++    if (length && UNIX_CALL(muxer_write, &params) && !stream->refused++)
++        ERR("The MPEG-4 writer left out sample %I64u of stream %lu; the file keeps the rest.\n",
++                stream->written, stream->id);
 +    IMFMediaBuffer_Unlock(buffer);
 +    stream->written++;
 +
-+    if (SUCCEEDED(hr))
-+        hr = IMFMediaEventQueue_QueueEventParamVar(stream->event_queue, MEStreamSinkRequestSample,
-+                &GUID_NULL, S_OK, NULL);
++request:
++    hr = IMFMediaEventQueue_QueueEventParamVar(stream->event_queue, MEStreamSinkRequestSample,
++            &GUID_NULL, S_OK, NULL);
 +
 +done:
 +    if (buffer) IMFMediaBuffer_Release(buffer);
@@ -5601,11 +6267,15 @@ index 0000000..ede55bf
 +        ERR("The MPEG-4 writer could not finish the file.\n");
 +        return E_FAIL;
 +    }
++    if (FAILED(hr = IMFByteStream_SetCurrentPosition(sink->bytestream, 0)))
++    {
++        ERR("The file cannot be written from its start, hr %#lx.\n", hr);
++        return hr;
++    }
 +    if (!(chunk = malloc(1 << 20))) return E_OUTOFMEMORY;
 +    read.handle = sink->muxer;
 +    read.data = (UINT_PTR)chunk;
 +    read.capacity = 1 << 20;
-+    IMFByteStream_SetCurrentPosition(sink->bytestream, 0);
 +    for (offset = 0; offset < finish.size && SUCCEEDED(hr); offset += read.size)
 +    {
 +        read.offset = offset;
@@ -5618,44 +6288,29 @@ index 0000000..ede55bf
 +            hr = E_FAIL;
 +    }
 +    free(chunk);
++    /* Wine's file byte streams write at once and do not implement Flush. */
 +    if (SUCCEEDED(hr)) IMFByteStream_Flush(sink->bytestream);
-+    TRACE("Wrote %I64u bytes, hr %#lx.\n", finish.size, hr);
++    if (FAILED(hr)) ERR("Could not write the file's %I64u bytes, hr %#lx.\n", finish.size, hr);
++    else TRACE("Wrote %I64u bytes.\n", finish.size);
 +    return hr;
 +}
 +
-+static HRESULT WINAPI finalize_callback_QueryInterface(IMFAsyncCallback *iface, REFIID riid, void **out)
++struct finalize_work
 +{
-+    if (IsEqualIID(riid, &IID_IMFAsyncCallback) || IsEqualIID(riid, &IID_IUnknown))
-+    {
-+        *out = iface;
-+        IMFAsyncCallback_AddRef(iface);
-+        return S_OK;
-+    }
-+    *out = NULL;
-+    return E_NOINTERFACE;
-+}
++    struct mpeg4_sink *sink;
++    IMFAsyncCallback *callback;
++    IMFAsyncResult *result;
++};
 +
-+static ULONG WINAPI finalize_callback_AddRef(IMFAsyncCallback *iface)
++/* Finishing runs on a thread of its own and calls back from it. It used to be a work item
++ * on Media Foundation's standard queue, whose single thread also carries the program's
++ * and the sink writer's callbacks: when that thread was held up the file was never
++ * written, although the game had already said the highlight was saved. */
++static DWORD WINAPI finalize_thread(void *arg)
 +{
-+    struct mpeg4_sink *sink = impl_from_finalize_callback(iface);
-+    return IMFFinalizableMediaSink_AddRef(&sink->IMFFinalizableMediaSink_iface);
-+}
-+
-+static ULONG WINAPI finalize_callback_Release(IMFAsyncCallback *iface)
-+{
-+    struct mpeg4_sink *sink = impl_from_finalize_callback(iface);
-+    return IMFFinalizableMediaSink_Release(&sink->IMFFinalizableMediaSink_iface);
-+}
-+
-+static HRESULT WINAPI finalize_callback_GetParameters(IMFAsyncCallback *iface, DWORD *flags, DWORD *queue)
-+{
-+    return E_NOTIMPL;
-+}
-+
-+static HRESULT WINAPI finalize_callback_Invoke(IMFAsyncCallback *iface, IMFAsyncResult *work)
-+{
-+    struct mpeg4_sink *sink = impl_from_finalize_callback(iface);
-+    IMFAsyncResult *result = (IMFAsyncResult *)IMFAsyncResult_GetStateNoAddRef(work);
++    struct finalize_work *work = arg;
++    struct mpeg4_sink *sink = work->sink;
++    DWORD start = GetTickCount();
 +    HRESULT hr;
 +
 +    EnterCriticalSection(&sink->cs);
@@ -5665,38 +6320,53 @@ index 0000000..ede55bf
 +    sink->state = SINK_FINALIZED;
 +    LeaveCriticalSection(&sink->cs);
 +
-+    IMFAsyncResult_SetStatus(result, hr);
-+    MFInvokeCallback(result);
-+    return S_OK;
-+}
++    if (FAILED(hr)) ERR("The MPEG-4 file was not written, hr %#lx.\n", hr);
++    else TRACE("Finished the file in %lu ms.\n", GetTickCount() - start);
 +
-+static const IMFAsyncCallbackVtbl finalize_callback_vtbl =
-+{
-+    finalize_callback_QueryInterface,
-+    finalize_callback_AddRef,
-+    finalize_callback_Release,
-+    finalize_callback_GetParameters,
-+    finalize_callback_Invoke,
-+};
++    IMFAsyncResult_SetStatus(work->result, hr);
++    IMFAsyncCallback_Invoke(work->callback, work->result);
++    IMFAsyncResult_Release(work->result);
++    IMFFinalizableMediaSink_Release(&sink->IMFFinalizableMediaSink_iface);
++    free(work);
++    return 0;
++}
 +
 +static HRESULT WINAPI sink_BeginFinalize(IMFFinalizableMediaSink *iface, IMFAsyncCallback *callback, IUnknown *state)
 +{
 +    struct mpeg4_sink *sink = impl_from_IMFFinalizableMediaSink(iface);
-+    IMFAsyncResult *result;
++    struct finalize_work *work;
++    HANDLE thread;
 +    HRESULT hr;
 +
 +    TRACE("iface %p, callback %p, state %p.\n", iface, callback, state);
 +
++    if (!callback) return E_INVALIDARG;
++    if (!(work = calloc(1, sizeof(*work)))) return E_OUTOFMEMORY;
++
 +    EnterCriticalSection(&sink->cs);
 +    if (sink->shutdown) hr = MF_E_SHUTDOWN;
 +    else if (sink->state == SINK_FINALIZING || sink->state == SINK_FINALIZED) hr = MF_E_INVALIDREQUEST;
-+    else if (SUCCEEDED(hr = MFCreateAsyncResult(NULL, callback, state, &result)))
++    else if (SUCCEEDED(hr = MFCreateAsyncResult(NULL, callback, state, &work->result)))
 +    {
-+        sink->state = SINK_FINALIZING;
-+        hr = MFPutWorkItem(MFASYNC_CALLBACK_QUEUE_STANDARD, &sink->finalize_callback, (IUnknown *)result);
-+        IMFAsyncResult_Release(result);
++        work->sink = sink;
++        work->callback = callback;
++        IMFFinalizableMediaSink_AddRef(iface);
++        if ((thread = CreateThread(NULL, 0, finalize_thread, work, 0, NULL)))
++        {
++            sink->state = SINK_FINALIZING;
++            CloseHandle(thread);
++            work = NULL;
++        }
++        else
++        {
++            hr = HRESULT_FROM_WIN32(GetLastError());
++            ERR("No thread to finish the file, hr %#lx.\n", hr);
++            IMFAsyncResult_Release(work->result);
++            IMFFinalizableMediaSink_Release(iface);
++        }
 +    }
 +    LeaveCriticalSection(&sink->cs);
++    free(work);
 +    return hr;
 +}
 +
@@ -5773,7 +6443,7 @@ index 0000000..ede55bf
 +    BYTE config[256];
 +    UINT32 size;
 +    UINT64 frame_size;
-+    DWORD i;
++    DWORD i, tracks = 0;
 +
 +    if (sink->muxer) return S_OK;
 +    if (UNIX_CALL(muxer_create, &create)) return E_FAIL;
@@ -5807,10 +6477,17 @@ index 0000000..ede55bf
 +        }
 +        if (UNIX_CALL(muxer_add_track, &track))
 +        {
-+            ERR("The MPEG-4 writer cannot take stream %lu.\n", stream->id);
-+            return E_FAIL;
++            ERR("The MPEG-4 writer cannot take stream %lu; the file leaves it out.\n", stream->id);
++            stream->track = NO_TRACK;
++            continue;
 +        }
 +        stream->track = track.track;
++        ++tracks;
++    }
++    if (!tracks)
++    {
++        ERR("The MPEG-4 writer can take none of the %lu streams.\n", sink->stream_count);
++        return E_FAIL;
 +    }
 +    return S_OK;
 +}
@@ -5914,7 +6591,6 @@ index 0000000..ede55bf
 +    if (!(sink = calloc(1, sizeof(*sink)))) return E_OUTOFMEMORY;
 +    sink->IMFFinalizableMediaSink_iface.lpVtbl = &sink_vtbl;
 +    sink->IMFClockStateSink_iface.lpVtbl = &clock_sink_vtbl;
-+    sink->finalize_callback.lpVtbl = &finalize_callback_vtbl;
 +    sink->refcount = 1;
 +    InitializeCriticalSection(&sink->cs);
 +    IMFByteStream_AddRef((sink->bytestream = bytestream));
