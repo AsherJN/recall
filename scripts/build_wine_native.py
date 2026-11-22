@@ -31,6 +31,12 @@ Experiments (each tree is a git repository whose first commit is the unmodified 
   win32u      runtime/source/wine-win32u (the Phase 2 tree's dlls/win32u).
               WINE_DISPLAY_LOG=<file> logs every display-device update: forced or not,
               why, from where, and how long it took.
+              A font's instance id that outlives the font is refused (1.6.7): a freed
+              entry of the font handle table links the free list, and win32u took it for
+              a font, so NtGdiGetFontFileData faulted with the font lock held and the lock
+              was never released. Wine's DirectWrite keeps such ids for fonts a program
+              loads from memory; Battle.net froze on every game's Install (#80, #81;
+              tests/font_handles/run.py).
   winebus     The Phase 2 tree's dlls/winebus.sys, unmodified, compiled with SDL2 (1.2).
               Wine's configure did not find SDL2's headers, so the shipped controller bus
               has no SDL support: winebus passes PlayStation pads through as raw HID and

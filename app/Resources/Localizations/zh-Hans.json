@@ -903,7 +903,8 @@
     "Select Overwatch in Favorites, then choose **Install** or **Play**.": "在收藏中选择守望先锋，然后选择**安装**或**开始游戏**。",
     "Still missing? Close Battle.net and open it again from {0}. If that doesn’t help, send a report from the **Support** tab. Uninstalling {0} won’t fix it: it removes Overwatch too, so the whole game downloads again.": "仍然没有？关闭战网，然后从 {0} 重新打开。如果仍无效，请在**支持**标签页发送报告。卸载 {0} 无法解决问题：这会把守望先锋一起移除，整个游戏需要重新下载。",
     "Finish installing in the Battle.net installer. When it’s done, {0} opens Battle.net for you to sign in.\n\nIf Battle.net doesn’t open by itself, choose Continue.": "请在战网安装程序中完成安装。完成后，{0} 会为你打开战网，你可以在那里登录。\n\n如果战网没有自动打开，请在这里选择“继续”。",
-    "More fixes": "更多修复",
+    "Installing games": "安装游戏",
+    "Fixed Battle.net freezing when you click Install on a game.": "修复了在战网中点击游戏的“安装”后战网卡住不动的问题。",
     "Overwatch’s picture froze because your Mac’s graphics stopped responding, so {0} closed the game. Open Battle.net and play again to get back in.": "你的 Mac 图形处理停止响应，守望先锋的画面因此卡住，{0} 已关闭游戏。打开战网并重新开始游戏即可回来。",
     "Overwatch’s graphics stopped responding once.": "守望先锋的图形处理停止响应了一次。",
     "Overwatch’s graphics stopped responding {0} times.": "守望先锋的图形处理停止响应了 {0} 次。",
@@ -1030,9 +1031,7 @@
     "Highlights are saved in **Movies › Overwatch** on your Mac. Overwatch keeps unsaved highlights only until it closes, so save the ones you want first. If a save doesn’t finish, save it again.": "精彩时刻保存在 Mac 的**影片 › Overwatch**中。守望先锋关闭后，未保存的精彩时刻就会消失，所以请先保存你想保留的。如果存储没有完成，请再存储一次。",
     "Double-click to open in QuickTime": "连按两次即可用 QuickTime 打开",
     "Double-click to open": "连按两次即可打开",
-    "Open **Highlights** in {0}. Move the pointer across a clip to look through it, or double-click it to watch it in QuickTime.": "在 {0} 中打开**精彩时刻**。将指针在视频上移动即可快速浏览，连按两次即可用 QuickTime 观看。",
-    "Fixed MP4 highlights saving as empty files on some Macs. A save that doesn’t finish now shows in the Highlights window, with a link to Help.": "修复了在部分 Mac 上 MP4 精彩时刻存储为空文件的问题。未完成的存储现在会显示在“精彩时刻”窗口中，并附有帮助链接。",
-    "Improved the Highlights window. Clips are named after their hero and grouped by day, Copy for Discord makes a copy that fits Discord’s upload limit, and Save Just the Play and Trim… save just the part you want as a new clip.": "改进了“精彩时刻”窗口。片段会以英雄名称命名并按日期分组，“为 Discord 拷贝”会生成符合 Discord 上传限制的副本，“仅存储游戏画面”和“修剪…”可以把你想要的部分存储为新片段。"
+    "Open **Highlights** in {0}. Move the pointer across a clip to look through it, or double-click it to watch it in QuickTime.": "在 {0} 中打开**精彩时刻**。将指针在视频上移动即可快速浏览，连按两次即可用 QuickTime 观看。"
   },
   "InfoPlist": {
     "Voice chat in Overwatch uses your microphone.": "守望先锋的语音聊天会使用你的麦克风。",

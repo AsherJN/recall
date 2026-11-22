@@ -146,6 +146,14 @@ Overwatch sees 96 as before. From 1.6 Recall turns Retina mode on only when the
 main display is a Retina one; without it each Windows pixel is a point and
 Battle.net keeps 96.
 
+From 1.6.7 the same patch has win32u refuse a font's instance id once the font
+is freed. Wine's DirectWrite keeps those ids for fonts a program loads from
+memory, and Wine frees a font soon after its last use. win32u took the freed
+entry of its handle table for a font, faulted with its font lock held and never
+released the lock, so Battle.net froze when a player clicked Install on a game
+(#80, #81). `tests/font_handles/run.py` shows both behaviours against real
+engines.
+
 `wine-winemac-activation.patch` applies to the Mac driver after the two driver
 patches above:
 - Diablo III's first exclusive display-mode request is applied before returning,

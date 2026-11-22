@@ -1,3 +1,58 @@
+diff --git a/dlls/win32u/font.c b/dlls/win32u/font.c
+index 449a23c..b3bd7b3 100644
+--- a/dlls/win32u/font.c
++++ b/dlls/win32u/font.c
+@@ -2411,6 +2411,7 @@ struct font_handle_entry
+ {
+     struct gdi_font *font;
+     WORD generation; /* generation count for reusing handle values */
++    WORD used;       /* a free entry's font member links the free list: it is not a font */
+ };
+ 
+ static struct font_handle_entry font_handles[MAX_FONT_HANDLES];
+@@ -2421,7 +2422,11 @@ static struct font_handle_entry *handle_entry( unsigned int handle )
+ {
+     unsigned int idx = LOWORD(handle) - FIRST_FONT_HANDLE;
+ 
+-    if (idx < MAX_FONT_HANDLES)
++    /* A handle outlives its font wherever a program keeps the instance id (dwrite's font
++     * streams do). A freed entry's font member points at the next free entry, so handing it
++     * out made callers read the handle table as a font: NtGdiGetFontFileData then faulted
++     * inside FreeType with font_lock held, and the lock was never released. */
++    if (idx < MAX_FONT_HANDLES && font_handles[idx].used)
+     {
+         if (!HIWORD( handle ) || HIWORD( handle ) == font_handles[idx].generation)
+             return &font_handles[idx];
+@@ -2454,6 +2459,7 @@ static DWORD alloc_font_handle( struct gdi_font *font )
+         return 0;
+     }
+     entry->font = font;
++    entry->used = 1;
+     if (++entry->generation == 0xffff) entry->generation = 1;
+     return MAKELONG( entry - font_handles + FIRST_FONT_HANDLE, entry->generation );
+ }
+@@ -2464,6 +2470,7 @@ static void free_font_handle( DWORD handle )
+ 
+     if ((entry = handle_entry( handle )))
+     {
++        entry->used = 0;
+         entry->font = (struct gdi_font *)next_free;
+         next_free = entry;
+     }
+@@ -7036,7 +7043,12 @@ BOOL WINAPI NtGdiGetFontFileData( DWORD instance_id, DWORD file_index, UINT64 *o
+ 
+     if (!font_funcs) return FALSE;
+     pthread_mutex_lock( &font_lock );
+-    if ((font = get_font_from_handle( instance_id )))
++    if ((font = get_font_from_handle( instance_id )) && !font->private)
++    {
++        /* a linked font is only loaded when a glyph first needs it: it has no data to read yet */
++        RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
++    }
++    else if (font)
+     {
+         if (font->ttc_item_offset) tag = MS_TTCF_TAG;
+         size = font_funcs->get_font_data( font, tag, 0, NULL, 0 );
 diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
 index 8798fbf..9750770 100644
 --- a/dlls/win32u/sysparams.c

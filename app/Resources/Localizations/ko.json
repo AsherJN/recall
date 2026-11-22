@@ -903,7 +903,8 @@
     "Select Overwatch in Favorites, then choose **Install** or **Play**.": "즐겨찾기에서 오버워치를 선택한 다음 **설치** 또는 **플레이**를 선택하세요.",
     "Still missing? Close Battle.net and open it again from {0}. If that doesn’t help, send a report from the **Support** tab. Uninstalling {0} won’t fix it: it removes Overwatch too, so the whole game downloads again.": "그래도 없나요? Battle.net을 닫고 {0}에서 다시 여세요. 그래도 해결되지 않으면 **지원** 탭에서 보고서를 보내 주세요. {0}을 제거해도 해결되지 않습니다. 오버워치도 함께 제거되어 게임 전체를 다시 다운로드해야 합니다.",
     "Finish installing in the Battle.net installer. When it’s done, {0} opens Battle.net for you to sign in.\n\nIf Battle.net doesn’t open by itself, choose Continue.": "Battle.net 설치 프로그램에서 설치를 마치세요. 설치가 끝나면 {0}이 Battle.net을 열어 주며, 그곳에서 로그인할 수 있습니다.\n\nBattle.net이 저절로 열리지 않으면 여기에서 ‘계속’을 선택하세요.",
-    "More fixes": "기타 수정 사항",
+    "Installing games": "게임 설치",
+    "Fixed Battle.net freezing when you click Install on a game.": "Battle.net에서 게임의 ‘설치’를 클릭하면 Battle.net이 멈추던 문제를 수정했습니다.",
     "Overwatch’s picture froze because your Mac’s graphics stopped responding, so {0} closed the game. Open Battle.net and play again to get back in.": "Mac의 그래픽이 응답하지 않아 오버워치 화면이 멈췄고, {0}이 게임을 종료했습니다. Battle.net을 열고 다시 플레이하면 돌아갈 수 있습니다.",
     "Overwatch’s graphics stopped responding once.": "오버워치의 그래픽이 한 번 응답하지 않았습니다.",
     "Overwatch’s graphics stopped responding {0} times.": "오버워치의 그래픽이 {0}번 응답하지 않았습니다.",
@@ -1030,9 +1031,7 @@
     "Highlights are saved in **Movies › Overwatch** on your Mac. Overwatch keeps unsaved highlights only until it closes, so save the ones you want first. If a save doesn’t finish, save it again.": "하이라이트는 Mac의 **동영상 › Overwatch**에 저장됩니다. 오버워치는 저장하지 않은 하이라이트를 게임을 닫을 때까지만 보관하므로, 원하는 하이라이트는 먼저 저장하세요. 저장이 완료되지 않았다면 다시 저장하세요.",
     "Double-click to open in QuickTime": "이중 클릭하면 QuickTime으로 열립니다",
     "Double-click to open": "이중 클릭하면 열립니다",
-    "Open **Highlights** in {0}. Move the pointer across a clip to look through it, or double-click it to watch it in QuickTime.": "{0}에서 **하이라이트**를 여세요. 클립 위에서 포인터를 움직이면 훑어볼 수 있고, 이중 클릭하면 QuickTime으로 볼 수 있습니다.",
-    "Fixed MP4 highlights saving as empty files on some Macs. A save that doesn’t finish now shows in the Highlights window, with a link to Help.": "일부 Mac에서 MP4 하이라이트가 빈 파일로 저장되던 문제를 수정했습니다. 저장이 완료되지 않으면 이제 하이라이트 창에 표시되고 도움말 링크가 함께 나옵니다.",
-    "Improved the Highlights window. Clips are named after their hero and grouped by day, Copy for Discord makes a copy that fits Discord’s upload limit, and Save Just the Play and Trim… save just the part you want as a new clip.": "하이라이트 창을 개선했습니다. 클립이 영웅 이름으로 표시되고 날짜별로 묶이며, ‘Discord용으로 복사’는 Discord 업로드 제한에 맞는 사본을 만들고, ‘플레이 부분만 저장’과 ‘다듬기…’는 원하는 부분만 새 클립으로 저장합니다."
+    "Open **Highlights** in {0}. Move the pointer across a clip to look through it, or double-click it to watch it in QuickTime.": "{0}에서 **하이라이트**를 여세요. 클립 위에서 포인터를 움직이면 훑어볼 수 있고, 이중 클릭하면 QuickTime으로 볼 수 있습니다."
   },
   "InfoPlist": {
     "Voice chat in Overwatch uses your microphone.": "오버워치의 음성 채팅에 마이크를 사용합니다.",

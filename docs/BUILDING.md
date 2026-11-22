@@ -261,6 +261,13 @@ then `scripts/derive_runtime.py --native winemac`): Diablo III's first exclusive
 applied before macOS first activates the game, so the game no longer sets up its picture for the old
 desktop mode. Every other program takes the same path as before.
 
+Runtime `phase2-20261122.1` is `phase2-20261119.2` (1.6.6's engine) with only `win32u.so` replaced,
+built with the updated `patches/wine-win32u-display-log.patch` (`scripts/build_wine_native.py win32u`,
+then `scripts/derive_runtime.py --native win32u`): win32u refuses a font's instance id once the font
+is freed, so a program that keeps one (Battle.net, through Wine's DirectWrite) no longer leaves
+win32u's font lock held and freezes. `tests/font_handles/run.py` checks it against the engine, with
+`phase2-20261119.2` as the control.
+
 Runtime `phase2-20261007.2` is `phase2-20261007.1` with only the Mac driver
 replaced (`scripts/build_wine_native.py winemac`, then `scripts/derive_runtime.py
 --native winemac`), built with the updated `patches/wine-winemac-activation.patch`: with

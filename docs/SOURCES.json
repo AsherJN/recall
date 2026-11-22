@@ -63,7 +63,7 @@
     },
     {
      "patch": "patches/wine-win32u-display-log.patch",
-     "sha256": "2387fa06d76891b7b5981473bb06b3b939e2c7569f79b6e3a7cbf12c21297568"
+     "sha256": "80274025293382aef5d3042e11cea71e855a3768589b3ef6f57a9f9a3e026613"
     },
     {
      "patch": "patches/wine-winemac-activation.patch",
@@ -187,7 +187,7 @@
   },
   {
    "path": "patches/wine-win32u-display-log.patch",
-   "sha256": "2387fa06d76891b7b5981473bb06b3b939e2c7569f79b6e3a7cbf12c21297568"
+   "sha256": "80274025293382aef5d3042e11cea71e855a3768589b3ef6f57a9f9a3e026613"
   },
   {
    "path": "patches/wine-winemac-activation.patch",
