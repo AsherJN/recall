@@ -38,6 +38,8 @@ final class AppDelegate: NSObject { @objc func forceQuit() {} }
         precondition(ids("no window",troubleshooting).contains("screen"))
         for query in ["sidecar","ipad","airplay","main display"] { precondition(ids(query,troubleshooting).first == "screen",query) }
         for query in ["dictation","fn key","globe","🌐","control twice","microphone"] { precondition(ids(query,troubleshooting).contains("keys"),query) }
+        // Controls that stop for a moment with Game Mode on.
+        for query in ["game mode","keyboard mouse","catch up","held key"] { precondition(ids(query,troubleshooting).contains("pauses"),query) }
         precondition(ids("dictation",troubleshooting).first == "keys" && ids("fn key",troubleshooting).first == "keys")
         // REC-82: the words players use for moving the game to another drive.
         for query in ["move","external drive","ssd","another drive","install location"] { precondition(ids(query,questions).contains("move"),query) }
