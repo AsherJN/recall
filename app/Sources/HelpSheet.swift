@@ -221,6 +221,18 @@ extension HelpTopic {
                   answer:L("When your Mac runs low on memory, Overwatch has to wait for it. Your movement and aim then respond late even though your FPS looks normal, most in your first minute in a map or when you come back from another app."),
                   steps:[L("Quit apps you aren’t using. When your Mac is low on memory, {0} lists the apps using the most on the Play screen, with a **Quit** button.",Brand.name),
                          L("If you haven’t restarted your Mac in days, restart it. Over time macOS itself can hold on to memory, and a restart frees it.")]),
+        // November 26: with Game Mode on, a player's M4 Max on macOS 27.2 lost keyboard and mouse
+        // for up to 0.8 s at a time while FPS held. The mouse kept reporting, but macOS's events
+        // stopped reaching the game (Logging › Mouse: hid_released, key_delay_ms_max), and
+        // WindowServer logged GamePolicyAgent's HID event queue overflowing at those moments.
+        // Game Mode off, same evening and hardware: 3 such seconds in 487 instead of 29 in 469.
+        HelpTopic(id:"pauses",symbol:"pause.circle",title:L("My controls stop for a moment, then catch up"),
+                  answer:L("With Game Mode on, macOS can pause your keyboard and mouse for up to a second while Overwatch keeps running at full FPS. Your aim stops or a held key keeps going, then everything catches up."),
+                  steps:[L("Close Battle.net."),
+                         L("Turn off **Settings › Graphics › Game Mode**."),
+                         L("Play from {0}.",Brand.name)],
+                  note:L("After a macOS update or a change to Game Mode, {0} builds the shaders you’ve already used again. This can take a few minutes.",Brand.name),
+                  action:.settings(.graphics)),
         // REC-86: keys Windows players press out of habit (Rhythm, November 4; Max, October 26).
         HelpTopic(id:"keys",symbol:"keyboard.badge.ellipsis",title:L("A key takes me out of the game"),
                   answer:L("Some keys start a macOS feature in the middle of a match. Pressing Control twice can start Dictation, which turns on your microphone and makes the game and its sound stutter. The fn key, also called 🌐 Globe, can open a macOS popup."),

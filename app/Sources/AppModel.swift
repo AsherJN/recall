@@ -63,8 +63,11 @@ final class AppModel {
     /// every release since 1.1. Test builds of 1.6 had it off (owner, October 22) on the suspicion that
     /// it made Apple's mouse input for games lose movement, which a tester's run of October 23 showed with
     /// it off too (REC-51); it came back on once Cmd-Tab no longer brought the game back (REC-55,
-    /// owner). Battle.net carries it from when it opens, like the HUD. Support's switch from 1.1 is the
-    /// same default: defaults write org.overwatch2mac.launcher gameMode -bool false. bool(forKey:)
+    /// owner). November 26: with it on, a player's keyboard and mouse paused for up to 0.8 s while
+    /// GamePolicyAgent's HID event queue overflowed; Help › Troubleshooting › "My controls stop for a
+    /// moment, then catch up" says to turn it off. Battle.net carries it from when it opens, like the
+    /// HUD. Support's switch from 1.1 is the same default: defaults write
+    /// org.overwatch2mac.launcher gameMode -bool false. bool(forKey:)
     /// reads a string value too (as? Bool would not).
     var gameMode=UserDefaults.standard.object(forKey:"gameMode") == nil || UserDefaults.standard.bool(forKey:"gameMode") {
         didSet { UserDefaults.standard.set(gameMode,forKey:"gameMode") }

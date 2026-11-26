@@ -415,7 +415,9 @@ and after each macOS update. Settings › Graphics › Game Mode (`AppModel.game
 on by default; 1.6's test builds had it off, REC-51, until REC-55; support's `gameMode`
 default from 1.1 is the same setting) passes `launch --game-mode 0` when off, and the game then runs as Wine's own
 loader (`lib/wine/x86_64-unix/wine`, whose embedded Info.plist names it
-`com.codeweavers.CrossOver.wineloader`, a cache it shares with CrossOver). The worker
+`com.codeweavers.CrossOver.wineloader`, a cache it shares with CrossOver). With it on, macOS
+can pause the keyboard and mouse for up to a second while FPS holds; Help › Troubleshooting ›
+"My controls stop for a moment, then catch up" says to turn it off. The worker
 passes the program the game runs as (`gameProgram`), and a second helper,
 `pipeline-warm`, compiles every learned pipeline into that program's cache
 (`MTLSetShaderCachePath`, 16 at a time in one process) once per program, macOS version
